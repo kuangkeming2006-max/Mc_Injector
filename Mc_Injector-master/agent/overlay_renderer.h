@@ -19,7 +19,9 @@ struct OverlayInputState;
 struct FeatureSettings final {
     bool espEnabled = true;
     bool entityEspEnabled = true;
+    bool entityEspPlayersOnly = false;
     bool bedEspEnabled = true;
+    bool bedAutoRefreshEnabled = false;
     bool labelsEnabled = true;
     bool hypixelPanelEnabled = true;
     bool bedThreatAlertsEnabled = true;
@@ -133,9 +135,10 @@ private:
     std::array<char, 17U> m_hypixelQuery{};
     std::array<char, 17U> m_hypixelInput{};
     float m_clickGuiProgress = 0.0F;
-    float m_toggleAnimation[7]{};
-    float m_clickGuiX = -1.0F;
+    float m_toggleAnimation[9]{};
+    float m_clickGuiX = -9999.0F;
     float m_clickGuiY = 18.0F;
+    double m_lastBedRefreshTime = 0.0;
     int m_guiScaleIndex = 1;
     int m_appliedGuiScaleIndex = -1;
     float m_animatedGuiScale = 1.25F;

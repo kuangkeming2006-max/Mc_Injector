@@ -483,12 +483,9 @@ ApplicationWindow {
                         id: navPill
                         anchors.fill: parent
                         radius: 20
-                        // Selection and hover are separate layers. Animating a
-                        // color binding that alternated between transparent,
-                        // hover and selected colors caused two successive
-                        // darkening steps when the delegate state changed.
                         color: app.activeRoute === modelData.route
-                               ? app.primaryContainer : "transparent"
+                               ? app.primaryContainer
+                               : (navMouse.containsMouse ? "#E3DDE7" : "transparent")
                         scale: navMouse.pressed ? 0.985 : 1
                         transformOrigin: Item.Center
 
@@ -507,18 +504,6 @@ ApplicationWindow {
                             rippleColor: app.primaryColor
                             peakOpacity: 0.13
                             cornerRadius: navPill.radius
-                        }
-
-                        Rectangle {
-                            anchors.fill: parent
-                            radius: parent.radius
-                            color: "#E3DDE7"
-                            // Keep the hover wash translucent so the clipped ripple remains
-                            // visible.  A single animated layer avoids the previous two-step
-                            // darkening caused by animating both the pill and its overlay.
-                            opacity: navMouse.containsMouse
-                                     && app.activeRoute !== modelData.route ? 0.72 : 0
-                            Behavior on opacity { NumberAnimation { duration: 160 } }
                         }
 
                         RowLayout {

@@ -638,23 +638,21 @@ void OverlayRenderer::updateBedThreatAlerts(const GameSnapshot& snapshot) noexce
     constexpr double leaveDistance = 9.5;
     constexpr std::uint64_t perContactCooldown = 12000U;
     constexpr std::uint64_t globalCooldown = 1800U;
-    for (std::uint32_t entityIndex = 0U;
-         entityIndex < snapshot.entityMarkerCount; ++entityIndex) {
-        const EntityMarker& entity = snapshot.entityMarkers[entityIndex];
-        if (!entity.player) continue;
+
+    auto checkEntity = [&](const int id, const double ex, const double ey, const double ez) {
         for (std::uint32_t bedIndex = 0U; bedIndex < snapshot.bedMarkerCount; ++bedIndex) {
             const BedMarker& bed = snapshot.bedMarkers[bedIndex];
-            const double dx = std::min(std::abs(entity.currentX - (bed.x + 0.5)),
-                                       std::abs(entity.currentX - (bed.footX + 0.5)));
-            const double dz = std::min(std::abs(entity.currentZ - (bed.z + 0.5)),
-                                       std::abs(entity.currentZ - (bed.footZ + 0.5)));
-            const double dy = std::abs(entity.currentY - static_cast<double>(bed.y));
+            const double dx = std::min(std::abs(ex - (bed.x + 0.5)),
+                                       std::abs(ex - (bed.footX + 0.5)));
+            const double dz = std::min(std::abs(ez - (bed.z + 0.5)),
+                                       std::abs(ez - (bed.footZ + 0.5)));
+            const double dy = std::abs(ey - static_cast<double>(bed.y));
             const double distance = std::sqrt(dx * dx + dz * dz + dy * dy);
 
             ThreatContact* contact = nullptr;
             ThreatContact* oldest = &m_threatContacts.front();
             for (ThreatContact& candidate : m_threatContacts) {
-                if (candidate.entityId == entity.entityId && candidate.bedX == bed.x &&
+                if (candidate.entityId == id && candidate.bedX == bed.x &&
                     candidate.bedY == bed.y && candidate.bedZ == bed.z) {
                     contact = &candidate;
                     break;
@@ -665,7 +663,7 @@ void OverlayRenderer::updateBedThreatAlerts(const GameSnapshot& snapshot) noexce
             if (contact == nullptr) {
                 contact = oldest;
                 *contact = {};
-                contact->entityId = entity.entityId;
+                contact->entityId = id;
                 contact->bedX = bed.x;
                 contact->bedY = bed.y;
                 contact->bedZ = bed.z;
@@ -678,12 +676,23 @@ void OverlayRenderer::updateBedThreatAlerts(const GameSnapshot& snapshot) noexce
                 now - m_lastThreatToastTick >= globalCooldown) {
                 char message[52]{};
                 std::snprintf(message, sizeof(message),
-                              "Player #%d near bed  %.1fm", entity.entityId, distance);
+                              "Player #%d near bed  %.1fm", id, distance);
                 enqueueMessage(message, false);
                 contact->lastAlertTick = now;
                 m_lastThreatToastTick = now;
             }
         }
+    };
+
+    if (snapshot.entityId >= 0) {
+        checkEntity(snapshot.entityId, snapshot.x, snapshot.y, snapshot.z);
+    }
+
+    for (std::uint32_t entityIndex = 0U;
+         entityIndex < snapshot.entityMarkerCount; ++entityIndex) {
+        const EntityMarker& entity = snapshot.entityMarkers[entityIndex];
+        if (!entity.player) continue;
+        checkEntity(entity.entityId, entity.currentX, entity.currentY, entity.currentZ);
     }
     for (ThreatContact& contact : m_threatContacts) {
         if (contact.entityId >= 0 && now - contact.lastSeenTick > 3000U) contact.inside = false;
@@ -1083,6 +1092,13 @@ bool OverlayRenderer::render(HDC const deviceContext,
         ImDrawList* const background = ImGui::GetBackgroundDrawList();
         const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
         if (m_features.bedEspEnabled) {
+            if (m_features.bedAutoRefreshEnabled) {
+                const double now = ImGui::GetTime();
+                if (now - m_lastBedRefreshTime >= 2.0) {
+                    m_bedRescanPending = true;
+                    m_lastBedRefreshTime = now;
+                }
+            }
             for (std::uint32_t index = 0U; index < snapshot.bedMarkerCount; ++index) {
                 const BedMarker& bed = snapshot.bedMarkers[index];
                 const AxisAlignedBox bedBox{
@@ -1143,11 +1159,25 @@ bool OverlayRenderer::render(HDC const deviceContext,
                         background->AddRectFilled(panelMin, panelMax,
                                                   IM_COL32(25, 22, 33, 228),
                                                   12.0F * panelScale);
+                        
+                        // Draw 2D vanilla bed item icon
+                        const ImVec2 bPos(left + 10.0F * panelScale, top + 6.0F * panelScale);
+                        const float bS = panelScale * 1.2F;
+                        // Pillow (white)
+                        background->AddRectFilled(ImVec2(bPos.x + 2*bS, bPos.y + 6*bS), ImVec2(bPos.x + 7*bS, bPos.y + 11*bS), IM_COL32(230, 230, 230, 255));
+                        // Blanket (red)
+                        background->AddRectFilled(ImVec2(bPos.x + 7*bS, bPos.y + 6*bS), ImVec2(bPos.x + 14*bS, bPos.y + 11*bS), IM_COL32(220, 50, 50, 255));
+                        // Wood frame
+                        background->AddRectFilled(ImVec2(bPos.x + 2*bS, bPos.y + 11*bS), ImVec2(bPos.x + 14*bS, bPos.y + 13*bS), IM_COL32(139, 90, 43, 255));
+                        // Legs
+                        background->AddRectFilled(ImVec2(bPos.x + 2*bS, bPos.y + 13*bS), ImVec2(bPos.x + 4*bS, bPos.y + 15*bS), IM_COL32(139, 90, 43, 255));
+                        background->AddRectFilled(ImVec2(bPos.x + 12*bS, bPos.y + 13*bS), ImVec2(bPos.x + 14*bS, bPos.y + 15*bS), IM_COL32(139, 90, 43, 255));
+
                         char radiusLabel[24]{};
                         std::snprintf(radiusLabel, sizeof(radiusLabel),
-                                      "Defense  %d blocks", radius);
+                                      "Bed Defense  %d blocks", radius);
                         background->AddText(
-                            ImVec2(left + 10.0F * panelScale,
+                            ImVec2(left + 30.0F * panelScale,
                                    top + 6.0F * panelScale),
                             IM_COL32(221, 210, 241, 235), radiusLabel);
                         unsigned visibleIndex = 0U;
@@ -1195,6 +1225,7 @@ bool OverlayRenderer::render(HDC const deviceContext,
                                       static_cast<double>(m_missedEntityTicks);
             for (std::uint32_t index = 0U; index < snapshot.entityMarkerCount; ++index) {
                 const EntityMarker& entity = snapshot.entityMarkers[index];
+                if (m_features.entityEspPlayersOnly && !entity.player) continue;
                 const double renderX = entity.previousX +
                     (entity.currentX - entity.previousX) * renderTick;
                 const double renderY = entity.previousY +
@@ -1222,7 +1253,7 @@ bool OverlayRenderer::render(HDC const deviceContext,
     // The configurable menu key opens the interactive state used here. The window
     // eases down from above the viewport and uses a custom drag surface so it
     // can remain borderless while still being repositionable.
-    if (m_clickGuiX < 0.0F) {
+    if (m_clickGuiX < -9000.0F) {
         m_clickGuiX = std::max(18.0F * uiScale,
                               (io.DisplaySize.x - 570.0F * uiScale) * 0.5F);
     }
@@ -1318,8 +1349,16 @@ bool OverlayRenderer::render(HDC const deviceContext,
                                       m_toggleAnimation[0], uiScale);
             changed |= animatedToggle("3D living hitboxes", m_features.entityEspEnabled,
                                       m_toggleAnimation[1], uiScale);
+            if (m_features.entityEspEnabled) {
+                ImGui::SameLine(0.0F, 18.0F * uiScale);
+                changed |= animatedToggle("Players only", m_features.entityEspPlayersOnly,
+                                          m_toggleAnimation[8], uiScale);
+            }
             changed |= animatedToggle("Bed ESP", m_features.bedEspEnabled,
                                       m_toggleAnimation[2], uiScale);
+            ImGui::SameLine(0.0F, 18.0F * uiScale);
+            changed |= animatedToggle("Auto-refresh", m_features.bedAutoRefreshEnabled,
+                                      m_toggleAnimation[7], uiScale);
             ImGui::SameLine(0.0F, 18.0F * uiScale);
             if (ImGui::Button("Refresh beds now")) {
                 m_bedRescanPending = true;
@@ -1336,18 +1375,19 @@ bool OverlayRenderer::render(HDC const deviceContext,
             for (int radius = 3; radius <= 10; ++radius) {
                 if (radius != 3) ImGui::SameLine();
                 ImGui::PushID(radius);
-                if (radius == m_features.bedDefenseRadius) {
+                const bool isCurrentRadius = (radius == m_features.bedDefenseRadius);
+                if (isCurrentRadius) {
                     ImGui::PushStyleColor(ImGuiCol_Button,
                                           ImVec4(0.58F, 0.44F, 0.92F, 1.0F));
                 }
                 char radiusLabel[4]{};
                 std::snprintf(radiusLabel, sizeof(radiusLabel), "%d", radius);
                 if (ImGui::Button(radiusLabel, ImVec2(42.0F * uiScale, 0.0F)) &&
-                    m_features.bedDefenseRadius != radius) {
+                    !isCurrentRadius) {
                     m_features.bedDefenseRadius = radius;
                     changed = true;
                 }
-                if (radius == m_features.bedDefenseRadius) ImGui::PopStyleColor();
+                if (isCurrentRadius) ImGui::PopStyleColor();
                 ImGui::PopID();
             }
             ImGui::SeparatorText("Hypixel player panel");
@@ -1434,48 +1474,46 @@ bool OverlayRenderer::render(HDC const deviceContext,
                               const char bc = colorCode(b);
                               return ac != bc ? ac < bc : std::strcmp(a.name.data(), b.name.data()) < 0;
                           });
-                constexpr ImGuiTableFlags tableFlags = ImGuiTableFlags_RowBg |
-                    ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_PadOuterX |
-                    ImGuiTableFlags_NoSavedSettings;
-                if (ImGui::BeginTable("##liveRoster", 4, tableFlags)) {
-                    ImGui::TableSetupColumn("PLAYER", ImGuiTableColumnFlags_WidthStretch, 1.8F);
-                    ImGui::TableSetupColumn("STARS", ImGuiTableColumnFlags_WidthStretch, 0.8F);
-                    ImGui::TableSetupColumn("FKDR", ImGuiTableColumnFlags_WidthStretch, 0.8F);
-                    ImGui::TableSetupColumn("LEVEL", ImGuiTableColumnFlags_WidthStretch, 0.7F);
-                    ImGui::TableHeadersRow();
-                    char currentTeam = '\0';
-                    for (std::uint32_t ordered = 0U; ordered < m_playerStats.count; ++ordered) {
-                        const PlayerStatsEntry& player = m_playerStats.entries[order[ordered]];
-                        const char code = colorCode(player);
-                        if (code != currentTeam) {
-                            currentTeam = code;
-                            ImGui::TableNextRow(ImGuiTableRowFlags_Headers);
-                            ImGui::TableSetColumnIndex(0);
-                            ImGui::TextColored(teamColor(code), "TEAM %c", static_cast<char>(
-                                std::toupper(static_cast<unsigned char>(code))));
-                            for (int column = 1; column < 4; ++column) {
-                                ImGui::TableSetColumnIndex(column);
-                                ImGui::TextUnformatted(" ");
-                            }
-                        }
-                        const ImVec4 metricColor = player.fkdr >= 3.0
-                            ? ImVec4(0.35F, 0.92F, 0.48F, 1.0F)
-                            : (player.fkdr >= 1.0 ? ImVec4(1.0F, 0.84F, 0.32F, 1.0F)
-                                                  : ImVec4(1.0F, 0.38F, 0.42F, 1.0F));
-                        // One TableNextRow per player guarantees a stable
-                        // single-line layout at every one of the four UI sizes.
-                        ImGui::TableNextRow();
-                        ImGui::TableSetColumnIndex(0);
-                        ImGui::TextColored(teamColor(code), "%s", player.name.data());
-                        ImGui::TableSetColumnIndex(1);
-                        ImGui::Text("%d", player.stars);
-                        ImGui::TableSetColumnIndex(2);
-                        ImGui::TextColored(metricColor, "%.2f", player.fkdr);
-                        ImGui::TableSetColumnIndex(3);
-                        ImGui::Text("%d", player.level);
+                ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0F * uiScale, 8.0F * uiScale));
+                ImGui::BeginChild("##liveRosterCards", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysAutoResize);
+                char currentTeam = '\0';
+                for (std::uint32_t ordered = 0U; ordered < m_playerStats.count; ++ordered) {
+                    const PlayerStatsEntry& player = m_playerStats.entries[order[ordered]];
+                    const char code = colorCode(player);
+                    if (code != currentTeam) {
+                        if (ordered > 0) ImGui::EndGroup();
+                        if (ordered > 0) ImGui::SameLine(0.0F, 16.0F * uiScale);
+                        currentTeam = code;
+                        ImGui::BeginGroup();
+                        ImGui::TextColored(teamColor(code), "TEAM %c", static_cast<char>(std::toupper(static_cast<unsigned char>(code))));
+                        ImGui::Spacing();
                     }
-                    ImGui::EndTable();
+                    
+                    ImVec2 pos = ImGui::GetCursorScreenPos();
+                    ImVec2 size(140.0F * uiScale, 64.0F * uiScale);
+                    ImDrawList* drawList = ImGui::GetWindowDrawList();
+                    
+                    drawList->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), IM_COL32(35, 35, 45, 255), 8.0F * uiScale);
+                    drawList->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), IM_COL32(60, 60, 75, 255), 8.0F * uiScale, 0, 1.5F * uiScale);
+                    
+                    ImGui::PushClipRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), true);
+                    drawList->AddText(m_fonts[m_appliedGuiScaleIndex], 16.0F * uiScale, ImVec2(pos.x + 8.0F * uiScale, pos.y + 6.0F * uiScale), ImGui::ColorConvertFloat4ToU32(teamColor(code)), player.name.data());
+                    
+                    const ImU32 fkdrColor = player.fkdr >= 3.0 ? IM_COL32(89, 235, 122, 255) : (player.fkdr >= 1.0 ? IM_COL32(255, 214, 82, 255) : IM_COL32(255, 97, 107, 255));
+                    char fkdrText[32];
+                    std::snprintf(fkdrText, sizeof(fkdrText), "FKDR: %.2f", player.fkdr);
+                    drawList->AddText(m_fonts[m_appliedGuiScaleIndex], 14.0F * uiScale, ImVec2(pos.x + 8.0F * uiScale, pos.y + 26.0F * uiScale), fkdrColor, fkdrText);
+                    
+                    char starText[32];
+                    std::snprintf(starText, sizeof(starText), "%d Stars | Lvl %d", player.stars, player.level);
+                    drawList->AddText(m_fonts[m_appliedGuiScaleIndex], 14.0F * uiScale, ImVec2(pos.x + 8.0F * uiScale, pos.y + 42.0F * uiScale), IM_COL32(180, 180, 180, 255), starText);
+                    
+                    ImGui::PopClipRect();
+                    ImGui::Dummy(size);
                 }
+                if (m_playerStats.count > 0) ImGui::EndGroup();
+                ImGui::EndChild();
+                ImGui::PopStyleVar();
             }
             ImGui::End();
         }

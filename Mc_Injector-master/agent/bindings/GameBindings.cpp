@@ -1141,11 +1141,16 @@ void GameBindings::runBedScanner(JNIEnv* const env, HANDLE const stopEvent) noex
                         const int ring = std::max({dx, dz, vertical});
                         if (ring < 1 || ring > 10) continue;
 
+                        std::uint8_t normalizedMeta = sample.metadata;
+                        if (sample.blockId == 17U || sample.blockId == 162U) {
+                            normalizedMeta &= 0x3U;
+                        }
+
                         BedDefenseBlock* summary = nullptr;
                         for (std::size_t index = 0U; index < enriched.defenseCount; ++index) {
                             BedDefenseBlock& candidate = enriched.defense[index];
                             if (candidate.blockId == sample.blockId &&
-                                candidate.metadata == sample.metadata) {
+                                candidate.metadata == normalizedMeta) {
                                 summary = &candidate;
                                 break;
                             }
@@ -1154,7 +1159,7 @@ void GameBindings::runBedScanner(JNIEnv* const env, HANDLE const stopEvent) noex
                             enriched.defenseCount < enriched.defense.size()) {
                             summary = &enriched.defense[enriched.defenseCount++];
                             summary->blockId = sample.blockId;
-                            summary->metadata = sample.metadata;
+                            summary->metadata = normalizedMeta;
                         }
                         if (summary != nullptr) {
                             std::uint16_t& count = summary->ringCounts[
@@ -1392,7 +1397,7 @@ void GameBindings::runBedScanner(JNIEnv* const env, HANDLE const stopEvent) noex
         }
 
         const std::uint64_t now = static_cast<std::uint64_t>(::GetTickCount64());
-        if (now - lastVerification >= 1000U) {
+        if (now - lastVerification >= 100U) {
             lastVerification = now;
             for (auto& [key, markers] : bedsByChunk) {
                 (void)key;
@@ -1419,7 +1424,7 @@ void GameBindings::runBedScanner(JNIEnv* const env, HANDLE const stopEvent) noex
 
         publish();
         env->PopLocalFrame(nullptr);
-        if (stopRequested(500U)) break;
+        if (stopRequested(100U)) break;
     }
 
     if (worldIdentity != nullptr) env->DeleteGlobalRef(worldIdentity);
