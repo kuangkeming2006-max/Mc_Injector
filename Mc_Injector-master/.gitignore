@@ -1,0 +1,9 @@
+/build/
+/build-*/
+/dist-*/
+/*.zip
+/.cache/
+/.research/
+/.qmlls.ini
+*.user
+*.autosave

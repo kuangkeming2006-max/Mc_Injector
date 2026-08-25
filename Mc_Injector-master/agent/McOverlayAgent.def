@@ -1,0 +1,6 @@
+LIBRARY McOverlayAgent
+EXPORTS
+    Agent_OnLoad
+    Agent_OnAttach
+    Agent_OnUnload
+    McOverlay_Start
