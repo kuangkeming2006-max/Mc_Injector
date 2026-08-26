@@ -95,6 +95,27 @@ struct GameBindings::BindingCache final {
     jfieldID maxY = nullptr;
     jfieldID maxZ = nullptr;
 
+    jclass scoreboardClass = nullptr;
+    jclass scoreObjectiveClass = nullptr;
+    jclass scoreClass = nullptr;
+    jclass scorePlayerTeamClass = nullptr;
+    jclass itemStackClass = nullptr;
+    jclass itemClass = nullptr;
+    jclass itemArmorClass = nullptr;
+    jclass inventoryPlayerClass = nullptr;
+
+    jmethodID getScoreboard = nullptr;
+    jmethodID getObjectiveInDisplaySlot = nullptr;
+    jmethodID getPlayersTeam = nullptr;
+    jmethodID getSortedScores = nullptr;
+    jmethodID getPlayerName = nullptr;
+    jmethodID formatPlayerName = nullptr;
+    jfieldID inventoryField = nullptr;
+    jfieldID armorInventoryField = nullptr;
+    jmethodID getItem = nullptr;
+    jmethodID hasColor = nullptr;
+    jmethodID getColor = nullptr;
+
     const MappingProfile* profile = nullptr;
 };
 
@@ -543,6 +564,14 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
     jclass renderManager = nullptr;
     jclass timer = nullptr;
     jclass chatComponent = nullptr;
+    jclass scoreboard = nullptr;
+    jclass scoreObjective = nullptr;
+    jclass score = nullptr;
+    jclass scorePlayerTeam = nullptr;
+    jclass itemStack = nullptr;
+    jclass item = nullptr;
+    jclass itemArmor = nullptr;
+    jclass inventoryPlayer = nullptr;
     if (!loadClass(player, profile.playerName.c_str()) ||
         !loadClass(living, profile.livingName.c_str()) ||
         !loadClass(entity, profile.entityName.c_str()) ||
@@ -559,7 +588,15 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
         !loadClass(activeRenderInfo, profile.activeRenderInfoName.c_str()) ||
         !loadClass(renderManager, profile.renderManagerName.c_str()) ||
         !loadClass(timer, profile.timerName.c_str()) ||
-        !loadClass(chatComponent, profile.chatComponentName.c_str())) {
+        !loadClass(chatComponent, profile.chatComponentName.c_str()) ||
+        !loadClass(scoreboard, profile.scoreboardName.c_str()) ||
+        !loadClass(scoreObjective, profile.scoreObjectiveName.c_str()) ||
+        !loadClass(score, profile.scoreName.c_str()) ||
+        !loadClass(scorePlayerTeam, profile.scorePlayerTeamName.c_str()) ||
+        !loadClass(itemStack, profile.itemStackName.c_str()) ||
+        !loadClass(item, profile.itemName.c_str()) ||
+        !loadClass(itemArmor, profile.itemArmorName.c_str()) ||
+        !loadClass(inventoryPlayer, profile.inventoryPlayerName.c_str())) {
         return false;
     }
 
@@ -574,6 +611,12 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
         std::string("()[") + profile.storageSignature;
     const std::string getRenderManagerSignature =
         std::string("()") + profile.renderManagerSignature;
+
+    const std::string getObjectiveInDisplaySlotSignature = std::string("(I)") + profile.scoreObjectiveSignature;
+    const std::string getPlayersTeamSignature = std::string("(Ljava/lang/String;)") + profile.scorePlayerTeamSignature;
+    const std::string getSortedScoresSignature = std::string("(") + profile.scoreObjectiveSignature + ")Ljava/util/Collection;";
+    const std::string formatPlayerNameSignature = std::string("(") + profile.scorePlayerTeamSignature + "Ljava/lang/String;)Ljava/lang/String;";
+    const std::string getItemSignature = std::string("()") + profile.itemSignature;
 
     const bool singletonResolved = !profile.minecraftInstanceField.empty()
         ? lookupRequired(env, candidate.minecraftInstanceField, [&] {
@@ -752,6 +795,39 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
         }) ||
         !lookupRequired(env, candidate.renderPartialTicks, [&] {
             return env->GetFieldID(timer, profile.renderPartialTicksField.c_str(), "F");
+        }) ||
+        !lookupRequired(env, candidate.getScoreboard, [&] {
+            return env->GetMethodID(world, profile.getScoreboard.c_str(), (std::string("()") + profile.scoreboardSignature).c_str());
+        }) ||
+        !lookupRequired(env, candidate.getObjectiveInDisplaySlot, [&] {
+            return env->GetMethodID(scoreboard, profile.getObjectiveInDisplaySlot.c_str(), getObjectiveInDisplaySlotSignature.c_str());
+        }) ||
+        !lookupRequired(env, candidate.getPlayersTeam, [&] {
+            return env->GetMethodID(scoreboard, profile.getPlayersTeam.c_str(), getPlayersTeamSignature.c_str());
+        }) ||
+        !lookupRequired(env, candidate.getSortedScores, [&] {
+            return env->GetMethodID(scoreboard, profile.getSortedScores.c_str(), getSortedScoresSignature.c_str());
+        }) ||
+        !lookupRequired(env, candidate.getPlayerName, [&] {
+            return env->GetMethodID(score, profile.getPlayerName.c_str(), "()Ljava/lang/String;");
+        }) ||
+        !lookupRequired(env, candidate.formatPlayerName, [&] {
+            return env->GetStaticMethodID(scorePlayerTeam, profile.formatPlayerName.c_str(), formatPlayerNameSignature.c_str());
+        }) ||
+        !lookupRequired(env, candidate.inventoryField, [&] {
+            return env->GetFieldID(player, profile.inventoryField.c_str(), profile.inventoryPlayerSignature.c_str());
+        }) ||
+        !lookupRequired(env, candidate.armorInventoryField, [&] {
+            return env->GetFieldID(inventoryPlayer, profile.armorInventoryField.c_str(), (std::string("[") + profile.itemStackSignature).c_str());
+        }) ||
+        !lookupRequired(env, candidate.getItem, [&] {
+            return env->GetMethodID(itemStack, profile.getItem.c_str(), getItemSignature.c_str());
+        }) ||
+        !lookupRequired(env, candidate.hasColor, [&] {
+            return env->GetMethodID(itemArmor, profile.hasColor.c_str(), (std::string("(") + profile.itemStackSignature + ")Z").c_str());
+        }) ||
+        !lookupRequired(env, candidate.getColor, [&] {
+            return env->GetMethodID(itemArmor, profile.getColor.c_str(), (std::string("(") + profile.itemStackSignature + ")I").c_str());
         })) {
         return false;
     }
@@ -804,7 +880,15 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
         !makeGlobal(activeRenderInfo, candidate.activeRenderInfoClass) ||
         !makeGlobal(renderManager, candidate.renderManagerClass) ||
         !makeGlobal(timer, candidate.timerClass) ||
-        !makeGlobal(chatComponent, candidate.chatComponentClass)) {
+        !makeGlobal(chatComponent, candidate.chatComponentClass) ||
+        !makeGlobal(scoreboard, candidate.scoreboardClass) ||
+        !makeGlobal(scoreObjective, candidate.scoreObjectiveClass) ||
+        !makeGlobal(score, candidate.scoreClass) ||
+        !makeGlobal(scorePlayerTeam, candidate.scorePlayerTeamClass) ||
+        !makeGlobal(itemStack, candidate.itemStackClass) ||
+        !makeGlobal(item, candidate.itemClass) ||
+        !makeGlobal(itemArmor, candidate.itemArmorClass) ||
+        !makeGlobal(inventoryPlayer, candidate.inventoryPlayerClass)) {
         return false;
     }
 
@@ -1656,6 +1740,47 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
                                 if (marker.player) break;
                             }
                         }
+                        
+                        if (marker.player) {
+                            jobject inv = env->GetObjectField(entity, cache->inventoryField);
+                            if (env->ExceptionCheck() != JNI_TRUE && inv != nullptr) {
+                                jobjectArray armor = static_cast<jobjectArray>(env->GetObjectField(inv, cache->armorInventoryField));
+                                if (env->ExceptionCheck() != JNI_TRUE && armor != nullptr && env->GetArrayLength(armor) > 2) {
+                                    jobject chestplate = env->GetObjectArrayElement(armor, 2);
+                                    if (env->ExceptionCheck() != JNI_TRUE && chestplate != nullptr) {
+                                        marker.hasArmor = true;
+                                        jobject item = env->CallObjectMethod(chestplate, cache->getItem);
+                                        if (env->ExceptionCheck() != JNI_TRUE && item != nullptr) {
+                                            if (env->IsInstanceOf(item, cache->itemArmorClass) == JNI_TRUE) {
+                                                jboolean hasCol = env->CallBooleanMethod(item, cache->hasColor, chestplate);
+                                                if (env->ExceptionCheck() != JNI_TRUE && hasCol == JNI_TRUE) {
+                                                    jint col = env->CallIntMethod(item, cache->getColor, chestplate);
+                                                    if (env->ExceptionCheck() != JNI_TRUE) {
+                                                        const int r = (col >> 16) & 0xFF;
+                                                        const int g = (col >> 8) & 0xFF;
+                                                        const int b = col & 0xFF;
+                                                        if (r > g * 2 && r > b * 2) marker.armorTeam = 'c'; // Red
+                                                        else if (b > r * 1.5 && b > g * 1.5) marker.armorTeam = '9'; // Blue
+                                                        else if (g > r * 1.5 && g > b * 1.5) marker.armorTeam = 'a'; // Green
+                                                        else if (r > b * 2 && g > b * 2 && r > 150 && g > 150) marker.armorTeam = 'e'; // Yellow
+                                                        else if (g > r * 1.5 && b > r * 1.5 && g > 100 && b > 100) marker.armorTeam = 'b'; // Aqua
+                                                        else if (r > 200 && g > 200 && b > 200) marker.armorTeam = 'f'; // White
+                                                        else if (r > 150 && b > 150 && g < 150) marker.armorTeam = 'd'; // Pink
+                                                        else if (r < 100 && g < 100 && b < 100) marker.armorTeam = '7'; // Gray
+                                                    }
+                                                }
+                                            }
+                                            env->DeleteLocalRef(item);
+                                        }
+                                        env->DeleteLocalRef(chestplate);
+                                    }
+                                    if (armor != nullptr) env->DeleteLocalRef(armor);
+                                }
+                                env->DeleteLocalRef(inv);
+                            }
+                            env->ExceptionClear();
+                        }
+                        
                         m_snapshot.entityMarkers[m_snapshot.entityMarkerCount++] = marker;
                     }
                 }
@@ -1781,15 +1906,67 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
                                         m_snapshot.players[index].name.data()) != 0 ||
                             nextPlayers[index].teamColor != m_snapshot.players[index].teamColor;
         }
-        const bool nextMatchActive = taggedPlayers >= 2U &&
+        bool nextMatchActive = taggedPlayers >= 2U &&
             teamMask != 0U && (teamMask & (teamMask - 1U)) != 0U;
-        const bool statusChanged = nextMatchActive != m_snapshot.matchActive ||
+        
+        char nextOwnTeam = 'u';
+        jobject scoreboard = cache->getScoreboard != nullptr ? env->CallObjectMethod(world, cache->getScoreboard) : nullptr;
+        if (env->ExceptionCheck() != JNI_TRUE && scoreboard != nullptr) {
+            jobject objective = env->CallObjectMethod(scoreboard, cache->getObjectiveInDisplaySlot, 1);
+            if (env->ExceptionCheck() != JNI_TRUE && objective != nullptr) {
+                jobject scores = env->CallObjectMethod(scoreboard, cache->getSortedScores, objective);
+                if (env->ExceptionCheck() != JNI_TRUE && scores != nullptr) {
+                    jobjectArray scoresArray = static_cast<jobjectArray>(env->CallObjectMethod(scores, cache->listToArray));
+                    if (env->ExceptionCheck() != JNI_TRUE && scoresArray != nullptr) {
+                        jsize len = env->GetArrayLength(scoresArray);
+                        for (jsize i = 0; i < len; i++) {
+                            jobject scoreObj = env->GetObjectArrayElement(scoresArray, i);
+                            if (env->ExceptionCheck() != JNI_TRUE && scoreObj != nullptr) {
+                                jstring playerNameStr = static_cast<jstring>(env->CallObjectMethod(scoreObj, cache->getPlayerName));
+                                if (env->ExceptionCheck() != JNI_TRUE && playerNameStr != nullptr) {
+                                    jobject team = env->CallObjectMethod(scoreboard, cache->getPlayersTeam, playerNameStr);
+                                    if (env->ExceptionCheck() != JNI_TRUE && team != nullptr) {
+                                        jstring formattedStr = static_cast<jstring>(env->CallStaticObjectMethod(cache->scorePlayerTeamClass, cache->formatPlayerName, team, playerNameStr));
+                                        if (env->ExceptionCheck() != JNI_TRUE && formattedStr != nullptr) {
+                                            const char* formattedUtf8 = env->GetStringUTFChars(formattedStr, nullptr);
+                                            if (formattedUtf8 != nullptr) {
+                                                std::string_view fv(formattedUtf8);
+                                                if (fv.find(" YOU") != std::string_view::npos) {
+                                                    const int ti = bedWarsTeamIndex(fv);
+                                                    if (ti >= 0) {
+                                                        const char teams[] = "RBGYAWP7";
+                                                        if (ti < 8) nextOwnTeam = teams[ti];
+                                                    }
+                                                }
+                                                env->ReleaseStringUTFChars(formattedStr, formattedUtf8);
+                                            }
+                                            env->DeleteLocalRef(formattedStr);
+                                        }
+                                        env->DeleteLocalRef(team);
+                                    }
+                                    env->DeleteLocalRef(playerNameStr);
+                                }
+                                env->DeleteLocalRef(scoreObj);
+                            }
+                        }
+                        env->DeleteLocalRef(scoresArray);
+                    }
+                    env->DeleteLocalRef(scores);
+                }
+                env->DeleteLocalRef(objective);
+            }
+            env->DeleteLocalRef(scoreboard);
+        }
+        env->ExceptionClear();
+
+        const bool statusChanged = nextMatchActive != m_snapshot.matchActive || nextOwnTeam != m_snapshot.ownTeam ||
             std::strcmp(nextLocalName.data(), m_snapshot.localPlayerName.data()) != 0;
         if (rosterChanged || statusChanged) {
             m_snapshot.players = nextPlayers;
             m_snapshot.playerCount = nextCount;
             m_snapshot.localPlayerName = nextLocalName;
             m_snapshot.matchActive = nextMatchActive;
+            m_snapshot.ownTeam = nextOwnTeam;
             m_snapshot.playerRosterGeneration = ++m_playerRosterGeneration;
         }
     }
@@ -1849,6 +2026,14 @@ void GameBindings::deleteGlobalRefs(JNIEnv* const env, BindingCache& cache) noex
     if (cache.renderManagerClass != nullptr) env->DeleteGlobalRef(cache.renderManagerClass);
     if (cache.timerClass != nullptr) env->DeleteGlobalRef(cache.timerClass);
     if (cache.chatComponentClass != nullptr) env->DeleteGlobalRef(cache.chatComponentClass);
+    if (cache.scoreboardClass != nullptr) env->DeleteGlobalRef(cache.scoreboardClass);
+    if (cache.scoreObjectiveClass != nullptr) env->DeleteGlobalRef(cache.scoreObjectiveClass);
+    if (cache.scoreClass != nullptr) env->DeleteGlobalRef(cache.scoreClass);
+    if (cache.scorePlayerTeamClass != nullptr) env->DeleteGlobalRef(cache.scorePlayerTeamClass);
+    if (cache.itemStackClass != nullptr) env->DeleteGlobalRef(cache.itemStackClass);
+    if (cache.itemClass != nullptr) env->DeleteGlobalRef(cache.itemClass);
+    if (cache.itemArmorClass != nullptr) env->DeleteGlobalRef(cache.itemArmorClass);
+    if (cache.inventoryPlayerClass != nullptr) env->DeleteGlobalRef(cache.inventoryPlayerClass);
     if (cache.renderManagerObject != nullptr) env->DeleteGlobalRef(cache.renderManagerObject);
     if (cache.timerObject != nullptr) env->DeleteGlobalRef(cache.timerObject);
     if (cache.modelViewBuffer != nullptr) env->DeleteGlobalRef(cache.modelViewBuffer);
@@ -1873,6 +2058,14 @@ void GameBindings::deleteGlobalRefs(JNIEnv* const env, BindingCache& cache) noex
     cache.renderManagerClass = nullptr;
     cache.timerClass = nullptr;
     cache.chatComponentClass = nullptr;
+    cache.scoreboardClass = nullptr;
+    cache.scoreObjectiveClass = nullptr;
+    cache.scoreClass = nullptr;
+    cache.scorePlayerTeamClass = nullptr;
+    cache.itemStackClass = nullptr;
+    cache.itemClass = nullptr;
+    cache.itemArmorClass = nullptr;
+    cache.inventoryPlayerClass = nullptr;
     cache.renderManagerObject = nullptr;
     cache.timerObject = nullptr;
     cache.modelViewBuffer = nullptr;

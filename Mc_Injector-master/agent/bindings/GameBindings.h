@@ -34,6 +34,8 @@ struct EntityMarker final {
     jint entityId = -1;
     double distance = 0.0;
     bool player = false;
+    bool hasArmor = false;
+    char armorTeam = 'u';
 };
 
 struct BedDefenseBlock final {
@@ -114,6 +116,11 @@ struct GameSnapshot final {
     // True only after at least two distinct BedWars team tags (for example
     // [R] and [B]) are visible in the formatted player roster.
     bool matchActive = false;
+    char ownTeam = 'f';
+    bool ownBedKnown = false;
+    int ownBedX = 0;
+    int ownBedY = 0;
+    int ownBedZ = 0;
     WorldCameraSnapshot camera{};
     std::uint32_t mappingAttempt = 0U;
     std::uint32_t mappingRetryInMs = 0U;
@@ -221,6 +228,7 @@ private:
     std::uint64_t m_entitySampleGeneration = 0U;
     std::uint64_t m_lastPlayerScan = 0U;
     std::uint64_t m_playerRosterGeneration = 0U;
+    jweak m_lastWorld = nullptr;
     GameSnapshot m_snapshot{};
 
     struct PublishedBedCache final {

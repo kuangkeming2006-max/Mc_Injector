@@ -21,6 +21,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #include "bed_png.h"
+#include "block_textures.h"
 
 // Dear ImGui intentionally keeps this declaration inside `#if 0` in the
 // backend header so including it does not force windows.h on every consumer.
@@ -287,9 +288,35 @@ ImU32 defenseBlockColor(const std::uint16_t blockId,
 
 void drawInventoryBlockIcon(ImDrawList* const draw, const ImVec2 center,
                             const float size, const std::uint16_t blockId,
-                            const std::uint8_t metadata) noexcept
+                            const std::uint8_t metadata,
+                            const unsigned* textures) noexcept
 {
     if (draw == nullptr) return;
+    
+    // Map block ID to index in textures array
+    int texIndex = -1;
+    switch (blockId) {
+    case 35: texIndex = 0; break; // Wool
+    case 5:  texIndex = 1; break; // Planks
+    case 159: texIndex = 2; break; // Terracotta / Hardened clay
+    case 20: 
+    case 95: texIndex = 3; break; // Glass / Stained Glass
+    case 121: texIndex = 4; break; // End Stone
+    case 49: texIndex = 5; break; // Obsidian
+    }
+
+    if (texIndex >= 0 && textures[texIndex] != 0U) {
+        // Draw 2D PNG icon
+        const float half = size * 0.5F;
+        draw->AddImage(
+            reinterpret_cast<ImTextureID>(static_cast<std::uintptr_t>(textures[texIndex])),
+            ImVec2(center.x - half, center.y - half),
+            ImVec2(center.x + half, center.y + half)
+        );
+        return;
+    }
+
+    // Fallback to 3D solid color cube if texture is missing or unknown block
     const ImU32 base = defenseBlockColor(blockId, metadata);
     const ImVec4 rgba = ImGui::ColorConvertU32ToFloat4(base);
     const auto shaded = [&](const float multiplier) noexcept {
@@ -309,9 +336,9 @@ void drawInventoryBlockIcon(ImDrawList* const draw, const ImVec2 center,
     const ImVec2 right[4]{
         {center.x, center.y}, {center.x + half, center.y - quarter},
         {center.x + half, center.y + quarter}, {center.x, center.y + half}};
-    draw->AddConvexPolyFilled(top, 4, shaded(1.16F));
-    draw->AddConvexPolyFilled(left, 4, shaded(0.78F));
-    draw->AddConvexPolyFilled(right, 4, shaded(0.94F));
+    draw->AddConvexPolyFilled(top, 4, shaded(1.0F));
+    draw->AddConvexPolyFilled(left, 4, shaded(0.7F));
+    draw->AddConvexPolyFilled(right, 4, shaded(0.5F));
     draw->AddPolyline(top, 4, IM_COL32(255, 255, 255, 65), ImDrawFlags_Closed, 1.0F);
 }
 
@@ -638,14 +665,27 @@ void OverlayRenderer::updateBedThreatAlerts(const GameSnapshot& snapshot) noexce
         return;
     }
 
+    if (snapshot.matchActive && snapshot.ownTeam != 'u' && !m_ownBedKnown) {
+        for (ThreatContact& contact : m_threatContacts) contact.inside = false;
+        return;
+    }
+
     constexpr double enterDistance = 8.0;
     constexpr double leaveDistance = 9.5;
     constexpr std::uint64_t perContactCooldown = 12000U;
     constexpr std::uint64_t globalCooldown = 1800U;
 
-    auto checkEntity = [&](const int id, const double ex, const double ey, const double ez) {
+    auto checkEntity = [&](const int id, const double ex, const double ey, const double ez, const char armorTeam) {
+        if (snapshot.ownTeam != 'u' && armorTeam == snapshot.ownTeam) return;
+        if (id == snapshot.entityId) return; // Ignore local player
+        
         for (std::uint32_t bedIndex = 0U; bedIndex < snapshot.bedMarkerCount; ++bedIndex) {
             const BedMarker& bed = snapshot.bedMarkers[bedIndex];
+            
+            // Only alert for own bed if we are in BedWars
+            if (snapshot.matchActive && m_ownBedKnown) {
+                if (bed.x != m_ownBedX || bed.y != m_ownBedY || bed.z != m_ownBedZ) continue;
+            }
             const double dx = std::min(std::abs(ex - (bed.x + 0.5)),
                                        std::abs(ex - (bed.footX + 0.5)));
             const double dz = std::min(std::abs(ez - (bed.z + 0.5)),
@@ -689,14 +729,14 @@ void OverlayRenderer::updateBedThreatAlerts(const GameSnapshot& snapshot) noexce
     };
 
     if (snapshot.entityId >= 0) {
-        checkEntity(snapshot.entityId, snapshot.x, snapshot.y, snapshot.z);
+        // Local player does not trigger own bed threat
     }
 
     for (std::uint32_t entityIndex = 0U;
          entityIndex < snapshot.entityMarkerCount; ++entityIndex) {
         const EntityMarker& entity = snapshot.entityMarkers[entityIndex];
         if (!entity.player) continue;
-        checkEntity(entity.entityId, entity.currentX, entity.currentY, entity.currentZ);
+        checkEntity(entity.entityId, entity.currentX, entity.currentY, entity.currentZ, entity.armorTeam);
     }
     for (ThreatContact& contact : m_threatContacts) {
         if (contact.entityId >= 0 && now - contact.lastSeenTick > 3000U) contact.inside = false;
@@ -849,6 +889,27 @@ bool OverlayRenderer::initialize(HWND const window, HGLRC const context) noexcep
         ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         ::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, bedWidth, bedHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, bedPixels);
         stbi_image_free(bedPixels);
+
+        auto loadBlockTexture = [](const unsigned char* data, std::size_t size) -> unsigned {
+            int w = 0, h = 0, c = 0;
+            unsigned char* pixels = stbi_load_from_memory(data, size, &w, &h, &c, 4);
+            if (!pixels) return 0U;
+            unsigned tex = 0U;
+            ::glGenTextures(1, &tex);
+            ::glBindTexture(GL_TEXTURE_2D, tex);
+            ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            ::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+            stbi_image_free(pixels);
+            return tex;
+        };
+        m_blockTextures[0] = loadBlockTexture(BLOCK_WOOL_PNG, sizeof(BLOCK_WOOL_PNG));
+        m_blockTextures[1] = loadBlockTexture(BLOCK_PLANKS_OAK_PNG, sizeof(BLOCK_PLANKS_OAK_PNG));
+        m_blockTextures[2] = loadBlockTexture(BLOCK_HARDENED_CLAY_PNG, sizeof(BLOCK_HARDENED_CLAY_PNG));
+        m_blockTextures[3] = loadBlockTexture(BLOCK_GLASS_PNG, sizeof(BLOCK_GLASS_PNG));
+        m_blockTextures[4] = loadBlockTexture(BLOCK_END_STONE_PNG, sizeof(BLOCK_END_STONE_PNG));
+        m_blockTextures[5] = loadBlockTexture(BLOCK_OBSIDIAN_PNG, sizeof(BLOCK_OBSIDIAN_PNG));
+
         ::glBindTexture(GL_TEXTURE_2D, lastTexture);
     }
 
@@ -890,6 +951,13 @@ void OverlayRenderer::shutdownWithCurrentContext() noexcept
         const GLuint texture = static_cast<GLuint>(m_bedTexture);
         ::glDeleteTextures(1, &texture);
         m_bedTexture = 0U;
+    }
+    for (unsigned& tex : m_blockTextures) {
+        if (tex != 0U) {
+            const GLuint t = static_cast<GLuint>(tex);
+            ::glDeleteTextures(1, &t);
+            tex = 0U;
+        }
     }
     ImGui_ImplOpenGL2_Shutdown();
     ImGui_ImplWin32_Shutdown();
@@ -1110,6 +1178,30 @@ bool OverlayRenderer::render(HDC const deviceContext,
     const float guiEase = m_clickGuiProgress * m_clickGuiProgress *
                           (3.0F - 2.0F * m_clickGuiProgress);
     renderInventoryBlur(guiEase);
+
+    if (!m_lastMatchActive && snapshot.matchActive) {
+        m_ownBedKnown = false;
+    }
+    m_lastMatchActive = snapshot.matchActive;
+
+    if (snapshot.matchActive && snapshot.ownTeam != 'u' && !m_ownBedKnown) {
+        double minDistanceSq = 30.0 * 30.0;
+        for (std::uint32_t i = 0; i < snapshot.bedMarkerCount; ++i) {
+            const BedMarker& bed = snapshot.bedMarkers[i];
+            const double dx = (bed.x + bed.footX) * 0.5 - snapshot.x;
+            const double dy = bed.y - snapshot.y;
+            const double dz = (bed.z + bed.footZ) * 0.5 - snapshot.z;
+            const double distSq = dx * dx + dy * dy + dz * dz;
+            if (distSq < minDistanceSq) {
+                minDistanceSq = distSq;
+                m_ownBedX = bed.x;
+                m_ownBedY = bed.y;
+                m_ownBedZ = bed.z;
+                m_ownBedKnown = true;
+            }
+        }
+    }
+
     updateBedThreatAlerts(snapshot);
 
     if (snapshot.state == GameSnapshot::State::Ready &&
@@ -1137,8 +1229,13 @@ bool OverlayRenderer::render(HDC const deviceContext,
                 if (m_features.labelsEnabled) {
                     std::snprintf(label, sizeof(label), "Bed  %d %d %d", bed.x, bed.y, bed.z);
                 }
-                drawProjectedBox(background, snapshot.camera, displaySize, bedBox,
-                                 IM_COL32(255, 92, 104, 255), label);
+                
+                ImU32 boxColor = IM_COL32(255, 92, 104, 255);
+                if (m_ownBedKnown && bed.x == m_ownBedX && bed.y == m_ownBedY && bed.z == m_ownBedZ) {
+                    boxColor = IM_COL32(40, 255, 40, 255);
+                }
+                
+                drawProjectedBox(background, snapshot.camera, displaySize, bedBox, boxColor, label);
 
                 if (m_features.bedDefensePanelEnabled && bed.defenseCount > 0U) {
                     const int radius = std::clamp(m_features.bedDefenseRadius, 3, 10);
@@ -1195,7 +1292,7 @@ bool OverlayRenderer::render(HDC const deviceContext,
 
                         char radiusLabel[24]{};
                         std::snprintf(radiusLabel, sizeof(radiusLabel),
-                                      "Bed Defense  %d blocks", radius);
+                                      "Bed");
                         background->AddText(
                             ImVec2(left + 30.0F * panelScale,
                                    top + 6.0F * panelScale),
@@ -1213,7 +1310,8 @@ bool OverlayRenderer::render(HDC const deviceContext,
                             drawInventoryBlockIcon(background, ImVec2(cellX, cellY),
                                                    23.0F * panelScale,
                                                    bed.defense[material].blockId,
-                                                   bed.defense[material].metadata);
+                                                   bed.defense[material].metadata,
+                                                   m_blockTextures);
                             char countLabel[16]{};
                             std::snprintf(countLabel, sizeof(countLabel), "x%u",
                                           static_cast<unsigned>(totals[material]));
@@ -1264,8 +1362,34 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     std::snprintf(label, sizeof(label), "Entity #%d  %.1fm",
                                   entity.entityId, entity.distance);
                 }
-                drawProjectedBox(background, snapshot.camera, displaySize, interpolated,
-                                 IM_COL32(108, 196, 255, 255), label);
+                
+                bool isTeammate = snapshot.ownTeam != 'u' && entity.armorTeam == snapshot.ownTeam;
+                if (isTeammate) {
+                    const double centerX = (interpolated.minX + interpolated.maxX) * 0.5;
+                    const double centerZ = (interpolated.minZ + interpolated.maxZ) * 0.5;
+                    const double topY = interpolated.maxY + 0.6;
+                    const ScreenPoint pt = projectPoint(snapshot.camera, displaySize, centerX, topY, centerZ);
+                    if (pt.visible) {
+                        const float baseWidth = 14.0F * uiScale;
+                        const float arrowHeight = 16.0F * uiScale;
+                        background->AddTriangleFilled(
+                            ImVec2(pt.x, pt.y),
+                            ImVec2(pt.x - baseWidth * 0.5F, pt.y - arrowHeight),
+                            ImVec2(pt.x + baseWidth * 0.5F, pt.y - arrowHeight),
+                            IM_COL32(40, 255, 40, 230)
+                        );
+                        if (m_features.labelsEnabled && label[0] != '\0') {
+                            const ImVec2 textSize = ImGui::CalcTextSize(label);
+                            background->AddText(
+                                ImVec2(pt.x - textSize.x * 0.5F, pt.y - arrowHeight - textSize.y - 2.0F * uiScale),
+                                IM_COL32(40, 255, 40, 255), label);
+                        }
+                    }
+                } else {
+                    // Enemies or unknown threats
+                    drawProjectedBox(background, snapshot.camera, displaySize, interpolated,
+                                     IM_COL32(255, 0, 0, 255), label);
+                }
             }
         }
     }

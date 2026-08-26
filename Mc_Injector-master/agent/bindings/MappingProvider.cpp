@@ -259,6 +259,36 @@ private:
     mapping.renderPartialTicksField = "field_74281_c";
     mapping.aabbFields = {"field_72340_a", "field_72338_b", "field_72339_c",
                           "field_72336_d", "field_72337_e", "field_72334_f"};
+
+    mapping.scoreboardName = "net.minecraft.scoreboard.Scoreboard";
+    mapping.scoreboardSignature = "Lnet/minecraft/scoreboard/Scoreboard;";
+    mapping.scoreObjectiveName = "net.minecraft.scoreboard.ScoreObjective";
+    mapping.scoreObjectiveSignature = "Lnet/minecraft/scoreboard/ScoreObjective;";
+    mapping.scoreName = "net.minecraft.scoreboard.Score";
+    mapping.scoreSignature = "Lnet/minecraft/scoreboard/Score;";
+    mapping.scorePlayerTeamName = "net.minecraft.scoreboard.ScorePlayerTeam";
+    mapping.scorePlayerTeamSignature = "Lnet/minecraft/scoreboard/ScorePlayerTeam;";
+    mapping.itemStackName = "net.minecraft.item.ItemStack";
+    mapping.itemStackSignature = "Lnet/minecraft/item/ItemStack;";
+    mapping.itemName = "net.minecraft.item.Item";
+    mapping.itemSignature = "Lnet/minecraft/item/Item;";
+    mapping.itemArmorName = "net.minecraft.item.ItemArmor";
+    mapping.itemArmorSignature = "Lnet/minecraft/item/ItemArmor;";
+    mapping.inventoryPlayerName = "net.minecraft.entity.player.InventoryPlayer";
+    mapping.inventoryPlayerSignature = "Lnet/minecraft/entity/player/InventoryPlayer;";
+
+    mapping.getScoreboard = "func_96441_U";
+    mapping.getObjectiveInDisplaySlot = "func_96539_a";
+    mapping.getPlayersTeam = "func_96509_i";
+    mapping.getSortedScores = "func_96534_i";
+    mapping.getPlayerName = "func_96653_e";
+    mapping.formatPlayerName = "func_96667_a";
+    mapping.inventoryField = "field_71071_by";
+    mapping.armorInventoryField = "field_70460_b";
+    mapping.getItem = "func_77973_b";
+    mapping.hasColor = "func_82816_b_";
+    mapping.getColor = "func_82814_b";
+
     return mapping;
 }
 
@@ -339,6 +369,24 @@ private:
     mapping.timerField = "Y";
     mapping.renderPartialTicksField = "c";
     mapping.aabbFields = {"a", "b", "c", "d", "e", "f"};
+
+    mapping.scoreboardName = "auo";
+    mapping.scoreboardSignature = "Lauo;";
+    mapping.scoreObjectiveName = "bpe";
+    mapping.scoreObjectiveSignature = "Lbpe;";
+    mapping.scoreName = "bem";
+    mapping.scoreSignature = "Lbem;";
+    mapping.scorePlayerTeamName = "bfh";
+    mapping.scorePlayerTeamSignature = "Lbfh;";
+    mapping.itemStackName = "zx";
+    mapping.itemStackSignature = "Lzx;";
+    mapping.itemName = "zw";
+    mapping.itemSignature = "Lzw;";
+    mapping.itemArmorName = "yq";
+    mapping.itemArmorSignature = "Lyq;";
+    mapping.inventoryPlayerName = "yx";
+    mapping.inventoryPlayerSignature = "Lyx;";
+
     return mapping;
 }
 
@@ -421,6 +469,19 @@ private:
     mapping.timerField = "timer";
     mapping.renderPartialTicksField = "renderPartialTicks";
     mapping.aabbFields = {"minX", "minY", "minZ", "maxX", "maxY", "maxZ"};
+
+    mapping.getScoreboard = "getScoreboard";
+    mapping.getObjectiveInDisplaySlot = "getObjectiveInDisplaySlot";
+    mapping.getPlayersTeam = "getPlayersTeam";
+    mapping.getSortedScores = "getSortedScores";
+    mapping.getPlayerName = "getPlayerName";
+    mapping.formatPlayerName = "formatPlayerName";
+    mapping.inventoryField = "inventory";
+    mapping.armorInventoryField = "armorInventory";
+    mapping.getItem = "getItem";
+    mapping.hasColor = "hasColor";
+    mapping.getColor = "getColor";
+
     return mapping;
 }
 
@@ -502,7 +563,7 @@ bool MappingDictionary::validate(std::string* const error) const noexcept
         }
     }
 
-    const std::array<std::pair<std::string_view, std::string_view>, 18U> classes{{
+    const std::array<std::pair<std::string_view, std::string_view>, 26U> classes{{
         {minecraftName, minecraftSignature}, {playerName, playerSignature},
         {livingName, livingSignature}, {entityName, entitySignature},
         {aabbName, aabbSignature}, {worldName, worldSignature},
@@ -512,7 +573,11 @@ bool MappingDictionary::validate(std::string* const error) const noexcept
         {chunkName, chunkSignature}, {storageName, storageSignature},
         {activeRenderInfoName, activeRenderInfoSignature},
         {renderManagerName, renderManagerSignature},
-        {timerName, timerSignature}, {chatComponentName, chatComponentSignature}}};
+        {timerName, timerSignature}, {chatComponentName, chatComponentSignature},
+        {scoreboardName, scoreboardSignature}, {scoreObjectiveName, scoreObjectiveSignature},
+        {scoreName, scoreSignature}, {scorePlayerTeamName, scorePlayerTeamSignature},
+        {itemStackName, itemStackSignature}, {itemName, itemSignature},
+        {itemArmorName, itemArmorSignature}, {inventoryPlayerName, inventoryPlayerSignature}}};
     for (const auto& [binaryName, signature] : classes) {
         if (!signatureMatchesBinaryName(binaryName, signature)) {
             return reject("class binary name and JNI signature do not match");
@@ -532,7 +597,7 @@ bool MappingDictionary::validate(std::string* const error) const noexcept
         (!getLoadedEntities.empty() && !loadedEntitiesField.empty())) {
         return reject("mapping must define exactly one loaded-entity accessor");
     }
-    const std::array<std::string_view, 30U> members{{
+    const std::array<std::string_view, 41U> members{{
         playerField, getHealth, getMaxHealth, getEntityId,
         getBounds, isMainThread, isSingleplayer, worldField, getLoadedEntities,
         playerEntitiesField, getName, getDisplayName, getFormattedText,
@@ -541,7 +606,10 @@ bool MappingDictionary::validate(std::string* const error) const noexcept
         getStorageArrays, getStorageData, getRenderManager,
         activeModelViewField, activeProjectionField, activeViewportField,
         timerField, renderPartialTicksField, minecraftInstanceField,
-        loadedEntitiesField}};
+        loadedEntitiesField, getScoreboard, getObjectiveInDisplaySlot,
+        getPlayersTeam, getSortedScores, getPlayerName, formatPlayerName,
+        inventoryField, armorInventoryField,
+        getItem, hasColor, getColor}};
     for (const std::string_view member : members) {
         if (!member.empty() && !validMemberName(member))
             return reject("invalid method or field name");

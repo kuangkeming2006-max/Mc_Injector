@@ -176,8 +176,15 @@ private:
     unsigned m_missedEntityTicks = 0U;
     unsigned m_blurTexture = 0U;
     unsigned m_bedTexture = 0U;
+    unsigned m_blockTextures[6]{};
     int m_blurWidth = 0;
     int m_blurHeight = 0;
+
+    bool m_ownBedKnown = false;
+    int m_ownBedX = 0;
+    int m_ownBedY = 0;
+    int m_ownBedZ = 0;
+    bool m_lastMatchActive = false;
 };
 
 } // namespace mcoverlay

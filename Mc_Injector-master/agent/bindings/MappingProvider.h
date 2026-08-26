@@ -94,6 +94,23 @@ struct MappingDictionary final {
     std::string chatComponentName;
     std::string chatComponentSignature;
 
+    std::string scoreboardName;
+    std::string scoreboardSignature;
+    std::string scoreObjectiveName;
+    std::string scoreObjectiveSignature;
+    std::string scoreName;
+    std::string scoreSignature;
+    std::string scorePlayerTeamName;
+    std::string scorePlayerTeamSignature;
+    std::string itemStackName;
+    std::string itemStackSignature;
+    std::string itemName;
+    std::string itemSignature;
+    std::string itemArmorName;
+    std::string itemArmorSignature;
+    std::string inventoryPlayerName;
+    std::string inventoryPlayerSignature;
+
     std::string getMinecraft;
     // Exactly one singleton accessor is required. Lunar's named runtime is
     // most stable through its static `theMinecraft` field, while Vanilla and
@@ -134,6 +151,18 @@ struct MappingDictionary final {
     std::string timerField;
     std::string renderPartialTicksField;
     std::array<std::string, 6U> aabbFields;
+
+    std::string getScoreboard;
+    std::string getObjectiveInDisplaySlot;
+    std::string getPlayersTeam;
+    std::string getSortedScores;
+    std::string getPlayerName;
+    std::string formatPlayerName;
+    std::string inventoryField;
+    std::string armorInventoryField;
+    std::string getItem;
+    std::string hasColor;
+    std::string getColor;
 
     // Strict validation prevents a partially filled or malformed external
     // dictionary from ever reaching JNI GetMethodID/GetFieldID calls.
