@@ -71,18 +71,20 @@ bool parseFlag(std::string_view token, bool& result) noexcept
     return true;
 }
 
-std::uint8_t packFeatures(const FeatureSettings& settings) noexcept
+std::uint16_t packFeatures(const FeatureSettings& settings) noexcept
 {
-    return static_cast<std::uint8_t>((settings.espEnabled ? 0x01U : 0U) |
+    return static_cast<std::uint16_t>((settings.espEnabled ? 0x01U : 0U) |
         (settings.entityEspEnabled ? 0x02U : 0U) |
         (settings.bedEspEnabled ? 0x04U : 0U) |
         (settings.labelsEnabled ? 0x08U : 0U) |
         (settings.hypixelPanelEnabled ? 0x10U : 0U) |
         (settings.bedThreatAlertsEnabled ? 0x20U : 0U) |
-        (settings.bedDefensePanelEnabled ? 0x40U : 0U));
+        (settings.bedDefensePanelEnabled ? 0x40U : 0U) |
+        (settings.entityEspPlayersOnly ? 0x80U : 0U) |
+        (settings.bedAutoRefreshEnabled ? 0x100U : 0U));
 }
 
-FeatureSettings unpackFeatures(const std::uint8_t bits, const int radius = 6) noexcept
+FeatureSettings unpackFeatures(const std::uint16_t bits, const int radius = 6) noexcept
 {
     FeatureSettings s;
     s.espEnabled = (bits & 0x01U) != 0U;
@@ -92,6 +94,8 @@ FeatureSettings unpackFeatures(const std::uint8_t bits, const int radius = 6) no
     s.hypixelPanelEnabled = (bits & 0x10U) != 0U;
     s.bedThreatAlertsEnabled = (bits & 0x20U) != 0U;
     s.bedDefensePanelEnabled = (bits & 0x40U) != 0U;
+    s.entityEspPlayersOnly = (bits & 0x80U) != 0U;
+    s.bedAutoRefreshEnabled = (bits & 0x100U) != 0U;
     s.bedDefenseRadius = std::clamp(radius, 3, 10);
     return s;
 }
@@ -726,7 +730,7 @@ void AgentRuntime::queueStateChanged(const bool visible, const bool interactive)
 
 void AgentRuntime::queueFeatureChanged(const FeatureSettings& settings) noexcept
 {
-    const std::uint8_t bits = packFeatures(settings);
+    const std::uint16_t bits = packFeatures(settings);
     m_featureBits.store(bits, std::memory_order_release);
     m_bedDefenseRadius.store(std::clamp(settings.bedDefenseRadius, 3, 10),
                              std::memory_order_release);

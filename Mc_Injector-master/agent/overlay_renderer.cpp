@@ -18,6 +18,10 @@
 #include <new>
 #include <utility>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+#include "bed_png.h"
+
 // Dear ImGui intentionally keeps this declaration inside `#if 0` in the
 // backend header so including it does not force windows.h on every consumer.
 // This translation unit already includes Win32 types through our headers.
@@ -834,6 +838,20 @@ bool OverlayRenderer::initialize(HWND const window, HGLRC const context) noexcep
         m_wndProcFallbackLogged = true;
     }
 
+    int bedWidth = 0, bedHeight = 0, bedChannels = 0;
+    unsigned char* bedPixels = stbi_load_from_memory(BED_PNG_DATA, sizeof(BED_PNG_DATA), &bedWidth, &bedHeight, &bedChannels, 4);
+    if (bedPixels) {
+        GLint lastTexture = 0;
+        ::glGetIntegerv(GL_TEXTURE_BINDING_2D, &lastTexture);
+        ::glGenTextures(1, &m_bedTexture);
+        ::glBindTexture(GL_TEXTURE_2D, m_bedTexture);
+        ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        ::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, bedWidth, bedHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, bedPixels);
+        stbi_image_free(bedPixels);
+        ::glBindTexture(GL_TEXTURE_2D, lastTexture);
+    }
+
     m_window = window;
     m_glContext = context;
     m_initialized = true;
@@ -868,12 +886,18 @@ void OverlayRenderer::shutdownWithCurrentContext() noexcept
         m_blurWidth = 0;
         m_blurHeight = 0;
     }
+    if (m_bedTexture != 0U) {
+        const GLuint texture = static_cast<GLuint>(m_bedTexture);
+        ::glDeleteTextures(1, &texture);
+        m_bedTexture = 0U;
+    }
     ImGui_ImplOpenGL2_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext(m_imguiContext);
     m_imguiContext = nullptr;
     m_fonts = {};
     m_blurTexture = 0U;
+    m_bedTexture = 0U;
     m_blurWidth = 0;
     m_blurHeight = 0;
     m_window = nullptr;
@@ -912,6 +936,7 @@ void OverlayRenderer::abandonForContextChange() noexcept
     // Drop the name to prevent a later context generation from deleting an
     // unrelated object which happens to reuse the same GLuint value.
     m_blurTexture = 0U;
+    m_bedTexture = 0U;
     m_blurWidth = 0;
     m_blurHeight = 0;
     m_window = nullptr;
@@ -1161,17 +1186,12 @@ bool OverlayRenderer::render(HDC const deviceContext,
                                                   12.0F * panelScale);
                         
                         // Draw 2D vanilla bed item icon
-                        const ImVec2 bPos(left + 10.0F * panelScale, top + 6.0F * panelScale);
-                        const float bS = panelScale * 1.2F;
-                        // Pillow (white)
-                        background->AddRectFilled(ImVec2(bPos.x + 2*bS, bPos.y + 6*bS), ImVec2(bPos.x + 7*bS, bPos.y + 11*bS), IM_COL32(230, 230, 230, 255));
-                        // Blanket (red)
-                        background->AddRectFilled(ImVec2(bPos.x + 7*bS, bPos.y + 6*bS), ImVec2(bPos.x + 14*bS, bPos.y + 11*bS), IM_COL32(220, 50, 50, 255));
-                        // Wood frame
-                        background->AddRectFilled(ImVec2(bPos.x + 2*bS, bPos.y + 11*bS), ImVec2(bPos.x + 14*bS, bPos.y + 13*bS), IM_COL32(139, 90, 43, 255));
-                        // Legs
-                        background->AddRectFilled(ImVec2(bPos.x + 2*bS, bPos.y + 13*bS), ImVec2(bPos.x + 4*bS, bPos.y + 15*bS), IM_COL32(139, 90, 43, 255));
-                        background->AddRectFilled(ImVec2(bPos.x + 12*bS, bPos.y + 13*bS), ImVec2(bPos.x + 14*bS, bPos.y + 15*bS), IM_COL32(139, 90, 43, 255));
+                        const float bedIconSize = 18.0F * panelScale;
+                        const ImVec2 bPos(left + 8.0F * panelScale, top + 4.0F * panelScale);
+                        if (m_bedTexture != 0U) {
+                            background->AddImage(reinterpret_cast<ImTextureID>(static_cast<std::uintptr_t>(m_bedTexture)),
+                                                 bPos, ImVec2(bPos.x + bedIconSize, bPos.y + bedIconSize));
+                        }
 
                         char radiusLabel[24]{};
                         std::snprintf(radiusLabel, sizeof(radiusLabel),

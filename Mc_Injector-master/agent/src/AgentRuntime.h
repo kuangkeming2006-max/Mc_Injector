@@ -88,7 +88,7 @@ private:
     std::atomic<bool> m_startSucceeded{false};
     std::atomic<bool> m_visible{false};
     std::atomic<bool> m_interactive{false};
-    std::atomic<std::uint8_t> m_featureBits{0x7FU};
+    std::atomic<std::uint16_t> m_featureBits{0x7FU};
     std::atomic<int> m_bedDefenseRadius{6};
     std::atomic<bool> m_detachRequested{false};
     std::atomic<bool> m_shutdownRequested{false};
@@ -140,7 +140,7 @@ private:
     std::atomic<std::uint32_t> m_stateChangedRevision{0U};
     std::atomic<std::uint8_t> m_stateChangedBits{0U};
     std::atomic<std::uint32_t> m_featureChangedRevision{0U};
-    std::atomic<std::uint8_t> m_featureChangedBits{0x7FU};
+    std::atomic<std::uint16_t> m_featureChangedBits{0x7FU};
     std::atomic<int> m_featureChangedBedRadius{6};
     std::atomic<bool> m_rendererReadyQueued{false};
     std::atomic<unsigned> m_menuHotkey{VK_OEM_7};

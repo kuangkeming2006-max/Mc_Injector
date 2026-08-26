@@ -175,6 +175,7 @@ private:
     float m_lastEntityPartialTicks = 0.0F;
     unsigned m_missedEntityTicks = 0U;
     unsigned m_blurTexture = 0U;
+    unsigned m_bedTexture = 0U;
     int m_blurWidth = 0;
     int m_blurHeight = 0;
 };
