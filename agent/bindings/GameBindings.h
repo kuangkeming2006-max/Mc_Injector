@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 
+#include "BedWarsState.h"
 #include "MappingProvider.h"
 
 namespace mcoverlay {
@@ -34,6 +35,10 @@ struct EntityMarker final {
     jint entityId = -1;
     double distance = 0.0;
     bool player = false;
+    bool hasArmor = false;
+    char armorTeam = 'u';
+    char teamColor = 'u';
+    std::array<char, 17U> playerName{};
 };
 
 struct BedDefenseBlock final {
@@ -54,13 +59,17 @@ struct BedMarker final {
     int footZ = 0;
     std::array<BedDefenseBlock, MaxDefenseBlocks> defense{};
     std::uint8_t defenseCount = 0U;
+    // Derived only from nearby, bulk-copied team-coloured wool evidence. An
+    // ambiguous/absent result remains unknown; the threat detector must never
+    // guess an own bed from player proximity.
+    char teamColor = 'u';
 };
 
 struct PlayerIdentity final {
     std::array<char, 17U> name{};
     // Minecraft formatting color code without the section-sign prefix.
     // For example 'c' represents the protocol token "\xC2\xA7c".
-    char teamColor = 'f';
+    char teamColor = 'u';
 };
 
 struct WorldCameraSnapshot final {
@@ -111,9 +120,14 @@ struct GameSnapshot final {
     std::uint32_t playerCount = 0U;
     std::uint64_t playerRosterGeneration = 0U;
     std::array<char, 17U> localPlayerName{};
-    // True only after at least two distinct BedWars team tags (for example
-    // [R] and [B]) are visible in the formatted player roster.
+    // True only after two consecutive valid Sidebar snapshots contain at
+    // least two distinct team rows and exactly one team row containing YOU.
     bool matchActive = false;
+    char ownTeam = 'u';
+    bool ownBedKnown = false;
+    int ownBedX = 0;
+    int ownBedY = 0;
+    int ownBedZ = 0;
     WorldCameraSnapshot camera{};
     std::uint32_t mappingAttempt = 0U;
     std::uint32_t mappingRetryInMs = 0U;
@@ -172,6 +186,10 @@ public:
     // LWJGL release path each frame without repeatedly invoking Minecraft's
     // mapped focus methods.
     [[nodiscard]] bool maintainInputReleased(JNIEnv* env) noexcept;
+    // Adds a client-side component directly to EntityPlayerSP's chat log. It
+    // does not invoke the network handler and therefore cannot send a message
+    // to the server. Calls are de-duplicated by the roster generation.
+    void publishDebugChat(JNIEnv* env, bool enabled) noexcept;
     void release(JNIEnv* env) noexcept;
     void abandon() noexcept;
 
@@ -221,6 +239,11 @@ private:
     std::uint64_t m_entitySampleGeneration = 0U;
     std::uint64_t m_lastPlayerScan = 0U;
     std::uint64_t m_playerRosterGeneration = 0U;
+    std::uint64_t m_debugRosterGeneration = 0U;
+    jweak m_lastWorld = nullptr;
+    bedwars::Team m_sidebarCandidateTeam = bedwars::Team::Unknown;
+    std::uint8_t m_sidebarStableCount = 0U;
+    std::uint8_t m_sidebarMissingCount = 0U;
     GameSnapshot m_snapshot{};
 
     struct PublishedBedCache final {

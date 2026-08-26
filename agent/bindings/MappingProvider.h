@@ -93,6 +93,25 @@ struct MappingDictionary final {
     std::string timerSignature;
     std::string chatComponentName;
     std::string chatComponentSignature;
+    std::string chatTextName;
+    std::string chatTextSignature;
+
+    std::string scoreboardName;
+    std::string scoreboardSignature;
+    std::string scoreObjectiveName;
+    std::string scoreObjectiveSignature;
+    std::string scoreName;
+    std::string scoreSignature;
+    std::string scorePlayerTeamName;
+    std::string scorePlayerTeamSignature;
+    std::string itemStackName;
+    std::string itemStackSignature;
+    std::string itemName;
+    std::string itemSignature;
+    std::string itemArmorName;
+    std::string itemArmorSignature;
+    std::string inventoryPlayerName;
+    std::string inventoryPlayerSignature;
 
     std::string getMinecraft;
     // Exactly one singleton accessor is required. Lunar's named runtime is
@@ -116,6 +135,7 @@ struct MappingDictionary final {
     std::string getName;
     std::string getDisplayName;
     std::string getFormattedText;
+    std::string addChatMessage;
     std::string getBlockState;
     std::string getBlock;
     std::string getBlockMetadata;
@@ -134,6 +154,18 @@ struct MappingDictionary final {
     std::string timerField;
     std::string renderPartialTicksField;
     std::array<std::string, 6U> aabbFields;
+
+    std::string getScoreboard;
+    std::string getObjectiveInDisplaySlot;
+    std::string getPlayersTeam;
+    std::string getSortedScores;
+    std::string getPlayerName;
+    std::string formatPlayerName;
+    std::string inventoryField;
+    std::string armorInventoryField;
+    std::string getItem;
+    std::string hasColor;
+    std::string getColor;
 
     // Strict validation prevents a partially filled or malformed external
     // dictionary from ever reaching JNI GetMethodID/GetFieldID calls.

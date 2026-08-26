@@ -19,12 +19,28 @@ struct OverlayInputState;
 struct FeatureSettings final {
     bool espEnabled = true;
     bool entityEspEnabled = true;
+    bool entityEspPlayersOnly = false;
     bool bedEspEnabled = true;
+    bool bedAutoRefreshEnabled = false;
     bool labelsEnabled = true;
     bool hypixelPanelEnabled = true;
     bool bedThreatAlertsEnabled = true;
     bool bedDefensePanelEnabled = true;
+    bool bedEspFilled = false;
+    bool debugChatEnabled = true;
+    bool showOwnBedDefenseInfo = true;
+    bool showTeammateBoxes = true;
+    bool bedDefenseHoldToShow = true;
+    bool bedDefensePerspectiveScale = false;
     int bedDefenseRadius = 6;
+    int bedThreatRadius = 8;
+    int bedDefenseHotkey = VK_LMENU;
+    int bedDefensePanelOpacity = 78;
+    // Stored as 0xRRGGBB so the value is renderer-independent and can travel
+    // through the text IPC protocol without floating-point round trips.
+    std::uint32_t playerEspColor = 0xFF3B30U;
+    std::uint32_t bedEspColor = 0xFF5C68U;
+    std::uint32_t bedDefensePanelColor = 0x191621U;
 
     [[nodiscard]] bool operator==(const FeatureSettings&) const noexcept = default;
 };
@@ -133,9 +149,10 @@ private:
     std::array<char, 17U> m_hypixelQuery{};
     std::array<char, 17U> m_hypixelInput{};
     float m_clickGuiProgress = 0.0F;
-    float m_toggleAnimation[7]{};
-    float m_clickGuiX = -1.0F;
+    float m_toggleAnimation[15]{};
+    float m_clickGuiX = -9999.0F;
     float m_clickGuiY = 18.0F;
+    double m_lastBedRefreshTime = 0.0;
     int m_guiScaleIndex = 1;
     int m_appliedGuiScaleIndex = -1;
     float m_animatedGuiScale = 1.25F;
@@ -159,21 +176,25 @@ private:
     std::uint64_t m_toastSequence = 0U;
     struct ThreatContact final {
         jint entityId = -1;
+        std::array<char, 17U> playerName{};
+        char teamColor = 'u';
         int bedX = 0;
         int bedY = 0;
         int bedZ = 0;
+        double distance = 0.0;
         std::uint64_t lastSeenTick = 0U;
-        std::uint64_t lastAlertTick = 0U;
         bool inside = false;
     };
     std::array<ThreatContact, 64U> m_threatContacts{};
-    std::uint64_t m_lastThreatToastTick = 0U;
     std::uint64_t m_lastEntitySampleGeneration = 0U;
     float m_lastEntityPartialTicks = 0.0F;
     unsigned m_missedEntityTicks = 0U;
     unsigned m_blurTexture = 0U;
+    unsigned m_bedTexture = 0U;
+    unsigned m_blockTextures[6]{};
     int m_blurWidth = 0;
     int m_blurHeight = 0;
+
 };
 
 } // namespace mcoverlay

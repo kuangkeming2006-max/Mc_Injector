@@ -381,6 +381,17 @@ try {
         }
     }
 
+    # Exercise the complete persisted feature-state grammar: twelve flags,
+    # defense/threat radii, and two packed 0xRRGGBB values. The synthetic JVM
+    # has no Minecraft classes, but the renderer/control protocol must still
+    # accept and acknowledge the settings atomically.
+    $writer.WriteLine('FEATURE_STATE 1 1 1 1 1 1 1 1 1 1 1 1 10 32 16777215 0')
+    do {
+        $line = Read-ProtocolLine -Reader $reader -Stopwatch $protocolWatch `
+            -LimitSeconds $TimeoutSeconds -Operation 'applying the complete feature snapshot' `
+            -Received $received
+    } while ($line -cne 'FEATURE_STATE_APPLIED')
+
     # The synthetic JVM intentionally has no Minecraft classes, so telemetry
     # must still arrive with valid=0. This checks that mapping failure never
     # suppresses the controller dashboard protocol or blocks the render hook.

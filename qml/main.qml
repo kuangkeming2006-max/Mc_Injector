@@ -80,7 +80,13 @@ ApplicationWindow {
                                                     : setupNavigationItems
 
     property string activeRoute: "scanner"
-    property bool autoRefresh: false
+    property alias autoRefresh: autoRefreshBinding.value
+    QtObject {
+        id: autoRefreshBinding
+        property bool value: AppSettings.processAutoRefresh
+        onValueChanged: if (AppSettings.processAutoRefresh !== value)
+                            AppSettings.processAutoRefresh = value
+    }
     property var pendingProcess: ({})
 
     function menuHotkeyIndex(virtualKey) {
@@ -483,12 +489,9 @@ ApplicationWindow {
                         id: navPill
                         anchors.fill: parent
                         radius: 20
-                        // Selection and hover are separate layers. Animating a
-                        // color binding that alternated between transparent,
-                        // hover and selected colors caused two successive
-                        // darkening steps when the delegate state changed.
                         color: app.activeRoute === modelData.route
-                               ? app.primaryContainer : "transparent"
+                               ? app.primaryContainer
+                               : (navMouse.containsMouse ? "#E3DDE7" : "transparent")
                         scale: navMouse.pressed ? 0.985 : 1
                         transformOrigin: Item.Center
 
@@ -507,18 +510,6 @@ ApplicationWindow {
                             rippleColor: app.primaryColor
                             peakOpacity: 0.13
                             cornerRadius: navPill.radius
-                        }
-
-                        Rectangle {
-                            anchors.fill: parent
-                            radius: parent.radius
-                            color: "#E3DDE7"
-                            // Keep the hover wash translucent so the clipped ripple remains
-                            // visible.  A single animated layer avoids the previous two-step
-                            // darkening caused by animating both the pill and its overlay.
-                            opacity: navMouse.containsMouse
-                                     && app.activeRoute !== modelData.route ? 0.72 : 0
-                            Behavior on opacity { NumberAnimation { duration: 160 } }
                         }
 
                         RowLayout {
@@ -1103,9 +1094,14 @@ ApplicationWindow {
                                     model: [
                                         { "label": "ESP master", "detail": "Single-player world-space diagnostics", "key": "master" },
                                         { "label": "3D living hitboxes", "detail": "Occlusion-independent projected AABB wireframes", "key": "entities" },
+                                        { "label": "Players only", "detail": "Hide non-player living-entity boxes", "key": "playersOnly" },
                                         { "label": "Bed ESP", "detail": "Chunk diffing, bulk section copy and lazy verification", "key": "beds" },
-                                        { "label": "Bed proximity alert", "detail": "Rate-limited lower-right warning when another player enters 8 blocks", "key": "bedThreat" },
+                                        { "label": "Automatic bed refresh", "detail": "Periodically rebuild loaded-chunk bed data", "key": "bedAuto" },
+                                        { "label": "Solid translucent bed fill", "detail": "Fill projected bed boxes while retaining the outline", "key": "bedFill" },
+                                        { "label": "Bed proximity alert", "detail": "Persistent distance-tracking warning while an enemy is in range", "key": "bedThreat" },
                                         { "label": "Bed defense panel", "detail": "Fixed-size material icons above each detected bed", "key": "bedDefense" },
+                                        { "label": "Show own bed materials", "detail": "Include the local team's bed defense information", "key": "ownBedInfo" },
+                                        { "label": "Local Debug chat", "detail": "Show match, team and teammate decisions only in your chat log", "key": "debugChat" },
                                         { "label": "World labels", "detail": "Coordinates and entity identifiers", "key": "labels" },
                                         { "label": "Hypixel panel", "detail": "Show the draggable official-API result card in game", "key": "hypixel" }
                                     ]
@@ -1121,24 +1117,113 @@ ApplicationWindow {
                                             Text { text: modelData.detail; color: app.secondaryTextColor; font.pixelSize: 11; elide: Text.ElideRight; Layout.fillWidth: true }
                                         }
                                         Switch {
-                                            enabled: OverlayManager.attached
                                             checked: modelData.key === "master" ? OverlayManager.espEnabled
                                                    : modelData.key === "entities" ? OverlayManager.entityEspEnabled
+                                                   : modelData.key === "playersOnly" ? OverlayManager.entityEspPlayersOnly
                                                    : modelData.key === "beds" ? OverlayManager.bedEspEnabled
+                                                   : modelData.key === "bedAuto" ? OverlayManager.bedAutoRefreshEnabled
+                                                   : modelData.key === "bedFill" ? OverlayManager.bedEspFilled
                                                    : modelData.key === "bedThreat" ? OverlayManager.bedThreatAlertsEnabled
                                                    : modelData.key === "bedDefense" ? OverlayManager.bedDefensePanelEnabled
+                                                   : modelData.key === "ownBedInfo" ? OverlayManager.showOwnBedDefenseInfo
+                                                   : modelData.key === "debugChat" ? OverlayManager.debugChatEnabled
                                                    : modelData.key === "labels" ? OverlayManager.espLabelsEnabled
                                                    : OverlayManager.hypixelPanelEnabled
                                             onToggled: {
                                                 if (modelData.key === "master") OverlayManager.espEnabled = checked
                                                 else if (modelData.key === "entities") OverlayManager.entityEspEnabled = checked
+                                                else if (modelData.key === "playersOnly") OverlayManager.entityEspPlayersOnly = checked
                                                 else if (modelData.key === "beds") OverlayManager.bedEspEnabled = checked
+                                                else if (modelData.key === "bedAuto") OverlayManager.bedAutoRefreshEnabled = checked
+                                                else if (modelData.key === "bedFill") OverlayManager.bedEspFilled = checked
                                                 else if (modelData.key === "bedThreat") OverlayManager.bedThreatAlertsEnabled = checked
                                                 else if (modelData.key === "bedDefense") OverlayManager.bedDefensePanelEnabled = checked
+                                                else if (modelData.key === "ownBedInfo") OverlayManager.showOwnBedDefenseInfo = checked
+                                                else if (modelData.key === "debugChat") OverlayManager.debugChatEnabled = checked
                                                 else if (modelData.key === "labels") OverlayManager.espLabelsEnabled = checked
                                                 else OverlayManager.hypixelPanelEnabled = checked
                                             }
                                         }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 12
+                                    Text { Layout.preferredWidth: 156; text: "Player box color"; color: app.textColor; font.pixelSize: 13; font.weight: Font.Medium }
+                                    Repeater {
+                                        model: ["#FF3B30", "#FF9500", "#FFD60A", "#30D158", "#64D2FF", "#0A84FF", "#BF5AF2", "#FFFFFF"]
+                                        Rectangle {
+                                            required property string modelData
+                                            width: 26; height: 26; radius: 13; color: modelData
+                                            border.width: OverlayManager.playerEspColor.toUpperCase() === modelData ? 3 : 1
+                                            border.color: OverlayManager.playerEspColor.toUpperCase() === modelData ? app.primaryColor : "#8B8490"
+                                            TapHandler { onTapped: OverlayManager.playerEspColor = parent.modelData }
+                                        }
+                                    }
+                                    MaterialTextField {
+                                        id: playerColorField
+                                        Layout.preferredWidth: 106; Layout.preferredHeight: 40
+                                        text: OverlayManager.playerEspColor
+                                        maximumLength: 7
+                                        onEditingFinished: {
+                                            if (/^#[0-9a-fA-F]{6}$/.test(text)) OverlayManager.playerEspColor = text
+                                            text = OverlayManager.playerEspColor
+                                        }
+                                        Connections {
+                                            target: OverlayManager
+                                            function onFeatureSettingsChanged() {
+                                                if (!playerColorField.activeFocus) playerColorField.text = OverlayManager.playerEspColor
+                                            }
+                                        }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 12
+                                    Text { Layout.preferredWidth: 156; text: "Bed box color"; color: app.textColor; font.pixelSize: 13; font.weight: Font.Medium }
+                                    Repeater {
+                                        model: ["#FF5C68", "#FF9500", "#FFD60A", "#30D158", "#64D2FF", "#0A84FF", "#BF5AF2", "#FFFFFF"]
+                                        Rectangle {
+                                            required property string modelData
+                                            width: 26; height: 26; radius: 13; color: modelData
+                                            border.width: OverlayManager.bedEspColor.toUpperCase() === modelData ? 3 : 1
+                                            border.color: OverlayManager.bedEspColor.toUpperCase() === modelData ? app.primaryColor : "#8B8490"
+                                            TapHandler { onTapped: OverlayManager.bedEspColor = parent.modelData }
+                                        }
+                                    }
+                                    MaterialTextField {
+                                        id: bedColorField
+                                        Layout.preferredWidth: 106; Layout.preferredHeight: 40
+                                        text: OverlayManager.bedEspColor
+                                        maximumLength: 7
+                                        onEditingFinished: {
+                                            if (/^#[0-9a-fA-F]{6}$/.test(text)) OverlayManager.bedEspColor = text
+                                            text = OverlayManager.bedEspColor
+                                        }
+                                        Connections {
+                                            target: OverlayManager
+                                            function onFeatureSettingsChanged() {
+                                                if (!bedColorField.activeFocus) bedColorField.text = OverlayManager.bedEspColor
+                                            }
+                                        }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 14
+                                    Text { Layout.preferredWidth: 156; text: "Bed warning range"; color: app.textColor; font.pixelSize: 13; font.weight: Font.Medium }
+                                    Slider {
+                                        Layout.fillWidth: true
+                                        from: 3; to: 32; stepSize: 1
+                                        value: OverlayManager.bedThreatRadius
+                                        onMoved: OverlayManager.bedThreatRadius = Math.round(value)
+                                    }
+                                    Rectangle {
+                                        Layout.preferredWidth: 74; Layout.preferredHeight: 34; radius: 17; color: app.primaryContainer
+                                        Text { anchors.centerIn: parent; text: OverlayManager.bedThreatRadius + " m"; color: app.primaryColor; font.pixelSize: 12; font.weight: Font.Bold }
                                     }
                                 }
 
@@ -1163,7 +1248,6 @@ ApplicationWindow {
                                             containerColor: app.primaryColor
                                             foregroundColor: filled ? "white" : app.primaryColor
                                             outlineColor: "#CAC4D0"
-                                            enabled: OverlayManager.attached
                                             onClicked: OverlayManager.bedDefenseRadius = radiusValue
                                         }
                                     }

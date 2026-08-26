@@ -42,12 +42,20 @@ public:
                    NOTIFY interactiveChanged)
     Q_PROPERTY(bool espEnabled READ espEnabled WRITE setEspEnabled NOTIFY featureSettingsChanged)
     Q_PROPERTY(bool entityEspEnabled READ entityEspEnabled WRITE setEntityEspEnabled NOTIFY featureSettingsChanged)
+    Q_PROPERTY(bool entityEspPlayersOnly READ entityEspPlayersOnly WRITE setEntityEspPlayersOnly NOTIFY featureSettingsChanged)
     Q_PROPERTY(bool bedEspEnabled READ bedEspEnabled WRITE setBedEspEnabled NOTIFY featureSettingsChanged)
+    Q_PROPERTY(bool bedAutoRefreshEnabled READ bedAutoRefreshEnabled WRITE setBedAutoRefreshEnabled NOTIFY featureSettingsChanged)
     Q_PROPERTY(bool espLabelsEnabled READ espLabelsEnabled WRITE setEspLabelsEnabled NOTIFY featureSettingsChanged)
     Q_PROPERTY(bool hypixelPanelEnabled READ hypixelPanelEnabled WRITE setHypixelPanelEnabled NOTIFY featureSettingsChanged)
     Q_PROPERTY(bool bedThreatAlertsEnabled READ bedThreatAlertsEnabled WRITE setBedThreatAlertsEnabled NOTIFY featureSettingsChanged)
     Q_PROPERTY(bool bedDefensePanelEnabled READ bedDefensePanelEnabled WRITE setBedDefensePanelEnabled NOTIFY featureSettingsChanged)
+    Q_PROPERTY(bool bedEspFilled READ bedEspFilled WRITE setBedEspFilled NOTIFY featureSettingsChanged)
+    Q_PROPERTY(bool debugChatEnabled READ debugChatEnabled WRITE setDebugChatEnabled NOTIFY featureSettingsChanged)
+    Q_PROPERTY(bool showOwnBedDefenseInfo READ showOwnBedDefenseInfo WRITE setShowOwnBedDefenseInfo NOTIFY featureSettingsChanged)
     Q_PROPERTY(int bedDefenseRadius READ bedDefenseRadius WRITE setBedDefenseRadius NOTIFY featureSettingsChanged)
+    Q_PROPERTY(int bedThreatRadius READ bedThreatRadius WRITE setBedThreatRadius NOTIFY featureSettingsChanged)
+    Q_PROPERTY(QString playerEspColor READ playerEspColor WRITE setPlayerEspColor NOTIFY featureSettingsChanged)
+    Q_PROPERTY(QString bedEspColor READ bedEspColor WRITE setBedEspColor NOTIFY featureSettingsChanged)
     Q_PROPERTY(int menuHotkey READ menuHotkey WRITE setMenuHotkey NOTIFY menuHotkeyChanged)
     Q_PROPERTY(int guiScaleIndex READ guiScaleIndex WRITE setGuiScaleIndex
                    NOTIFY guiScaleIndexChanged)
@@ -91,12 +99,20 @@ public:
     [[nodiscard]] bool interactive() const noexcept { return m_interactive; }
     [[nodiscard]] bool espEnabled() const noexcept { return m_espEnabled; }
     [[nodiscard]] bool entityEspEnabled() const noexcept { return m_entityEspEnabled; }
+    [[nodiscard]] bool entityEspPlayersOnly() const noexcept { return m_entityEspPlayersOnly; }
     [[nodiscard]] bool bedEspEnabled() const noexcept { return m_bedEspEnabled; }
+    [[nodiscard]] bool bedAutoRefreshEnabled() const noexcept { return m_bedAutoRefreshEnabled; }
     [[nodiscard]] bool espLabelsEnabled() const noexcept { return m_espLabelsEnabled; }
     [[nodiscard]] bool hypixelPanelEnabled() const noexcept { return m_hypixelPanelEnabled; }
     [[nodiscard]] bool bedThreatAlertsEnabled() const noexcept { return m_bedThreatAlertsEnabled; }
     [[nodiscard]] bool bedDefensePanelEnabled() const noexcept { return m_bedDefensePanelEnabled; }
+    [[nodiscard]] bool bedEspFilled() const noexcept { return m_bedEspFilled; }
+    [[nodiscard]] bool debugChatEnabled() const noexcept { return m_debugChatEnabled; }
+    [[nodiscard]] bool showOwnBedDefenseInfo() const noexcept { return m_showOwnBedDefenseInfo; }
     [[nodiscard]] int bedDefenseRadius() const noexcept { return m_bedDefenseRadius; }
+    [[nodiscard]] int bedThreatRadius() const noexcept { return m_bedThreatRadius; }
+    [[nodiscard]] QString playerEspColor() const { return m_playerEspColor; }
+    [[nodiscard]] QString bedEspColor() const { return m_bedEspColor; }
     [[nodiscard]] int menuHotkey() const noexcept { return m_menuHotkey; }
     [[nodiscard]] int guiScaleIndex() const noexcept { return m_guiScaleIndex; }
     [[nodiscard]] quint32 targetPid() const noexcept { return m_targetPid; }
@@ -135,12 +151,20 @@ public slots:
     void setInteractive(bool interactive);
     void setEspEnabled(bool enabled);
     void setEntityEspEnabled(bool enabled);
+    void setEntityEspPlayersOnly(bool enabled);
     void setBedEspEnabled(bool enabled);
+    void setBedAutoRefreshEnabled(bool enabled);
     void setEspLabelsEnabled(bool enabled);
     void setHypixelPanelEnabled(bool enabled);
     void setBedThreatAlertsEnabled(bool enabled);
     void setBedDefensePanelEnabled(bool enabled);
+    void setBedEspFilled(bool enabled);
+    void setDebugChatEnabled(bool enabled);
+    void setShowOwnBedDefenseInfo(bool enabled);
     void setBedDefenseRadius(int radius);
+    void setBedThreatRadius(int radius);
+    void setPlayerEspColor(const QString &color);
+    void setBedEspColor(const QString &color);
     void setMenuHotkey(int virtualKey);
     void setGuiScaleIndex(int index);
     void publishHypixelResult(int state, const QString &uuid, const QString &displayName,
@@ -222,6 +246,9 @@ private:
     void sendFeatureSnapshot();
     void sendBindSnapshot();
     void sendGuiScaleSnapshot();
+    void loadFeatureSettings();
+    void storeFeatureSettings();
+    void flushFeatureSettings() const;
     void writeAgentCommand(const QByteArray &command);
     // Closes IPC and asks a still-running helper to terminate. This function
     // is deliberately non-blocking; QProcess::finished completes any queued
@@ -247,6 +274,7 @@ private:
     QTimer m_detachTimeout;
     QTimer m_targetMonitor;
     QTimer m_gameStateFreshnessTimer;
+    QTimer m_featureSettingsStoreTimer;
     QElapsedTimer m_gameStateReceiptClock;
     QByteArray m_agentReadBuffer;
     QByteArray m_helperStandardOutput;
@@ -267,12 +295,20 @@ private:
     bool m_interactive = false;
     bool m_espEnabled = true;
     bool m_entityEspEnabled = true;
+    bool m_entityEspPlayersOnly = false;
     bool m_bedEspEnabled = true;
+    bool m_bedAutoRefreshEnabled = false;
     bool m_espLabelsEnabled = true;
     bool m_hypixelPanelEnabled = true;
     bool m_bedThreatAlertsEnabled = true;
     bool m_bedDefensePanelEnabled = true;
+    bool m_bedEspFilled = false;
+    bool m_debugChatEnabled = true;
+    bool m_showOwnBedDefenseInfo = true;
     int m_bedDefenseRadius = 6;
+    int m_bedThreatRadius = 8;
+    QString m_playerEspColor = QStringLiteral("#FF3B30");
+    QString m_bedEspColor = QStringLiteral("#FF5C68");
     int m_menuHotkey = 0xDE; // VK_OEM_7 / apostrophe
     int m_guiScaleIndex = 1; // S/M/L/XL -> 0..3
     bool m_authenticated = false;

@@ -71,24 +71,58 @@ bool parseFlag(std::string_view token, bool& result) noexcept
     return true;
 }
 
-std::uint8_t packFeatures(const FeatureSettings& settings) noexcept
+std::uint16_t packFeatures(const FeatureSettings& settings) noexcept
 {
-    return static_cast<std::uint8_t>((settings.espEnabled ? 0x01U : 0U) |
+    return static_cast<std::uint16_t>((settings.espEnabled ? 0x01U : 0U) |
         (settings.entityEspEnabled ? 0x02U : 0U) |
         (settings.bedEspEnabled ? 0x04U : 0U) |
         (settings.labelsEnabled ? 0x08U : 0U) |
         (settings.hypixelPanelEnabled ? 0x10U : 0U) |
         (settings.bedThreatAlertsEnabled ? 0x20U : 0U) |
-        (settings.bedDefensePanelEnabled ? 0x40U : 0U));
+        (settings.bedDefensePanelEnabled ? 0x40U : 0U) |
+        (settings.entityEspPlayersOnly ? 0x80U : 0U) |
+        (settings.bedAutoRefreshEnabled ? 0x100U : 0U) |
+        (settings.bedEspFilled ? 0x200U : 0U) |
+        (settings.debugChatEnabled ? 0x400U : 0U) |
+        (settings.showOwnBedDefenseInfo ? 0x800U : 0U) |
+        (settings.showTeammateBoxes ? 0x1000U : 0U) |
+        (settings.bedDefenseHoldToShow ? 0x2000U : 0U) |
+        (settings.bedDefensePerspectiveScale ? 0x4000U : 0U));
 }
 
-FeatureSettings unpackFeatures(const std::uint8_t bits, const int radius = 6) noexcept
+FeatureSettings unpackFeatures(const std::uint16_t bits,
+                               const int defenseRadius = 6,
+                               const int threatRadius = 8,
+                               const int bedHotkey = VK_LMENU,
+                               const int panelOpacity = 78,
+                               const std::uint32_t playerColor = 0xFF3B30U,
+                               const std::uint32_t bedColor = 0xFF5C68U,
+                               const std::uint32_t panelColor = 0x191621U) noexcept
 {
-    return FeatureSettings{
-        (bits & 0x01U) != 0U, (bits & 0x02U) != 0U,
-        (bits & 0x04U) != 0U, (bits & 0x08U) != 0U,
-        (bits & 0x10U) != 0U, (bits & 0x20U) != 0U,
-        (bits & 0x40U) != 0U, std::clamp(radius, 3, 10)};
+    FeatureSettings s;
+    s.espEnabled = (bits & 0x01U) != 0U;
+    s.entityEspEnabled = (bits & 0x02U) != 0U;
+    s.bedEspEnabled = (bits & 0x04U) != 0U;
+    s.labelsEnabled = (bits & 0x08U) != 0U;
+    s.hypixelPanelEnabled = (bits & 0x10U) != 0U;
+    s.bedThreatAlertsEnabled = (bits & 0x20U) != 0U;
+    s.bedDefensePanelEnabled = (bits & 0x40U) != 0U;
+    s.entityEspPlayersOnly = (bits & 0x80U) != 0U;
+    s.bedAutoRefreshEnabled = (bits & 0x100U) != 0U;
+    s.bedEspFilled = (bits & 0x200U) != 0U;
+    s.debugChatEnabled = (bits & 0x400U) != 0U;
+    s.showOwnBedDefenseInfo = (bits & 0x800U) != 0U;
+    s.showTeammateBoxes = (bits & 0x1000U) != 0U;
+    s.bedDefenseHoldToShow = (bits & 0x2000U) != 0U;
+    s.bedDefensePerspectiveScale = (bits & 0x4000U) != 0U;
+    s.bedDefenseRadius = std::clamp(defenseRadius, 3, 10);
+    s.bedThreatRadius = std::clamp(threatRadius, 3, 32);
+    s.bedDefenseHotkey = std::clamp(bedHotkey, 8, 254);
+    s.bedDefensePanelOpacity = std::clamp(panelOpacity, 0, 100);
+    s.playerEspColor = playerColor & 0xFFFFFFU;
+    s.bedEspColor = bedColor & 0xFFFFFFU;
+    s.bedDefensePanelColor = panelColor & 0xFFFFFFU;
+    return s;
 }
 
 template<std::size_t Capacity>
@@ -544,8 +578,14 @@ void AgentRuntime::telemetryMain() noexcept
         if (featureRevision != sentFeatureChangedRevision) {
             const FeatureSettings settings = unpackFeatures(
                 m_featureChangedBits.load(std::memory_order_acquire),
-                m_featureChangedBedRadius.load(std::memory_order_acquire));
-            FixedLine<96U> line;
+                m_featureChangedBedRadius.load(std::memory_order_acquire),
+                m_featureChangedThreatRadius.load(std::memory_order_acquire),
+                m_featureChangedBedHotkey.load(std::memory_order_acquire),
+                m_featureChangedPanelOpacity.load(std::memory_order_acquire),
+                m_featureChangedPlayerColor.load(std::memory_order_acquire),
+                m_featureChangedBedColor.load(std::memory_order_acquire),
+                m_featureChangedPanelColor.load(std::memory_order_acquire));
+            FixedLine<256U> line;
             if (line.append("FEATURE_STATE_CHANGED ") &&
                 line.appendInteger(settings.espEnabled ? 1 : 0) && line.append(' ') &&
                 line.appendInteger(settings.entityEspEnabled ? 1 : 0) && line.append(' ') &&
@@ -554,7 +594,21 @@ void AgentRuntime::telemetryMain() noexcept
                 line.appendInteger(settings.hypixelPanelEnabled ? 1 : 0) && line.append(' ') &&
                 line.appendInteger(settings.bedThreatAlertsEnabled ? 1 : 0) && line.append(' ') &&
                 line.appendInteger(settings.bedDefensePanelEnabled ? 1 : 0) && line.append(' ') &&
-                line.appendInteger(settings.bedDefenseRadius) &&
+                line.appendInteger(settings.entityEspPlayersOnly ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.bedAutoRefreshEnabled ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.bedEspFilled ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.debugChatEnabled ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.showOwnBedDefenseInfo ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.showTeammateBoxes ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.bedDefenseHoldToShow ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.bedDefensePerspectiveScale ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.bedDefenseRadius) && line.append(' ') &&
+                line.appendInteger(settings.bedThreatRadius) && line.append(' ') &&
+                line.appendInteger(settings.bedDefenseHotkey) && line.append(' ') &&
+                line.appendInteger(settings.bedDefensePanelOpacity) && line.append(' ') &&
+                line.appendInteger(settings.playerEspColor) && line.append(' ') &&
+                line.appendInteger(settings.bedEspColor) && line.append(' ') &&
+                line.appendInteger(settings.bedDefensePanelColor) &&
                 m_ipc->sendLine(line.view())) {
                 sentFeatureChangedRevision = featureRevision;
             }
@@ -626,9 +680,14 @@ void AgentRuntime::telemetryMain() noexcept
             }
             for (std::uint32_t index = 0U; allSent && matchActive &&
                  index < playerCount; ++index) {
+                const char teamColor = players[index].teamColor;
+                if (!((teamColor >= '0' && teamColor <= '9') ||
+                      (teamColor >= 'a' && teamColor <= 'f'))) {
+                    continue;
+                }
                 const char teamPrefix[4]{
                     static_cast<char>(0xC2), static_cast<char>(0xA7),
-                    players[index].teamColor, '\0'};
+                    teamColor, '\0'};
                 FixedLine<96U> line;
                 if (!line.append("PLAYER_FOUND ") ||
                     !appendPercentEncoded(line, players[index].name.data()) ||
@@ -721,13 +780,38 @@ void AgentRuntime::queueStateChanged(const bool visible, const bool interactive)
 
 void AgentRuntime::queueFeatureChanged(const FeatureSettings& settings) noexcept
 {
-    const std::uint8_t bits = packFeatures(settings);
+    const std::uint16_t bits = packFeatures(settings);
     m_featureBits.store(bits, std::memory_order_release);
     m_bedDefenseRadius.store(std::clamp(settings.bedDefenseRadius, 3, 10),
                              std::memory_order_release);
+    m_bedThreatRadius.store(std::clamp(settings.bedThreatRadius, 3, 32),
+                            std::memory_order_release);
+    m_bedDefenseHotkey.store(std::clamp(settings.bedDefenseHotkey, 8, 254),
+                             std::memory_order_release);
+    m_bedDefensePanelOpacity.store(std::clamp(settings.bedDefensePanelOpacity, 0, 100),
+                                   std::memory_order_release);
+    m_playerEspColor.store(settings.playerEspColor & 0xFFFFFFU,
+                           std::memory_order_release);
+    m_bedEspColor.store(settings.bedEspColor & 0xFFFFFFU,
+                        std::memory_order_release);
+    m_bedDefensePanelColor.store(settings.bedDefensePanelColor & 0xFFFFFFU,
+                                 std::memory_order_release);
     m_featureChangedBits.store(bits, std::memory_order_relaxed);
     m_featureChangedBedRadius.store(std::clamp(settings.bedDefenseRadius, 3, 10),
                                     std::memory_order_relaxed);
+    m_featureChangedThreatRadius.store(std::clamp(settings.bedThreatRadius, 3, 32),
+                                       std::memory_order_relaxed);
+    m_featureChangedBedHotkey.store(std::clamp(settings.bedDefenseHotkey, 8, 254),
+                                    std::memory_order_relaxed);
+    m_featureChangedPanelOpacity.store(
+        std::clamp(settings.bedDefensePanelOpacity, 0, 100),
+        std::memory_order_relaxed);
+    m_featureChangedPlayerColor.store(settings.playerEspColor & 0xFFFFFFU,
+                                      std::memory_order_relaxed);
+    m_featureChangedBedColor.store(settings.bedEspColor & 0xFFFFFFU,
+                                   std::memory_order_relaxed);
+    m_featureChangedPanelColor.store(settings.bedDefensePanelColor & 0xFFFFFFU,
+                                     std::memory_order_relaxed);
     m_featureChangedRevision.fetch_add(1U, std::memory_order_release);
     if (m_telemetryEvent != nullptr) ::SetEvent(m_telemetryEvent);
 }
@@ -815,31 +899,72 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
         return true;
     }
     if (command == "FEATURE_STATE") {
-        std::array<std::string, 7U> tokens{};
+        std::array<std::string, 15U> tokens{};
         std::string trailing;
         FeatureSettings settings{};
-        bool values[7]{};
-        int radius = 0;
-        if (!(stream >> tokens[0] >> tokens[1] >> tokens[2] >> tokens[3] >> tokens[4]
-              >> tokens[5] >> tokens[6] >> radius) ||
+        std::array<bool, 15U> values{};
+        int defenseRadius = 0;
+        int threatRadius = 0;
+        int bedHotkey = 0;
+        int panelOpacity = 0;
+        std::uint32_t playerColor = 0U;
+        std::uint32_t bedColor = 0U;
+        std::uint32_t panelColor = 0U;
+        if (!(stream >> tokens[0] >> tokens[1] >> tokens[2] >> tokens[3]
+              >> tokens[4] >> tokens[5] >> tokens[6] >> tokens[7]
+              >> tokens[8] >> tokens[9] >> tokens[10] >> tokens[11]
+              >> tokens[12] >> tokens[13] >> tokens[14]
+              >> defenseRadius >> threatRadius >> bedHotkey >> panelOpacity
+              >> playerColor >> bedColor >> panelColor) ||
             (stream >> trailing)) {
-            (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE expected-seven-flags-and-radius");
+            (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE expected-fifteen-flags-radii-bind-opacity-colors");
             return true;
         }
         for (std::size_t index = 0U; index < tokens.size(); ++index) {
             if (!parseFlag(tokens[index], values[index])) {
-                (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE expected-seven-flags-and-radius");
+                (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE expected-fifteen-flags-radii-bind-opacity-colors");
                 return true;
             }
         }
-        if (radius < 3 || radius > 10) {
-            (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE radius-must-be-3-10");
+        if (defenseRadius < 3 || defenseRadius > 10 ||
+            threatRadius < 3 || threatRadius > 32 ||
+            bedHotkey < 8 || bedHotkey > 254 ||
+            panelOpacity < 0 || panelOpacity > 100 ||
+            playerColor > 0xFFFFFFU || bedColor > 0xFFFFFFU ||
+            panelColor > 0xFFFFFFU) {
+            (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE invalid-radius-bind-opacity-or-color");
             return true;
         }
-        settings = FeatureSettings{values[0], values[1], values[2], values[3], values[4],
-                                   values[5], values[6], radius};
+        settings.espEnabled = values[0];
+        settings.entityEspEnabled = values[1];
+        settings.bedEspEnabled = values[2];
+        settings.labelsEnabled = values[3];
+        settings.hypixelPanelEnabled = values[4];
+        settings.bedThreatAlertsEnabled = values[5];
+        settings.bedDefensePanelEnabled = values[6];
+        settings.entityEspPlayersOnly = values[7];
+        settings.bedAutoRefreshEnabled = values[8];
+        settings.bedEspFilled = values[9];
+        settings.debugChatEnabled = values[10];
+        settings.showOwnBedDefenseInfo = values[11];
+        settings.showTeammateBoxes = values[12];
+        settings.bedDefenseHoldToShow = values[13];
+        settings.bedDefensePerspectiveScale = values[14];
+        settings.bedDefenseRadius = defenseRadius;
+        settings.bedThreatRadius = threatRadius;
+        settings.bedDefenseHotkey = bedHotkey;
+        settings.bedDefensePanelOpacity = panelOpacity;
+        settings.playerEspColor = playerColor;
+        settings.bedEspColor = bedColor;
+        settings.bedDefensePanelColor = panelColor;
         m_featureBits.store(packFeatures(settings), std::memory_order_release);
-        m_bedDefenseRadius.store(radius, std::memory_order_release);
+        m_bedDefenseRadius.store(defenseRadius, std::memory_order_release);
+        m_bedThreatRadius.store(threatRadius, std::memory_order_release);
+        m_bedDefenseHotkey.store(bedHotkey, std::memory_order_release);
+        m_bedDefensePanelOpacity.store(panelOpacity, std::memory_order_release);
+        m_playerEspColor.store(playerColor, std::memory_order_release);
+        m_bedEspColor.store(bedColor, std::memory_order_release);
+        m_bedDefensePanelColor.store(panelColor, std::memory_order_release);
         (void)m_ipc->sendLine("FEATURE_STATE_APPLIED");
         return true;
     }
@@ -1100,6 +1225,12 @@ void AgentRuntime::beforeSwapBuffers(HDC const deviceContext)
 
     const std::uint64_t tickMilliseconds =
         static_cast<std::uint64_t>(::GetTickCount64());
+    const FeatureSettings activeFeatures = unpackFeatures(
+        m_featureBits.load(std::memory_order_acquire),
+        m_bedDefenseRadius.load(std::memory_order_acquire),
+        m_bedThreatRadius.load(std::memory_order_acquire),
+        m_playerEspColor.load(std::memory_order_acquire),
+        m_bedEspColor.load(std::memory_order_acquire));
     const bool interactiveNow = m_interactive.load(std::memory_order_acquire);
     if (env != nullptr) {
         if (interactiveNow && !m_gameInputReleased) {
@@ -1131,6 +1262,7 @@ void AgentRuntime::beforeSwapBuffers(HDC const deviceContext)
     // immutable cache.
     if (env != nullptr) {
         (void)m_bindings->sample(env, tickMilliseconds);
+        m_bindings->publishDebugChat(env, activeFeatures.debugChatEnabled);
         // ActiveRenderInfo changes with every camera transform. Keep this out
         // of the 10 Hz telemetry sampler so rotation, FOV and view bobbing are
         // reflected by the very same frame that is about to be presented.
@@ -1139,9 +1271,7 @@ void AgentRuntime::beforeSwapBuffers(HDC const deviceContext)
     GameSnapshot snapshot = m_bindings->snapshot(tickMilliseconds);
     if (m_visible.load(std::memory_order_acquire)) {
         m_renderer->setGuiScaleIndex(m_guiScaleIndex.load(std::memory_order_acquire));
-        m_renderer->setFeatureSettings(unpackFeatures(
-            m_featureBits.load(std::memory_order_acquire),
-            m_bedDefenseRadius.load(std::memory_order_acquire)));
+        m_renderer->setFeatureSettings(activeFeatures);
         ::AcquireSRWLockShared(&m_hypixelLock);
         const HypixelOverlaySnapshot hypixel = m_hypixelSnapshot;
         ::ReleaseSRWLockShared(&m_hypixelLock);

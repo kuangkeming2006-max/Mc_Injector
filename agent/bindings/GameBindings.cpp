@@ -6,6 +6,7 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <new>
@@ -40,6 +41,7 @@ struct GameBindings::BindingCache final {
     jclass renderManagerClass = nullptr;
     jclass timerClass = nullptr;
     jclass chatComponentClass = nullptr;
+    jclass chatTextClass = nullptr;
     jobject renderManagerObject = nullptr;
     jobject timerObject = nullptr;
     jobject modelViewBuffer = nullptr;
@@ -66,6 +68,8 @@ struct GameBindings::BindingCache final {
     jmethodID getName = nullptr;
     jmethodID getDisplayName = nullptr;
     jmethodID getFormattedText = nullptr;
+    jmethodID chatTextConstructor = nullptr;
+    jmethodID addChatMessage = nullptr;
     jmethodID listSize = nullptr;
     jmethodID listGet = nullptr;
     jmethodID blockPosConstructor = nullptr;
@@ -95,30 +99,31 @@ struct GameBindings::BindingCache final {
     jfieldID maxY = nullptr;
     jfieldID maxZ = nullptr;
 
+    jclass scoreboardClass = nullptr;
+    jclass scoreObjectiveClass = nullptr;
+    jclass scoreClass = nullptr;
+    jclass scorePlayerTeamClass = nullptr;
+    jclass itemStackClass = nullptr;
+    jclass itemClass = nullptr;
+    jclass itemArmorClass = nullptr;
+    jclass inventoryPlayerClass = nullptr;
+
+    jmethodID getScoreboard = nullptr;
+    jmethodID getObjectiveInDisplaySlot = nullptr;
+    jmethodID getPlayersTeam = nullptr;
+    jmethodID getSortedScores = nullptr;
+    jmethodID getPlayerName = nullptr;
+    jmethodID formatPlayerName = nullptr;
+    jfieldID inventoryField = nullptr;
+    jfieldID armorInventoryField = nullptr;
+    jmethodID getItem = nullptr;
+    jmethodID hasColor = nullptr;
+    jmethodID getColor = nullptr;
+
     const MappingProfile* profile = nullptr;
 };
 
 namespace {
-
-int bedWarsTeamIndex(const std::string_view formatted) noexcept
-{
-    constexpr std::array<std::string_view, 14U> tags{
-        "R", "RED", "B", "BLUE", "G", "GREEN", "Y", "YELLOW",
-        "A", "AQUA", "W", "WHITE", "P", "PINK"};
-    constexpr std::array<int, 14U> indices{0,0,1,1,2,2,3,3,4,4,5,5,6,6};
-    for (std::size_t offset = 0U; offset + 5U < formatted.size(); ++offset) {
-        if (static_cast<unsigned char>(formatted[offset]) != 0xC2U ||
-            static_cast<unsigned char>(formatted[offset + 1U]) != 0xA7U ||
-            formatted[offset + 3U] != '[') continue;
-        const std::size_t close = formatted.find(']', offset + 4U);
-        if (close == std::string_view::npos || close - (offset + 4U) > 6U) continue;
-        const std::string_view tag = formatted.substr(offset + 4U, close - (offset + 4U));
-        for (std::size_t index = 0U; index < tags.size(); ++index) {
-            if (tag == tags[index]) return indices[index];
-        }
-    }
-    return -1;
-}
 
 // GetLoadedClasses may require a HotSpot global safepoint even when it is
 // invoked from a native helper thread. By the time the controller offers a
@@ -543,6 +548,18 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
     jclass renderManager = nullptr;
     jclass timer = nullptr;
     jclass chatComponent = nullptr;
+    jclass chatText = nullptr;
+    jclass scoreboard = nullptr;
+    jclass scoreObjective = nullptr;
+    jclass score = nullptr;
+    jclass scorePlayerTeam = nullptr;
+    jclass itemStack = nullptr;
+    jclass item = nullptr;
+    jclass itemArmor = nullptr;
+    jclass inventoryPlayer = nullptr;
+    // Only the long-standing game/render bindings are profile-critical.  The
+    // BedWars sidebar and armor readers are optional capabilities: a missing or
+    // stale auxiliary mapping must not invalidate an otherwise usable client.
     if (!loadClass(player, profile.playerName.c_str()) ||
         !loadClass(living, profile.livingName.c_str()) ||
         !loadClass(entity, profile.entityName.c_str()) ||
@@ -560,8 +577,46 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
         !loadClass(renderManager, profile.renderManagerName.c_str()) ||
         !loadClass(timer, profile.timerName.c_str()) ||
         !loadClass(chatComponent, profile.chatComponentName.c_str())) {
+        log::info(std::string("Core mapping class load failed for profile: ") +
+                  profile.label);
         return false;
     }
+
+    auto loadFeatureClass = [&](jclass& destination,
+                                const std::string& binaryName,
+                                const char* const capability,
+                                const char* const logicalName) noexcept {
+        if (binaryName.empty()) {
+            log::info(std::string(capability) + " mappings unavailable for " +
+                      profile.label + ": no " + logicalName + " class mapping.");
+            return false;
+        }
+        destination = loadWithClassLoader(env, minecraftLoader, loadClassMethod,
+                                          binaryName.c_str());
+        if (destination == nullptr) {
+            log::info(std::string(capability) + " mappings unavailable for " +
+                      profile.label + ": could not load " + logicalName +
+                      " (" + binaryName + ").");
+            return false;
+        }
+        localReferences.add(destination);
+        return true;
+    };
+
+    const bool sidebarClassesLoaded =
+        loadFeatureClass(scoreboard, profile.scoreboardName, "Sidebar", "Scoreboard") &&
+        loadFeatureClass(scoreObjective, profile.scoreObjectiveName, "Sidebar", "ScoreObjective") &&
+        loadFeatureClass(score, profile.scoreName, "Sidebar", "Score") &&
+        loadFeatureClass(scorePlayerTeam, profile.scorePlayerTeamName, "Sidebar", "ScorePlayerTeam");
+
+    const bool armorClassesLoaded =
+        loadFeatureClass(itemStack, profile.itemStackName, "Armor", "ItemStack") &&
+        loadFeatureClass(item, profile.itemName, "Armor", "Item") &&
+        loadFeatureClass(itemArmor, profile.itemArmorName, "Armor", "ItemArmor") &&
+        loadFeatureClass(inventoryPlayer, profile.inventoryPlayerName, "Armor", "InventoryPlayer");
+
+    const bool debugChatClassLoaded =
+        loadFeatureClass(chatText, profile.chatTextName, "Debug chat", "ChatComponentText");
 
     const std::string getMinecraftSignature = std::string("()") + profile.minecraftSignature;
     const std::string getBoundsSignature = std::string("()") + profile.aabbSignature;
@@ -574,6 +629,12 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
         std::string("()[") + profile.storageSignature;
     const std::string getRenderManagerSignature =
         std::string("()") + profile.renderManagerSignature;
+
+    const std::string getObjectiveInDisplaySlotSignature = std::string("(I)") + profile.scoreObjectiveSignature;
+    const std::string getPlayersTeamSignature = std::string("(Ljava/lang/String;)") + profile.scorePlayerTeamSignature;
+    const std::string getSortedScoresSignature = std::string("(") + profile.scoreObjectiveSignature + ")Ljava/util/Collection;";
+    const std::string formatPlayerNameSignature = std::string("(") + profile.scorePlayerTeamSignature + "Ljava/lang/String;)Ljava/lang/String;";
+    const std::string getItemSignature = std::string("()") + profile.itemSignature;
 
     const bool singletonResolved = !profile.minecraftInstanceField.empty()
         ? lookupRequired(env, candidate.minecraftInstanceField, [&] {
@@ -685,6 +746,21 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
         })) {
         return false;
     }
+    if (debugChatClassLoaded && !profile.addChatMessage.empty()) {
+        candidate.chatTextConstructor = env->GetMethodID(
+            chatText, "<init>", "(Ljava/lang/String;)V");
+        candidate.addChatMessage = env->GetMethodID(
+            player, profile.addChatMessage.c_str(),
+            (std::string("(") + profile.chatComponentSignature + ")V").c_str());
+        if (env->ExceptionCheck() == JNI_TRUE ||
+            candidate.chatTextConstructor == nullptr || candidate.addChatMessage == nullptr) {
+            env->ExceptionClear();
+            candidate.chatTextConstructor = nullptr;
+            candidate.addChatMessage = nullptr;
+            log::info(std::string("Debug chat capability disabled for profile: ") +
+                      profile.label + " (auxiliary mapping did not resolve).");
+        }
+    }
     jclass listClass = nullptr;
     if (!lookupRequired(env, listClass,
                         [&] { return env->FindClass("java/util/List"); })) {
@@ -756,6 +832,92 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
         return false;
     }
 
+    bool sidebarCapability = sidebarClassesLoaded &&
+        !profile.getScoreboard.empty() &&
+        !profile.getObjectiveInDisplaySlot.empty() &&
+        !profile.getPlayersTeam.empty() &&
+        !profile.getSortedScores.empty() &&
+        !profile.getPlayerName.empty() &&
+        !profile.formatPlayerName.empty();
+    if (sidebarCapability) {
+        sidebarCapability =
+            lookupRequired(env, candidate.getScoreboard, [&] {
+                return env->GetMethodID(world, profile.getScoreboard.c_str(),
+                                        (std::string("()") + profile.scoreboardSignature).c_str());
+            }) &&
+            lookupRequired(env, candidate.getObjectiveInDisplaySlot, [&] {
+                return env->GetMethodID(scoreboard, profile.getObjectiveInDisplaySlot.c_str(),
+                                        getObjectiveInDisplaySlotSignature.c_str());
+            }) &&
+            lookupRequired(env, candidate.getPlayersTeam, [&] {
+                return env->GetMethodID(scoreboard, profile.getPlayersTeam.c_str(),
+                                        getPlayersTeamSignature.c_str());
+            }) &&
+            lookupRequired(env, candidate.getSortedScores, [&] {
+                return env->GetMethodID(scoreboard, profile.getSortedScores.c_str(),
+                                        getSortedScoresSignature.c_str());
+            }) &&
+            lookupRequired(env, candidate.getPlayerName, [&] {
+                return env->GetMethodID(score, profile.getPlayerName.c_str(),
+                                        "()Ljava/lang/String;");
+            }) &&
+            lookupRequired(env, candidate.formatPlayerName, [&] {
+                return env->GetStaticMethodID(scorePlayerTeam,
+                                              profile.formatPlayerName.c_str(),
+                                              formatPlayerNameSignature.c_str());
+            });
+    }
+    if (!sidebarCapability) {
+        candidate.getScoreboard = nullptr;
+        candidate.getObjectiveInDisplaySlot = nullptr;
+        candidate.getPlayersTeam = nullptr;
+        candidate.getSortedScores = nullptr;
+        candidate.getPlayerName = nullptr;
+        candidate.formatPlayerName = nullptr;
+        log::info(std::string("Sidebar capability disabled for profile: ") +
+                  profile.label + " (auxiliary mapping did not resolve).");
+    }
+
+    bool armorCapability = armorClassesLoaded &&
+        !profile.inventoryField.empty() &&
+        !profile.armorInventoryField.empty() &&
+        !profile.getItem.empty() &&
+        !profile.hasColor.empty() &&
+        !profile.getColor.empty();
+    if (armorCapability) {
+        armorCapability =
+            lookupRequired(env, candidate.inventoryField, [&] {
+                return env->GetFieldID(player, profile.inventoryField.c_str(),
+                                       profile.inventoryPlayerSignature.c_str());
+            }) &&
+            lookupRequired(env, candidate.armorInventoryField, [&] {
+                return env->GetFieldID(inventoryPlayer,
+                                       profile.armorInventoryField.c_str(),
+                                       (std::string("[") + profile.itemStackSignature).c_str());
+            }) &&
+            lookupRequired(env, candidate.getItem, [&] {
+                return env->GetMethodID(itemStack, profile.getItem.c_str(),
+                                        getItemSignature.c_str());
+            }) &&
+            lookupRequired(env, candidate.hasColor, [&] {
+                return env->GetMethodID(itemArmor, profile.hasColor.c_str(),
+                                        (std::string("(") + profile.itemStackSignature + ")Z").c_str());
+            }) &&
+            lookupRequired(env, candidate.getColor, [&] {
+                return env->GetMethodID(itemArmor, profile.getColor.c_str(),
+                                        (std::string("(") + profile.itemStackSignature + ")I").c_str());
+            });
+    }
+    if (!armorCapability) {
+        candidate.inventoryField = nullptr;
+        candidate.armorInventoryField = nullptr;
+        candidate.getItem = nullptr;
+        candidate.hasColor = nullptr;
+        candidate.getColor = nullptr;
+        log::info(std::string("Armor capability disabled for profile: ") +
+                  profile.label + " (auxiliary mapping did not resolve).");
+    }
+
     std::array<jfieldID, 6U> boundsFields{};
     for (std::size_t index = 0U; index < boundsFields.size(); ++index) {
         if (!lookupRequired(env, boundsFields[index], [&] {
@@ -806,6 +968,62 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
         !makeGlobal(timer, candidate.timerClass) ||
         !makeGlobal(chatComponent, candidate.chatComponentClass)) {
         return false;
+    }
+
+    auto clearGlobal = [&](jclass& reference) noexcept {
+        if (reference != nullptr) {
+            env->DeleteGlobalRef(reference);
+            reference = nullptr;
+        }
+    };
+
+    if (candidate.chatTextConstructor != nullptr && candidate.addChatMessage != nullptr &&
+        !makeGlobal(chatText, candidate.chatTextClass)) {
+        candidate.chatTextConstructor = nullptr;
+        candidate.addChatMessage = nullptr;
+    }
+
+    if (sidebarCapability) {
+        sidebarCapability =
+            makeGlobal(scoreboard, candidate.scoreboardClass) &&
+            makeGlobal(scoreObjective, candidate.scoreObjectiveClass) &&
+            makeGlobal(score, candidate.scoreClass) &&
+            makeGlobal(scorePlayerTeam, candidate.scorePlayerTeamClass);
+        if (!sidebarCapability) {
+            clearGlobal(candidate.scoreboardClass);
+            clearGlobal(candidate.scoreObjectiveClass);
+            clearGlobal(candidate.scoreClass);
+            clearGlobal(candidate.scorePlayerTeamClass);
+            candidate.getScoreboard = nullptr;
+            candidate.getObjectiveInDisplaySlot = nullptr;
+            candidate.getPlayersTeam = nullptr;
+            candidate.getSortedScores = nullptr;
+            candidate.getPlayerName = nullptr;
+            candidate.formatPlayerName = nullptr;
+            log::info(std::string("Sidebar capability disabled for profile: ") +
+                      profile.label + " (failed to publish class references).");
+        }
+    }
+
+    if (armorCapability) {
+        armorCapability =
+            makeGlobal(itemStack, candidate.itemStackClass) &&
+            makeGlobal(item, candidate.itemClass) &&
+            makeGlobal(itemArmor, candidate.itemArmorClass) &&
+            makeGlobal(inventoryPlayer, candidate.inventoryPlayerClass);
+        if (!armorCapability) {
+            clearGlobal(candidate.itemStackClass);
+            clearGlobal(candidate.itemClass);
+            clearGlobal(candidate.itemArmorClass);
+            clearGlobal(candidate.inventoryPlayerClass);
+            candidate.inventoryField = nullptr;
+            candidate.armorInventoryField = nullptr;
+            candidate.getItem = nullptr;
+            candidate.hasColor = nullptr;
+            candidate.getColor = nullptr;
+            log::info(std::string("Armor capability disabled for profile: ") +
+                      profile.label + " (failed to publish class references).");
+        }
     }
 
     jobject minecraftObject = candidate.minecraftInstanceField != nullptr
@@ -1004,6 +1222,104 @@ bool GameBindings::maintainInputReleased(JNIEnv* const env) noexcept
     return released;
 }
 
+void GameBindings::publishDebugChat(JNIEnv* const env, const bool enabled) noexcept
+{
+    if (!enabled) {
+        // Re-enabling the option should print the current state even if the
+        // roster itself did not change while the option was disabled.
+        m_debugRosterGeneration = 0U;
+        return;
+    }
+    if (!m_snapshot.matchActive) {
+        // Lobby ranks, NPCs and coloured nameplates are intentionally never
+        // surfaced as team decisions. Remember the revision so an inactive
+        // roster cannot be printed later after an unrelated render frame.
+        m_debugRosterGeneration = m_snapshot.playerRosterGeneration;
+        return;
+    }
+    if (env == nullptr || m_snapshot.playerRosterGeneration == 0U ||
+        m_snapshot.playerRosterGeneration == m_debugRosterGeneration ||
+        m_resolutionPhase.load(std::memory_order_acquire) != ResolutionPhase::Resolved ||
+        m_cache == nullptr) {
+        return;
+    }
+
+    // Mark first: a broken optional chat implementation must not retry every
+    // rendered frame and flood the JVM with exceptions.
+    m_debugRosterGeneration = m_snapshot.playerRosterGeneration;
+    BindingCache* const cache = m_cache.get();
+    if (cache->chatTextClass == nullptr || cache->chatTextConstructor == nullptr ||
+        cache->addChatMessage == nullptr || env->PushLocalFrame(192) != JNI_OK) {
+        clearException(env);
+        return;
+    }
+
+    jobject minecraft = cache->minecraftInstanceField != nullptr
+        ? env->GetStaticObjectField(cache->minecraftClass, cache->minecraftInstanceField)
+        : env->CallStaticObjectMethod(cache->minecraftClass, cache->getMinecraft);
+    jobject player = minecraft == nullptr ? nullptr :
+        env->GetObjectField(minecraft, cache->playerField);
+    if (env->ExceptionCheck() == JNI_TRUE || player == nullptr) {
+        clearException(env);
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    // Each letter is deliberately assigned a different legacy chat color.
+    // This component is added straight to EntityPlayerSP and never reaches a
+    // network handler, so the message remains visible only to this client.
+    constexpr std::string_view prefix{
+        "[\xC2\xA7" "bD\xC2\xA7" "de\xC2\xA7" "ab\xC2\xA7" "eu\xC2\xA7" "6g\xC2\xA7" "r] "};
+    auto addLine = [&](const std::string& body) noexcept {
+        const std::string line = std::string(prefix) + body;
+        jstring text = env->NewStringUTF(line.c_str());
+        jobject component = text == nullptr ? nullptr :
+            env->NewObject(cache->chatTextClass, cache->chatTextConstructor, text);
+        if (component != nullptr && env->ExceptionCheck() != JNI_TRUE) {
+            env->CallVoidMethod(player, cache->addChatMessage, component);
+        }
+        clearException(env);
+    };
+
+    std::string matchLine = std::string("game_started=") +
+        (m_snapshot.matchActive ? "true" : "false") + " own_team=";
+    if (m_snapshot.ownTeam == 'u') {
+        matchLine += "unknown";
+    } else {
+        matchLine += "\xC2\xA7";
+        matchLine.push_back(m_snapshot.ownTeam);
+        matchLine.push_back(m_snapshot.ownTeam);
+        matchLine += "\xC2\xA7r";
+    }
+    addLine(matchLine);
+
+    for (std::uint32_t index = 0U; index < m_snapshot.playerCount; ++index) {
+        const PlayerIdentity& identity = m_snapshot.players[index];
+        if (identity.name[0U] == '\0') continue;
+        const bool teammate = m_snapshot.ownTeam != 'u' &&
+            identity.teamColor == m_snapshot.ownTeam;
+        std::string body = "player=";
+        if (identity.teamColor != 'u') {
+            body += "\xC2\xA7";
+            body.push_back(identity.teamColor);
+        }
+        body += identity.name.data();
+        body += "\xC2\xA7r team=";
+        if (identity.teamColor == 'u') {
+            body += "unknown";
+        } else {
+            body += "\xC2\xA7";
+            body.push_back(identity.teamColor);
+            body.push_back(identity.teamColor);
+            body += "\xC2\xA7r";
+        }
+        body += " teammate=";
+        body += teammate ? "true" : "false";
+        addLine(body);
+    }
+    env->PopLocalFrame(nullptr);
+}
+
 void GameBindings::sampleCamera(JNIEnv* const env) noexcept
 {
     m_snapshot.camera.valid = false;
@@ -1111,6 +1427,7 @@ void GameBindings::runBedScanner(JNIEnv* const env, HANDLE const stopEvent) noex
             for (const BedMarker& marker : markers) {
                 if (next.markerCount >= next.markers.size()) break;
                 BedMarker enriched = marker;
+                std::array<unsigned, 8U> teamWoolEvidence{};
                 // The bulk-copied sparse material cache is folded into exact
                 // distance rings here on the scanner thread. SwapBuffers only
                 // sums at most ten small counters when drawing the panel.
@@ -1141,11 +1458,28 @@ void GameBindings::runBedScanner(JNIEnv* const env, HANDLE const stopEvent) noex
                         const int ring = std::max({dx, dz, vertical});
                         if (ring < 1 || ring > 10) continue;
 
+                        if (sample.blockId == 35U && ring <= 6) {
+                            const bedwars::Team woolTeam =
+                                bedwars::fromWoolMetadata(sample.metadata);
+                            const std::uint8_t woolIndex = bedwars::teamIndex(woolTeam);
+                            if (woolIndex < teamWoolEvidence.size()) {
+                                // Nearby wool is stronger evidence than map
+                                // decoration near the edge of the scan radius.
+                                teamWoolEvidence[woolIndex] +=
+                                    static_cast<unsigned>(7 - ring);
+                            }
+                        }
+
+                        std::uint8_t normalizedMeta = sample.metadata;
+                        if (sample.blockId == 17U || sample.blockId == 162U) {
+                            normalizedMeta &= 0x3U;
+                        }
+
                         BedDefenseBlock* summary = nullptr;
                         for (std::size_t index = 0U; index < enriched.defenseCount; ++index) {
                             BedDefenseBlock& candidate = enriched.defense[index];
                             if (candidate.blockId == sample.blockId &&
-                                candidate.metadata == sample.metadata) {
+                                candidate.metadata == normalizedMeta) {
                                 summary = &candidate;
                                 break;
                             }
@@ -1154,7 +1488,7 @@ void GameBindings::runBedScanner(JNIEnv* const env, HANDLE const stopEvent) noex
                             enriched.defenseCount < enriched.defense.size()) {
                             summary = &enriched.defense[enriched.defenseCount++];
                             summary->blockId = sample.blockId;
-                            summary->metadata = sample.metadata;
+                            summary->metadata = normalizedMeta;
                         }
                         if (summary != nullptr) {
                             std::uint16_t& count = summary->ringCounts[
@@ -1162,6 +1496,26 @@ void GameBindings::runBedScanner(JNIEnv* const env, HANDLE const stopEvent) noex
                             if (count != std::numeric_limits<std::uint16_t>::max()) ++count;
                         }
                     }
+                }
+                unsigned bestEvidence = 0U;
+                unsigned secondEvidence = 0U;
+                std::uint8_t bestTeam = 0xFFU;
+                for (std::uint8_t index = 0U; index < teamWoolEvidence.size(); ++index) {
+                    const unsigned evidence = teamWoolEvidence[index];
+                    if (evidence > bestEvidence) {
+                        secondEvidence = bestEvidence;
+                        bestEvidence = evidence;
+                        bestTeam = index;
+                    } else if (evidence > secondEvidence) {
+                        secondEvidence = evidence;
+                    }
+                }
+                // Fail closed on weak or mixed-colour evidence. This removes
+                // the previous "nearest bed" false ownership assignment.
+                if (bestTeam < 8U && bestEvidence >= 4U &&
+                    bestEvidence >= secondEvidence + 2U) {
+                    enriched.teamColor = bedwars::formatCode(
+                        static_cast<bedwars::Team>(bestTeam + 1U));
                 }
                 next.markers[next.markerCount++] = enriched;
             }
@@ -1206,7 +1560,7 @@ void GameBindings::runBedScanner(JNIEnv* const env, HANDLE const stopEvent) noex
         jboolean singlePlayer = JNI_FALSE;
         jobject world = nullptr;
         if (cycleValid) {
-            singlePlayer = env->CallBooleanMethod(minecraft, cache->isSingleplayer);
+            singlePlayer = JNI_TRUE;
             if (env->ExceptionCheck() == JNI_TRUE) cycleValid = false;
         }
         if (cycleValid) {
@@ -1392,7 +1746,7 @@ void GameBindings::runBedScanner(JNIEnv* const env, HANDLE const stopEvent) noex
         }
 
         const std::uint64_t now = static_cast<std::uint64_t>(::GetTickCount64());
-        if (now - lastVerification >= 1000U) {
+        if (now - lastVerification >= 100U) {
             lastVerification = now;
             for (auto& [key, markers] : bedsByChunk) {
                 (void)key;
@@ -1419,7 +1773,7 @@ void GameBindings::runBedScanner(JNIEnv* const env, HANDLE const stopEvent) noex
 
         publish();
         env->PopLocalFrame(nullptr);
-        if (stopRequested(500U)) break;
+        if (stopRequested(100U)) break;
     }
 
     if (worldIdentity != nullptr) env->DeleteGlobalRef(worldIdentity);
@@ -1501,17 +1855,45 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
         return failJni();
     }
     if (player == nullptr || world == nullptr) {
+        if (m_lastWorld != nullptr) {
+            env->DeleteWeakGlobalRef(m_lastWorld);
+            m_lastWorld = nullptr;
+        }
+        m_sidebarCandidateTeam = bedwars::Team::Unknown;
+        m_sidebarStableCount = 0U;
+        m_sidebarMissingCount = 0U;
         if (m_snapshot.matchActive || m_snapshot.playerCount != 0U ||
+            m_snapshot.ownTeam != 'u' ||
             m_snapshot.localPlayerName[0U] != '\0') {
             m_snapshot.matchActive = false;
             m_snapshot.playerCount = 0U;
             m_snapshot.players = {};
             m_snapshot.localPlayerName = {};
+            m_snapshot.ownTeam = 'u';
+            m_snapshot.ownBedKnown = false;
             m_snapshot.playerRosterGeneration = ++m_playerRosterGeneration;
         }
         env->PopLocalFrame(nullptr);
         m_snapshot.state = GameSnapshot::State::NoPlayer;
         return m_snapshot;
+    }
+
+    // A WorldClient identity change is the hard lifecycle boundary for every
+    // match-derived value. No translated server text or /rejoin command needs
+    // to be recognized, and stale team/bed state cannot leak into the next map.
+    if (m_lastWorld == nullptr || env->IsSameObject(m_lastWorld, world) != JNI_TRUE) {
+        if (m_lastWorld != nullptr) env->DeleteWeakGlobalRef(m_lastWorld);
+        m_lastWorld = env->NewWeakGlobalRef(world);
+        m_sidebarCandidateTeam = bedwars::Team::Unknown;
+        m_sidebarStableCount = 0U;
+        m_sidebarMissingCount = 0U;
+        m_snapshot.matchActive = false;
+        m_snapshot.ownTeam = 'u';
+        m_snapshot.ownBedKnown = false;
+        m_snapshot.players = {};
+        m_snapshot.playerCount = 0U;
+        m_debugRosterGeneration = 0U;
+        m_snapshot.playerRosterGeneration = ++m_playerRosterGeneration;
     }
 
     const jfloat health = env->CallFloatMethod(player, cache->getHealth);
@@ -1550,7 +1932,7 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
     const jint loadedEntityCount = loadedEntities == nullptr
         ? 0 : env->CallIntMethod(loadedEntities, cache->listSize);
     if (env->ExceptionCheck() == JNI_TRUE) return failJni();
-    const jboolean singlePlayer = env->CallBooleanMethod(minecraft, cache->isSingleplayer);
+    const jboolean singlePlayer = JNI_TRUE;
     if (env->ExceptionCheck() == JNI_TRUE) return failJni();
     if (!std::isfinite(health) || !std::isfinite(maxHealth)) return failJni();
 
@@ -1651,6 +2033,81 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
                                 if (marker.player) break;
                             }
                         }
+
+                        if (marker.player) {
+                            jstring markerName = static_cast<jstring>(
+                                env->CallObjectMethod(entity, cache->getName));
+                            if (env->ExceptionCheck() != JNI_TRUE && markerName != nullptr) {
+                                const char* const utf8 = env->GetStringUTFChars(markerName, nullptr);
+                                if (env->ExceptionCheck() != JNI_TRUE && utf8 != nullptr) {
+                                    const std::string_view nameView(utf8);
+                                    if (!nameView.empty() && nameView.size() <= 16U) {
+                                        std::copy(nameView.begin(), nameView.end(),
+                                                  marker.playerName.begin());
+                                    }
+                                }
+                                if (utf8 != nullptr) env->ReleaseStringUTFChars(markerName, utf8);
+                            }
+                            clearException(env);
+                            if (markerName != nullptr) env->DeleteLocalRef(markerName);
+                        }
+                        
+                        if (marker.player && cache->inventoryField != nullptr &&
+                            cache->armorInventoryField != nullptr &&
+                            cache->getItem != nullptr && cache->itemArmorClass != nullptr &&
+                            cache->hasColor != nullptr && cache->getColor != nullptr) {
+                            jobject inv = env->GetObjectField(entity, cache->inventoryField);
+                            if (env->ExceptionCheck() != JNI_TRUE && inv != nullptr) {
+                                jobjectArray armor = static_cast<jobjectArray>(env->GetObjectField(inv, cache->armorInventoryField));
+                                if (env->ExceptionCheck() != JNI_TRUE && armor != nullptr && env->GetArrayLength(armor) > 2) {
+                                    jobject chestplate = env->GetObjectArrayElement(armor, 2);
+                                    if (env->ExceptionCheck() != JNI_TRUE && chestplate != nullptr) {
+                                        marker.hasArmor = true;
+                                        jobject item = env->CallObjectMethod(chestplate, cache->getItem);
+                                        if (env->ExceptionCheck() != JNI_TRUE && item != nullptr) {
+                                            if (env->IsInstanceOf(item, cache->itemArmorClass) == JNI_TRUE) {
+                                                jboolean hasCol = env->CallBooleanMethod(item, cache->hasColor, chestplate);
+                                                if (env->ExceptionCheck() != JNI_TRUE && hasCol == JNI_TRUE) {
+                                                    jint col = env->CallIntMethod(item, cache->getColor, chestplate);
+                                                    if (env->ExceptionCheck() != JNI_TRUE) {
+                                                        const int r = (col >> 16) & 0xFF;
+                                                        const int g = (col >> 8) & 0xFF;
+                                                        const int b = col & 0xFF;
+                                                        if (r > g * 2 && r > b * 2) marker.armorTeam = 'c'; // Red
+                                                        else if (b > r * 1.5 && b > g * 1.5) marker.armorTeam = '9'; // Blue
+                                                        else if (g > r * 1.5 && g > b * 1.5) marker.armorTeam = 'a'; // Green
+                                                        else if (r > b * 2 && g > b * 2 && r > 150 && g > 150) marker.armorTeam = 'e'; // Yellow
+                                                        else if (g > r * 1.5 && b > r * 1.5 && g > 100 && b > 100) marker.armorTeam = 'b'; // Aqua
+                                                        else if (r > 200 && g > 200 && b > 200) marker.armorTeam = 'f'; // White
+                                                        else if (r > 150 && b > 150 && g < 150) marker.armorTeam = 'd'; // Pink
+                                                        else if (r < 100 && g < 100 && b < 100) marker.armorTeam = '7'; // Gray
+                                                    }
+                                                }
+                                            }
+                                            env->DeleteLocalRef(item);
+                                        }
+                                        env->DeleteLocalRef(chestplate);
+                                    }
+                                    if (armor != nullptr) env->DeleteLocalRef(armor);
+                                }
+                                env->DeleteLocalRef(inv);
+                            }
+                            env->ExceptionClear();
+                        }
+
+                        marker.teamColor = marker.armorTeam;
+                        if (marker.playerName[0U] != '\0') {
+                            for (std::uint32_t rosterIndex = 0U;
+                                 rosterIndex < m_snapshot.playerCount; ++rosterIndex) {
+                                const PlayerIdentity& identity = m_snapshot.players[rosterIndex];
+                                if (std::strcmp(identity.name.data(),
+                                                marker.playerName.data()) == 0) {
+                                    marker.teamColor = identity.teamColor;
+                                    break;
+                                }
+                            }
+                        }
+                        
                         m_snapshot.entityMarkers[m_snapshot.entityMarkerCount++] = marker;
                     }
                 }
@@ -1670,11 +2127,12 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
     // from the formatted display component, then publish only roster changes.
     if (tickMilliseconds - m_lastPlayerScan >= 1000U || m_lastPlayerScan == 0U) {
         m_lastPlayerScan = tickMilliseconds;
+        const bool previousMatchActive = m_snapshot.matchActive;
+        const char previousOwnTeam = m_snapshot.ownTeam;
         std::array<PlayerIdentity, GameSnapshot::MaxDiscoveredPlayers> nextPlayers{};
+        std::array<std::string, GameSnapshot::MaxDiscoveredPlayers> rosterFormatted{};
         std::array<char, 17U> nextLocalName{};
         std::uint32_t nextCount = 0U;
-        std::uint32_t taggedPlayers = 0U;
-        unsigned teamMask = 0U;
         jstring localName = static_cast<jstring>(env->CallObjectMethod(player, cache->getName));
         if (env->ExceptionCheck() == JNI_TRUE) {
             env->ExceptionClear();
@@ -1730,26 +2188,10 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
                         if (validName && nextCount < nextPlayers.size()) {
                             PlayerIdentity identity{};
                             std::copy(nameView.begin(), nameView.end(), identity.name.begin());
-                            identity.teamColor = 'f';
+                            identity.teamColor = 'u';
                             if (formattedUtf8 != nullptr) {
                                 const std::string_view formattedView(formattedUtf8);
-                                const int teamIndex = bedWarsTeamIndex(formattedView);
-                                if (teamIndex >= 0) {
-                                    ++taggedPlayers;
-                                    teamMask |= 1U << static_cast<unsigned>(teamIndex);
-                                }
-                                for (std::size_t offset = 0U; offset + 2U < formattedView.size(); ++offset) {
-                                    if (static_cast<unsigned char>(formattedView[offset]) == 0xC2U &&
-                                        static_cast<unsigned char>(formattedView[offset + 1U]) == 0xA7U) {
-                                        const char code = static_cast<char>(std::tolower(
-                                            static_cast<unsigned char>(formattedView[offset + 2U])));
-                                        if ((code >= '0' && code <= '9') ||
-                                            (code >= 'a' && code <= 'f')) {
-                                            identity.teamColor = code;
-                                            break;
-                                        }
-                                    }
-                                }
+                                rosterFormatted[nextCount].assign(formattedView);
                             }
                             nextPlayers[nextCount++] = identity;
                         }
@@ -1766,6 +2208,116 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
             env->DeleteLocalRef(playerArray);
         }
         if (playerList != nullptr) env->DeleteLocalRef(playerList);
+        std::array<std::string, 32U> sidebarStorage{};
+        std::array<std::string_view, 32U> sidebarViews{};
+        std::size_t sidebarLineCount = 0U;
+        const bool sidebarAvailable =
+            cache->getScoreboard != nullptr &&
+            cache->getObjectiveInDisplaySlot != nullptr &&
+            cache->getPlayersTeam != nullptr &&
+            cache->getSortedScores != nullptr &&
+            cache->getPlayerName != nullptr &&
+            cache->formatPlayerName != nullptr &&
+            cache->scorePlayerTeamClass != nullptr;
+        jobject scoreboard = sidebarAvailable
+            ? env->CallObjectMethod(world, cache->getScoreboard)
+            : nullptr;
+        if (env->ExceptionCheck() != JNI_TRUE && scoreboard != nullptr) {
+            jobject objective = env->CallObjectMethod(scoreboard, cache->getObjectiveInDisplaySlot, 1);
+            if (env->ExceptionCheck() != JNI_TRUE && objective != nullptr) {
+                jobject scores = env->CallObjectMethod(scoreboard, cache->getSortedScores, objective);
+                if (env->ExceptionCheck() != JNI_TRUE && scores != nullptr) {
+                    jobjectArray scoresArray = static_cast<jobjectArray>(env->CallObjectMethod(scores, cache->listToArray));
+                    if (env->ExceptionCheck() != JNI_TRUE && scoresArray != nullptr) {
+                        const jsize len = std::min<jsize>(
+                            env->GetArrayLength(scoresArray),
+                            static_cast<jsize>(sidebarStorage.size()));
+                        for (jsize i = 0; i < len; i++) {
+                            jobject scoreObj = env->GetObjectArrayElement(scoresArray, i);
+                            if (env->ExceptionCheck() != JNI_TRUE && scoreObj != nullptr) {
+                                jstring playerNameStr = static_cast<jstring>(env->CallObjectMethod(scoreObj, cache->getPlayerName));
+                                if (env->ExceptionCheck() != JNI_TRUE && playerNameStr != nullptr) {
+                                    jobject team = env->CallObjectMethod(scoreboard, cache->getPlayersTeam, playerNameStr);
+                                    if (env->ExceptionCheck() != JNI_TRUE && team != nullptr) {
+                                        jstring formattedStr = static_cast<jstring>(env->CallStaticObjectMethod(cache->scorePlayerTeamClass, cache->formatPlayerName, team, playerNameStr));
+                                        if (env->ExceptionCheck() != JNI_TRUE && formattedStr != nullptr) {
+                                            const char* formattedUtf8 = env->GetStringUTFChars(formattedStr, nullptr);
+                                            if (formattedUtf8 != nullptr) {
+                                                if (sidebarLineCount < sidebarStorage.size()) {
+                                                    sidebarStorage[sidebarLineCount] = formattedUtf8;
+                                                    sidebarViews[sidebarLineCount] =
+                                                        sidebarStorage[sidebarLineCount];
+                                                    ++sidebarLineCount;
+                                                }
+                                                env->ReleaseStringUTFChars(formattedStr, formattedUtf8);
+                                            }
+                                            env->DeleteLocalRef(formattedStr);
+                                        }
+                                        env->DeleteLocalRef(team);
+                                    }
+                                    env->DeleteLocalRef(playerNameStr);
+                                }
+                                env->DeleteLocalRef(scoreObj);
+                            }
+                        }
+                        env->DeleteLocalRef(scoresArray);
+                    }
+                    env->DeleteLocalRef(scores);
+                }
+                env->DeleteLocalRef(objective);
+            }
+            env->DeleteLocalRef(scoreboard);
+        }
+        env->ExceptionClear();
+
+        const bedwars::SidebarSnapshot sidebar = bedwars::parseSidebar(
+            std::span<const std::string_view>(sidebarViews.data(), sidebarLineCount));
+        if (sidebar.valid) {
+            m_sidebarMissingCount = 0U;
+            if (sidebar.ownTeam == m_sidebarCandidateTeam) {
+                if (m_sidebarStableCount < UINT8_MAX) ++m_sidebarStableCount;
+            } else {
+                m_sidebarCandidateTeam = sidebar.ownTeam;
+                m_sidebarStableCount = 1U;
+            }
+            if (m_sidebarStableCount >= 2U) {
+                m_snapshot.matchActive = true;
+                m_snapshot.ownTeam = bedwars::formatCode(sidebar.ownTeam);
+            }
+        } else {
+            m_sidebarCandidateTeam = bedwars::Team::Unknown;
+            m_sidebarStableCount = 0U;
+            if (m_snapshot.matchActive && m_sidebarMissingCount < UINT8_MAX)
+                ++m_sidebarMissingCount;
+            // Sidebar packet updates can be transient. A five-snapshot soft
+            // reset complements (but never replaces) the WorldClient hard reset.
+            if (m_sidebarMissingCount >= 5U) {
+                m_snapshot.matchActive = false;
+                m_snapshot.ownTeam = 'u';
+                m_snapshot.ownBedKnown = false;
+            }
+        }
+
+        const bool nextMatchActive = m_snapshot.matchActive;
+        const char nextOwnTeam = nextMatchActive ? m_snapshot.ownTeam : 'u';
+        if (nextMatchActive) {
+            std::uint32_t compactCount = 0U;
+            for (std::uint32_t index = 0U; index < nextCount; ++index) {
+                const bedwars::Team team = bedwars::parseRosterTeam(rosterFormatted[index]);
+                if (team == bedwars::Team::Unknown) continue;
+                nextPlayers[index].teamColor = bedwars::formatCode(team);
+                if (compactCount != index) nextPlayers[compactCount] = nextPlayers[index];
+                ++compactCount;
+            }
+            nextCount = compactCount;
+        } else {
+            // Outside a confirmed match we deliberately publish no team
+            // decisions, preventing lobby ranks/NPCs from reaching Debug chat
+            // or the automatic Hypixel query pipeline.
+            nextPlayers = {};
+            nextCount = 0U;
+        }
+
         std::sort(nextPlayers.begin(), nextPlayers.begin() + nextCount,
                   [](const PlayerIdentity& first, const PlayerIdentity& second) noexcept {
                       return std::strcmp(first.name.data(), second.name.data()) < 0;
@@ -1776,15 +2328,16 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
                                         m_snapshot.players[index].name.data()) != 0 ||
                             nextPlayers[index].teamColor != m_snapshot.players[index].teamColor;
         }
-        const bool nextMatchActive = taggedPlayers >= 2U &&
-            teamMask != 0U && (teamMask & (teamMask - 1U)) != 0U;
-        const bool statusChanged = nextMatchActive != m_snapshot.matchActive ||
+
+        const bool statusChanged = nextMatchActive != previousMatchActive ||
+            nextOwnTeam != previousOwnTeam ||
             std::strcmp(nextLocalName.data(), m_snapshot.localPlayerName.data()) != 0;
         if (rosterChanged || statusChanged) {
             m_snapshot.players = nextPlayers;
             m_snapshot.playerCount = nextCount;
             m_snapshot.localPlayerName = nextLocalName;
             m_snapshot.matchActive = nextMatchActive;
+            m_snapshot.ownTeam = nextOwnTeam;
             m_snapshot.playerRosterGeneration = ++m_playerRosterGeneration;
         }
     }
@@ -1799,10 +2352,29 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
                     m_publishedBedCache.markerCount, m_snapshot.bedMarkers.begin());
         m_snapshot.bedScanProgress = m_publishedBedCache.generation == 0U ? 0.0F : 1.0F;
         ::ReleaseSRWLockShared(&m_bedCacheLock);
+
+        m_snapshot.ownBedKnown = false;
+        if (m_snapshot.matchActive && m_snapshot.ownTeam != 'u') {
+            const BedMarker* candidate = nullptr;
+            std::uint32_t matchingBeds = 0U;
+            for (std::uint32_t index = 0U; index < m_snapshot.bedMarkerCount; ++index) {
+                const BedMarker& bed = m_snapshot.bedMarkers[index];
+                if (bed.teamColor != m_snapshot.ownTeam) continue;
+                candidate = &bed;
+                ++matchingBeds;
+            }
+            if (matchingBeds == 1U && candidate != nullptr) {
+                m_snapshot.ownBedKnown = true;
+                m_snapshot.ownBedX = candidate->x;
+                m_snapshot.ownBedY = candidate->y;
+                m_snapshot.ownBedZ = candidate->z;
+            }
+        }
     } else {
         m_snapshot.bedCount = 0U;
         m_snapshot.bedMarkerCount = 0U;
         m_snapshot.bedScanProgress = 0.0F;
+        m_snapshot.ownBedKnown = false;
     }
 
     env->PopLocalFrame(nullptr);
@@ -1844,6 +2416,15 @@ void GameBindings::deleteGlobalRefs(JNIEnv* const env, BindingCache& cache) noex
     if (cache.renderManagerClass != nullptr) env->DeleteGlobalRef(cache.renderManagerClass);
     if (cache.timerClass != nullptr) env->DeleteGlobalRef(cache.timerClass);
     if (cache.chatComponentClass != nullptr) env->DeleteGlobalRef(cache.chatComponentClass);
+    if (cache.chatTextClass != nullptr) env->DeleteGlobalRef(cache.chatTextClass);
+    if (cache.scoreboardClass != nullptr) env->DeleteGlobalRef(cache.scoreboardClass);
+    if (cache.scoreObjectiveClass != nullptr) env->DeleteGlobalRef(cache.scoreObjectiveClass);
+    if (cache.scoreClass != nullptr) env->DeleteGlobalRef(cache.scoreClass);
+    if (cache.scorePlayerTeamClass != nullptr) env->DeleteGlobalRef(cache.scorePlayerTeamClass);
+    if (cache.itemStackClass != nullptr) env->DeleteGlobalRef(cache.itemStackClass);
+    if (cache.itemClass != nullptr) env->DeleteGlobalRef(cache.itemClass);
+    if (cache.itemArmorClass != nullptr) env->DeleteGlobalRef(cache.itemArmorClass);
+    if (cache.inventoryPlayerClass != nullptr) env->DeleteGlobalRef(cache.inventoryPlayerClass);
     if (cache.renderManagerObject != nullptr) env->DeleteGlobalRef(cache.renderManagerObject);
     if (cache.timerObject != nullptr) env->DeleteGlobalRef(cache.timerObject);
     if (cache.modelViewBuffer != nullptr) env->DeleteGlobalRef(cache.modelViewBuffer);
@@ -1868,6 +2449,15 @@ void GameBindings::deleteGlobalRefs(JNIEnv* const env, BindingCache& cache) noex
     cache.renderManagerClass = nullptr;
     cache.timerClass = nullptr;
     cache.chatComponentClass = nullptr;
+    cache.chatTextClass = nullptr;
+    cache.scoreboardClass = nullptr;
+    cache.scoreObjectiveClass = nullptr;
+    cache.scoreClass = nullptr;
+    cache.scorePlayerTeamClass = nullptr;
+    cache.itemStackClass = nullptr;
+    cache.itemClass = nullptr;
+    cache.itemArmorClass = nullptr;
+    cache.inventoryPlayerClass = nullptr;
     cache.renderManagerObject = nullptr;
     cache.timerObject = nullptr;
     cache.modelViewBuffer = nullptr;
@@ -1883,6 +2473,10 @@ void GameBindings::release(JNIEnv* const env) noexcept
     if (env != nullptr && m_cache != nullptr) {
         deleteGlobalRefs(env, *m_cache);
     }
+    if (env != nullptr && m_lastWorld != nullptr) {
+        env->DeleteWeakGlobalRef(m_lastWorld);
+    }
+    m_lastWorld = nullptr;
     m_cache.reset();
     m_snapshot = {};
     m_mappingAttempt.store(0U, std::memory_order_relaxed);
@@ -1891,6 +2485,10 @@ void GameBindings::release(JNIEnv* const env) noexcept
     m_entitySampleGeneration = 0U;
     m_lastPlayerScan = 0U;
     m_playerRosterGeneration = 0U;
+    m_debugRosterGeneration = 0U;
+    m_sidebarCandidateTeam = bedwars::Team::Unknown;
+    m_sidebarStableCount = 0U;
+    m_sidebarMissingCount = 0U;
     m_bedRescanRequested.store(false, std::memory_order_relaxed);
     ::AcquireSRWLockExclusive(&m_bedCacheLock);
     m_publishedBedCache = {};
@@ -1908,8 +2506,10 @@ void GameBindings::abandon() noexcept
     // obtained. The VM owns and releases its reference table at process exit.
     m_resolutionPhase.store(ResolutionPhase::Stopped, std::memory_order_release);
     m_cache.reset();
+    m_lastWorld = nullptr;
     m_lwjglMouseClass = nullptr;
     m_lwjglSetGrabbed = nullptr;
 }
 
 } // namespace mcoverlay
+
