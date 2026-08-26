@@ -84,11 +84,16 @@ std::uint8_t packFeatures(const FeatureSettings& settings) noexcept
 
 FeatureSettings unpackFeatures(const std::uint8_t bits, const int radius = 6) noexcept
 {
-    return FeatureSettings{
-        (bits & 0x01U) != 0U, (bits & 0x02U) != 0U,
-        (bits & 0x04U) != 0U, (bits & 0x08U) != 0U,
-        (bits & 0x10U) != 0U, (bits & 0x20U) != 0U,
-        (bits & 0x40U) != 0U, std::clamp(radius, 3, 10)};
+    FeatureSettings s;
+    s.espEnabled = (bits & 0x01U) != 0U;
+    s.entityEspEnabled = (bits & 0x02U) != 0U;
+    s.bedEspEnabled = (bits & 0x04U) != 0U;
+    s.labelsEnabled = (bits & 0x08U) != 0U;
+    s.hypixelPanelEnabled = (bits & 0x10U) != 0U;
+    s.bedThreatAlertsEnabled = (bits & 0x20U) != 0U;
+    s.bedDefensePanelEnabled = (bits & 0x40U) != 0U;
+    s.bedDefenseRadius = std::clamp(radius, 3, 10);
+    return s;
 }
 
 template<std::size_t Capacity>
@@ -836,8 +841,14 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
             (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE radius-must-be-3-10");
             return true;
         }
-        settings = FeatureSettings{values[0], values[1], values[2], values[3], values[4],
-                                   values[5], values[6], radius};
+        settings.espEnabled = values[0];
+        settings.entityEspEnabled = values[1];
+        settings.bedEspEnabled = values[2];
+        settings.labelsEnabled = values[3];
+        settings.hypixelPanelEnabled = values[4];
+        settings.bedThreatAlertsEnabled = values[5];
+        settings.bedDefensePanelEnabled = values[6];
+        settings.bedDefenseRadius = radius;
         m_featureBits.store(packFeatures(settings), std::memory_order_release);
         m_bedDefenseRadius.store(radius, std::memory_order_release);
         (void)m_ipc->sendLine("FEATURE_STATE_APPLIED");
