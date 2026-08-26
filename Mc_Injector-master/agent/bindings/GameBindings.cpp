@@ -161,6 +161,19 @@ template<typename Identifier, typename Lookup>
     return identifier != nullptr;
 }
 
+template<typename Identifier, typename Lookup>
+[[nodiscard]] bool lookupOptional(JNIEnv* const env,
+                                  Identifier& identifier,
+                                  Lookup&& lookup) noexcept
+{
+    identifier = lookup();
+    if (env->ExceptionCheck() == JNI_TRUE) {
+        env->ExceptionClear();
+        identifier = nullptr;
+    }
+    return true;
+}
+
 class LocalReferenceSet final {
 public:
     explicit LocalReferenceSet(JNIEnv* const env) noexcept : m_env(env) {}
@@ -796,37 +809,37 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
         !lookupRequired(env, candidate.renderPartialTicks, [&] {
             return env->GetFieldID(timer, profile.renderPartialTicksField.c_str(), "F");
         }) ||
-        !lookupRequired(env, candidate.getScoreboard, [&] {
+        !lookupOptional(env, candidate.getScoreboard, [&] {
             return env->GetMethodID(world, profile.getScoreboard.c_str(), (std::string("()") + profile.scoreboardSignature).c_str());
         }) ||
-        !lookupRequired(env, candidate.getObjectiveInDisplaySlot, [&] {
+        !lookupOptional(env, candidate.getObjectiveInDisplaySlot, [&] {
             return env->GetMethodID(scoreboard, profile.getObjectiveInDisplaySlot.c_str(), getObjectiveInDisplaySlotSignature.c_str());
         }) ||
-        !lookupRequired(env, candidate.getPlayersTeam, [&] {
+        !lookupOptional(env, candidate.getPlayersTeam, [&] {
             return env->GetMethodID(scoreboard, profile.getPlayersTeam.c_str(), getPlayersTeamSignature.c_str());
         }) ||
-        !lookupRequired(env, candidate.getSortedScores, [&] {
+        !lookupOptional(env, candidate.getSortedScores, [&] {
             return env->GetMethodID(scoreboard, profile.getSortedScores.c_str(), getSortedScoresSignature.c_str());
         }) ||
-        !lookupRequired(env, candidate.getPlayerName, [&] {
+        !lookupOptional(env, candidate.getPlayerName, [&] {
             return env->GetMethodID(score, profile.getPlayerName.c_str(), "()Ljava/lang/String;");
         }) ||
-        !lookupRequired(env, candidate.formatPlayerName, [&] {
+        !lookupOptional(env, candidate.formatPlayerName, [&] {
             return env->GetStaticMethodID(scorePlayerTeam, profile.formatPlayerName.c_str(), formatPlayerNameSignature.c_str());
         }) ||
-        !lookupRequired(env, candidate.inventoryField, [&] {
+        !lookupOptional(env, candidate.inventoryField, [&] {
             return env->GetFieldID(player, profile.inventoryField.c_str(), profile.inventoryPlayerSignature.c_str());
         }) ||
-        !lookupRequired(env, candidate.armorInventoryField, [&] {
+        !lookupOptional(env, candidate.armorInventoryField, [&] {
             return env->GetFieldID(inventoryPlayer, profile.armorInventoryField.c_str(), (std::string("[") + profile.itemStackSignature).c_str());
         }) ||
-        !lookupRequired(env, candidate.getItem, [&] {
+        !lookupOptional(env, candidate.getItem, [&] {
             return env->GetMethodID(itemStack, profile.getItem.c_str(), getItemSignature.c_str());
         }) ||
-        !lookupRequired(env, candidate.hasColor, [&] {
+        !lookupOptional(env, candidate.hasColor, [&] {
             return env->GetMethodID(itemArmor, profile.hasColor.c_str(), (std::string("(") + profile.itemStackSignature + ")Z").c_str());
         }) ||
-        !lookupRequired(env, candidate.getColor, [&] {
+        !lookupOptional(env, candidate.getColor, [&] {
             return env->GetMethodID(itemArmor, profile.getColor.c_str(), (std::string("(") + profile.itemStackSignature + ")I").c_str());
         })) {
         return false;
@@ -2111,3 +2124,4 @@ void GameBindings::abandon() noexcept
 }
 
 } // namespace mcoverlay
+
