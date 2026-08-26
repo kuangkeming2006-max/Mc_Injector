@@ -372,10 +372,10 @@ private:
 
     mapping.scoreboardName = "auo";
     mapping.scoreboardSignature = "Lauo;";
-    mapping.scoreObjectiveName = "bpe";
-    mapping.scoreObjectiveSignature = "Lbpe;";
-    mapping.scoreName = "bem";
-    mapping.scoreSignature = "Lbem;";
+    mapping.scoreObjectiveName = "auk";
+    mapping.scoreObjectiveSignature = "Lauk;";
+    mapping.scoreName = "aum";
+    mapping.scoreSignature = "Laum;";
     mapping.scorePlayerTeamName = "bfh";
     mapping.scorePlayerTeamSignature = "Lbfh;";
     mapping.itemStackName = "zx";
@@ -563,7 +563,10 @@ bool MappingDictionary::validate(std::string* const error) const noexcept
         }
     }
 
-    const std::array<std::pair<std::string_view, std::string_view>, 26U> classes{{
+    // Core classes define whether the client profile itself is usable.  BedWars
+    // sidebar/armor support is an optional capability and must never turn an
+    // otherwise valid Minecraft profile into "unsupported client mappings".
+    const std::array<std::pair<std::string_view, std::string_view>, 18U> coreClasses{{
         {minecraftName, minecraftSignature}, {playerName, playerSignature},
         {livingName, livingSignature}, {entityName, entitySignature},
         {aabbName, aabbSignature}, {worldName, worldSignature},
@@ -573,14 +576,25 @@ bool MappingDictionary::validate(std::string* const error) const noexcept
         {chunkName, chunkSignature}, {storageName, storageSignature},
         {activeRenderInfoName, activeRenderInfoSignature},
         {renderManagerName, renderManagerSignature},
-        {timerName, timerSignature}, {chatComponentName, chatComponentSignature},
+        {timerName, timerSignature}, {chatComponentName, chatComponentSignature}}};
+    for (const auto& [binaryName, signature] : coreClasses) {
+        if (!signatureMatchesBinaryName(binaryName, signature)) {
+            return reject("core class binary name and JNI signature do not match");
+        }
+    }
+
+    const std::array<std::pair<std::string_view, std::string_view>, 8U> featureClasses{{
         {scoreboardName, scoreboardSignature}, {scoreObjectiveName, scoreObjectiveSignature},
         {scoreName, scoreSignature}, {scorePlayerTeamName, scorePlayerTeamSignature},
         {itemStackName, itemStackSignature}, {itemName, itemSignature},
         {itemArmorName, itemArmorSignature}, {inventoryPlayerName, inventoryPlayerSignature}}};
-    for (const auto& [binaryName, signature] : classes) {
-        if (!signatureMatchesBinaryName(binaryName, signature)) {
-            return reject("class binary name and JNI signature do not match");
+    for (const auto& [binaryName, signature] : featureClasses) {
+        // A feature class may be omitted by an external/core-only mapping pack,
+        // but a partially specified pair is still malformed.
+        if (binaryName.empty() && signature.empty()) continue;
+        if (binaryName.empty() || signature.empty() ||
+            !signatureMatchesBinaryName(binaryName, signature)) {
+            return reject("optional feature class binary name and JNI signature do not match");
         }
     }
     if (chunkProviderInterfaceSignature.size() < 3U ||

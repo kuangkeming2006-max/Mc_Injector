@@ -126,6 +126,12 @@ int main()
                      "Lunar legacy namespace is registered");
     passed &= expect(lunarCandidates.count == 1U,
                      "Lunar legacy provider reuses the verified Notch namespace");
+    passed &= expect(lunarCandidates.items[0] != nullptr &&
+                         lunarCandidates.items[0]->scoreObjectiveName == "auk" &&
+                         lunarCandidates.items[0]->scoreObjectiveSignature == "Lauk;" &&
+                         lunarCandidates.items[0]->scoreName == "aum" &&
+                         lunarCandidates.items[0]->scoreSignature == "Laum;",
+                     "verified 1.8.9 Notch scoreboard class mappings");
 
     MappingRegistry lunarNamedBuiltins;
     ClientEnvironment lunarNamed;

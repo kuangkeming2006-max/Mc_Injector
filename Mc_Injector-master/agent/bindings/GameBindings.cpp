@@ -161,19 +161,6 @@ template<typename Identifier, typename Lookup>
     return identifier != nullptr;
 }
 
-template<typename Identifier, typename Lookup>
-[[nodiscard]] bool lookupOptional(JNIEnv* const env,
-                                  Identifier& identifier,
-                                  Lookup&& lookup) noexcept
-{
-    identifier = lookup();
-    if (env->ExceptionCheck() == JNI_TRUE) {
-        env->ExceptionClear();
-        identifier = nullptr;
-    }
-    return true;
-}
-
 class LocalReferenceSet final {
 public:
     explicit LocalReferenceSet(JNIEnv* const env) noexcept : m_env(env) {}
@@ -585,6 +572,9 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
     jclass item = nullptr;
     jclass itemArmor = nullptr;
     jclass inventoryPlayer = nullptr;
+    // Only the long-standing game/render bindings are profile-critical.  The
+    // BedWars sidebar and armor readers are optional capabilities: a missing or
+    // stale auxiliary mapping must not invalidate an otherwise usable client.
     if (!loadClass(player, profile.playerName.c_str()) ||
         !loadClass(living, profile.livingName.c_str()) ||
         !loadClass(entity, profile.entityName.c_str()) ||
@@ -601,17 +591,44 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
         !loadClass(activeRenderInfo, profile.activeRenderInfoName.c_str()) ||
         !loadClass(renderManager, profile.renderManagerName.c_str()) ||
         !loadClass(timer, profile.timerName.c_str()) ||
-        !loadClass(chatComponent, profile.chatComponentName.c_str()) ||
-        !loadClass(scoreboard, profile.scoreboardName.c_str()) ||
-        !loadClass(scoreObjective, profile.scoreObjectiveName.c_str()) ||
-        !loadClass(score, profile.scoreName.c_str()) ||
-        !loadClass(scorePlayerTeam, profile.scorePlayerTeamName.c_str()) ||
-        !loadClass(itemStack, profile.itemStackName.c_str()) ||
-        !loadClass(item, profile.itemName.c_str()) ||
-        !loadClass(itemArmor, profile.itemArmorName.c_str()) ||
-        !loadClass(inventoryPlayer, profile.inventoryPlayerName.c_str())) {
+        !loadClass(chatComponent, profile.chatComponentName.c_str())) {
+        log::info(std::string("Core mapping class load failed for profile: ") +
+                  profile.label);
         return false;
     }
+
+    auto loadFeatureClass = [&](jclass& destination,
+                                const std::string& binaryName,
+                                const char* const capability,
+                                const char* const logicalName) noexcept {
+        if (binaryName.empty()) {
+            log::info(std::string(capability) + " mappings unavailable for " +
+                      profile.label + ": no " + logicalName + " class mapping.");
+            return false;
+        }
+        destination = loadWithClassLoader(env, minecraftLoader, loadClassMethod,
+                                          binaryName.c_str());
+        if (destination == nullptr) {
+            log::info(std::string(capability) + " mappings unavailable for " +
+                      profile.label + ": could not load " + logicalName +
+                      " (" + binaryName + ").");
+            return false;
+        }
+        localReferences.add(destination);
+        return true;
+    };
+
+    const bool sidebarClassesLoaded =
+        loadFeatureClass(scoreboard, profile.scoreboardName, "Sidebar", "Scoreboard") &&
+        loadFeatureClass(scoreObjective, profile.scoreObjectiveName, "Sidebar", "ScoreObjective") &&
+        loadFeatureClass(score, profile.scoreName, "Sidebar", "Score") &&
+        loadFeatureClass(scorePlayerTeam, profile.scorePlayerTeamName, "Sidebar", "ScorePlayerTeam");
+
+    const bool armorClassesLoaded =
+        loadFeatureClass(itemStack, profile.itemStackName, "Armor", "ItemStack") &&
+        loadFeatureClass(item, profile.itemName, "Armor", "Item") &&
+        loadFeatureClass(itemArmor, profile.itemArmorName, "Armor", "ItemArmor") &&
+        loadFeatureClass(inventoryPlayer, profile.inventoryPlayerName, "Armor", "InventoryPlayer");
 
     const std::string getMinecraftSignature = std::string("()") + profile.minecraftSignature;
     const std::string getBoundsSignature = std::string("()") + profile.aabbSignature;
@@ -808,41 +825,94 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
         }) ||
         !lookupRequired(env, candidate.renderPartialTicks, [&] {
             return env->GetFieldID(timer, profile.renderPartialTicksField.c_str(), "F");
-        }) ||
-        !lookupOptional(env, candidate.getScoreboard, [&] {
-            return env->GetMethodID(world, profile.getScoreboard.c_str(), (std::string("()") + profile.scoreboardSignature).c_str());
-        }) ||
-        !lookupOptional(env, candidate.getObjectiveInDisplaySlot, [&] {
-            return env->GetMethodID(scoreboard, profile.getObjectiveInDisplaySlot.c_str(), getObjectiveInDisplaySlotSignature.c_str());
-        }) ||
-        !lookupOptional(env, candidate.getPlayersTeam, [&] {
-            return env->GetMethodID(scoreboard, profile.getPlayersTeam.c_str(), getPlayersTeamSignature.c_str());
-        }) ||
-        !lookupOptional(env, candidate.getSortedScores, [&] {
-            return env->GetMethodID(scoreboard, profile.getSortedScores.c_str(), getSortedScoresSignature.c_str());
-        }) ||
-        !lookupOptional(env, candidate.getPlayerName, [&] {
-            return env->GetMethodID(score, profile.getPlayerName.c_str(), "()Ljava/lang/String;");
-        }) ||
-        !lookupOptional(env, candidate.formatPlayerName, [&] {
-            return env->GetStaticMethodID(scorePlayerTeam, profile.formatPlayerName.c_str(), formatPlayerNameSignature.c_str());
-        }) ||
-        !lookupOptional(env, candidate.inventoryField, [&] {
-            return env->GetFieldID(player, profile.inventoryField.c_str(), profile.inventoryPlayerSignature.c_str());
-        }) ||
-        !lookupOptional(env, candidate.armorInventoryField, [&] {
-            return env->GetFieldID(inventoryPlayer, profile.armorInventoryField.c_str(), (std::string("[") + profile.itemStackSignature).c_str());
-        }) ||
-        !lookupOptional(env, candidate.getItem, [&] {
-            return env->GetMethodID(itemStack, profile.getItem.c_str(), getItemSignature.c_str());
-        }) ||
-        !lookupOptional(env, candidate.hasColor, [&] {
-            return env->GetMethodID(itemArmor, profile.hasColor.c_str(), (std::string("(") + profile.itemStackSignature + ")Z").c_str());
-        }) ||
-        !lookupOptional(env, candidate.getColor, [&] {
-            return env->GetMethodID(itemArmor, profile.getColor.c_str(), (std::string("(") + profile.itemStackSignature + ")I").c_str());
         })) {
         return false;
+    }
+
+    bool sidebarCapability = sidebarClassesLoaded &&
+        !profile.getScoreboard.empty() &&
+        !profile.getObjectiveInDisplaySlot.empty() &&
+        !profile.getPlayersTeam.empty() &&
+        !profile.getSortedScores.empty() &&
+        !profile.getPlayerName.empty() &&
+        !profile.formatPlayerName.empty();
+    if (sidebarCapability) {
+        sidebarCapability =
+            lookupRequired(env, candidate.getScoreboard, [&] {
+                return env->GetMethodID(world, profile.getScoreboard.c_str(),
+                                        (std::string("()") + profile.scoreboardSignature).c_str());
+            }) &&
+            lookupRequired(env, candidate.getObjectiveInDisplaySlot, [&] {
+                return env->GetMethodID(scoreboard, profile.getObjectiveInDisplaySlot.c_str(),
+                                        getObjectiveInDisplaySlotSignature.c_str());
+            }) &&
+            lookupRequired(env, candidate.getPlayersTeam, [&] {
+                return env->GetMethodID(scoreboard, profile.getPlayersTeam.c_str(),
+                                        getPlayersTeamSignature.c_str());
+            }) &&
+            lookupRequired(env, candidate.getSortedScores, [&] {
+                return env->GetMethodID(scoreboard, profile.getSortedScores.c_str(),
+                                        getSortedScoresSignature.c_str());
+            }) &&
+            lookupRequired(env, candidate.getPlayerName, [&] {
+                return env->GetMethodID(score, profile.getPlayerName.c_str(),
+                                        "()Ljava/lang/String;");
+            }) &&
+            lookupRequired(env, candidate.formatPlayerName, [&] {
+                return env->GetStaticMethodID(scorePlayerTeam,
+                                              profile.formatPlayerName.c_str(),
+                                              formatPlayerNameSignature.c_str());
+            });
+    }
+    if (!sidebarCapability) {
+        candidate.getScoreboard = nullptr;
+        candidate.getObjectiveInDisplaySlot = nullptr;
+        candidate.getPlayersTeam = nullptr;
+        candidate.getSortedScores = nullptr;
+        candidate.getPlayerName = nullptr;
+        candidate.formatPlayerName = nullptr;
+        log::info(std::string("Sidebar capability disabled for profile: ") +
+                  profile.label + " (auxiliary mapping did not resolve).");
+    }
+
+    bool armorCapability = armorClassesLoaded &&
+        !profile.inventoryField.empty() &&
+        !profile.armorInventoryField.empty() &&
+        !profile.getItem.empty() &&
+        !profile.hasColor.empty() &&
+        !profile.getColor.empty();
+    if (armorCapability) {
+        armorCapability =
+            lookupRequired(env, candidate.inventoryField, [&] {
+                return env->GetFieldID(player, profile.inventoryField.c_str(),
+                                       profile.inventoryPlayerSignature.c_str());
+            }) &&
+            lookupRequired(env, candidate.armorInventoryField, [&] {
+                return env->GetFieldID(inventoryPlayer,
+                                       profile.armorInventoryField.c_str(),
+                                       (std::string("[") + profile.itemStackSignature).c_str());
+            }) &&
+            lookupRequired(env, candidate.getItem, [&] {
+                return env->GetMethodID(itemStack, profile.getItem.c_str(),
+                                        getItemSignature.c_str());
+            }) &&
+            lookupRequired(env, candidate.hasColor, [&] {
+                return env->GetMethodID(itemArmor, profile.hasColor.c_str(),
+                                        (std::string("(") + profile.itemStackSignature + ")Z").c_str());
+            }) &&
+            lookupRequired(env, candidate.getColor, [&] {
+                return env->GetMethodID(itemArmor, profile.getColor.c_str(),
+                                        (std::string("(") + profile.itemStackSignature + ")I").c_str());
+            });
+    }
+    if (!armorCapability) {
+        candidate.inventoryField = nullptr;
+        candidate.armorInventoryField = nullptr;
+        candidate.getItem = nullptr;
+        candidate.hasColor = nullptr;
+        candidate.getColor = nullptr;
+        log::info(std::string("Armor capability disabled for profile: ") +
+                  profile.label + " (auxiliary mapping did not resolve).");
     }
 
     std::array<jfieldID, 6U> boundsFields{};
@@ -893,16 +963,58 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
         !makeGlobal(activeRenderInfo, candidate.activeRenderInfoClass) ||
         !makeGlobal(renderManager, candidate.renderManagerClass) ||
         !makeGlobal(timer, candidate.timerClass) ||
-        !makeGlobal(chatComponent, candidate.chatComponentClass) ||
-        !makeGlobal(scoreboard, candidate.scoreboardClass) ||
-        !makeGlobal(scoreObjective, candidate.scoreObjectiveClass) ||
-        !makeGlobal(score, candidate.scoreClass) ||
-        !makeGlobal(scorePlayerTeam, candidate.scorePlayerTeamClass) ||
-        !makeGlobal(itemStack, candidate.itemStackClass) ||
-        !makeGlobal(item, candidate.itemClass) ||
-        !makeGlobal(itemArmor, candidate.itemArmorClass) ||
-        !makeGlobal(inventoryPlayer, candidate.inventoryPlayerClass)) {
+        !makeGlobal(chatComponent, candidate.chatComponentClass)) {
         return false;
+    }
+
+    auto clearGlobal = [&](jclass& reference) noexcept {
+        if (reference != nullptr) {
+            env->DeleteGlobalRef(reference);
+            reference = nullptr;
+        }
+    };
+
+    if (sidebarCapability) {
+        sidebarCapability =
+            makeGlobal(scoreboard, candidate.scoreboardClass) &&
+            makeGlobal(scoreObjective, candidate.scoreObjectiveClass) &&
+            makeGlobal(score, candidate.scoreClass) &&
+            makeGlobal(scorePlayerTeam, candidate.scorePlayerTeamClass);
+        if (!sidebarCapability) {
+            clearGlobal(candidate.scoreboardClass);
+            clearGlobal(candidate.scoreObjectiveClass);
+            clearGlobal(candidate.scoreClass);
+            clearGlobal(candidate.scorePlayerTeamClass);
+            candidate.getScoreboard = nullptr;
+            candidate.getObjectiveInDisplaySlot = nullptr;
+            candidate.getPlayersTeam = nullptr;
+            candidate.getSortedScores = nullptr;
+            candidate.getPlayerName = nullptr;
+            candidate.formatPlayerName = nullptr;
+            log::info(std::string("Sidebar capability disabled for profile: ") +
+                      profile.label + " (failed to publish class references).");
+        }
+    }
+
+    if (armorCapability) {
+        armorCapability =
+            makeGlobal(itemStack, candidate.itemStackClass) &&
+            makeGlobal(item, candidate.itemClass) &&
+            makeGlobal(itemArmor, candidate.itemArmorClass) &&
+            makeGlobal(inventoryPlayer, candidate.inventoryPlayerClass);
+        if (!armorCapability) {
+            clearGlobal(candidate.itemStackClass);
+            clearGlobal(candidate.itemClass);
+            clearGlobal(candidate.itemArmorClass);
+            clearGlobal(candidate.inventoryPlayerClass);
+            candidate.inventoryField = nullptr;
+            candidate.armorInventoryField = nullptr;
+            candidate.getItem = nullptr;
+            candidate.hasColor = nullptr;
+            candidate.getColor = nullptr;
+            log::info(std::string("Armor capability disabled for profile: ") +
+                      profile.label + " (failed to publish class references).");
+        }
     }
 
     jobject minecraftObject = candidate.minecraftInstanceField != nullptr
@@ -1754,7 +1866,10 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
                             }
                         }
                         
-                        if (marker.player) {
+                        if (marker.player && cache->inventoryField != nullptr &&
+                            cache->armorInventoryField != nullptr &&
+                            cache->getItem != nullptr && cache->itemArmorClass != nullptr &&
+                            cache->hasColor != nullptr && cache->getColor != nullptr) {
                             jobject inv = env->GetObjectField(entity, cache->inventoryField);
                             if (env->ExceptionCheck() != JNI_TRUE && inv != nullptr) {
                                 jobjectArray armor = static_cast<jobjectArray>(env->GetObjectField(inv, cache->armorInventoryField));
@@ -1923,7 +2038,17 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
             teamMask != 0U && (teamMask & (teamMask - 1U)) != 0U;
         
         char nextOwnTeam = 'u';
-        jobject scoreboard = cache->getScoreboard != nullptr ? env->CallObjectMethod(world, cache->getScoreboard) : nullptr;
+        const bool sidebarAvailable =
+            cache->getScoreboard != nullptr &&
+            cache->getObjectiveInDisplaySlot != nullptr &&
+            cache->getPlayersTeam != nullptr &&
+            cache->getSortedScores != nullptr &&
+            cache->getPlayerName != nullptr &&
+            cache->formatPlayerName != nullptr &&
+            cache->scorePlayerTeamClass != nullptr;
+        jobject scoreboard = sidebarAvailable
+            ? env->CallObjectMethod(world, cache->getScoreboard)
+            : nullptr;
         if (env->ExceptionCheck() != JNI_TRUE && scoreboard != nullptr) {
             jobject objective = env->CallObjectMethod(scoreboard, cache->getObjectiveInDisplaySlot, 1);
             if (env->ExceptionCheck() != JNI_TRUE && objective != nullptr) {
