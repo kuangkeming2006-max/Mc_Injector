@@ -52,10 +52,16 @@ public:
     Q_PROPERTY(bool bedEspFilled READ bedEspFilled WRITE setBedEspFilled NOTIFY featureSettingsChanged)
     Q_PROPERTY(bool debugChatEnabled READ debugChatEnabled WRITE setDebugChatEnabled NOTIFY featureSettingsChanged)
     Q_PROPERTY(bool showOwnBedDefenseInfo READ showOwnBedDefenseInfo WRITE setShowOwnBedDefenseInfo NOTIFY featureSettingsChanged)
+    Q_PROPERTY(bool showTeammateBoxes READ showTeammateBoxes WRITE setShowTeammateBoxes NOTIFY featureSettingsChanged)
+    Q_PROPERTY(bool bedDefenseHoldToShow READ bedDefenseHoldToShow WRITE setBedDefenseHoldToShow NOTIFY featureSettingsChanged)
+    Q_PROPERTY(bool bedDefensePerspectiveScale READ bedDefensePerspectiveScale WRITE setBedDefensePerspectiveScale NOTIFY featureSettingsChanged)
     Q_PROPERTY(int bedDefenseRadius READ bedDefenseRadius WRITE setBedDefenseRadius NOTIFY featureSettingsChanged)
     Q_PROPERTY(int bedThreatRadius READ bedThreatRadius WRITE setBedThreatRadius NOTIFY featureSettingsChanged)
+    Q_PROPERTY(int bedDefenseHotkey READ bedDefenseHotkey WRITE setBedDefenseHotkey NOTIFY featureSettingsChanged)
+    Q_PROPERTY(int bedDefensePanelOpacity READ bedDefensePanelOpacity WRITE setBedDefensePanelOpacity NOTIFY featureSettingsChanged)
     Q_PROPERTY(QString playerEspColor READ playerEspColor WRITE setPlayerEspColor NOTIFY featureSettingsChanged)
     Q_PROPERTY(QString bedEspColor READ bedEspColor WRITE setBedEspColor NOTIFY featureSettingsChanged)
+    Q_PROPERTY(QString bedDefensePanelColor READ bedDefensePanelColor WRITE setBedDefensePanelColor NOTIFY featureSettingsChanged)
     Q_PROPERTY(int menuHotkey READ menuHotkey WRITE setMenuHotkey NOTIFY menuHotkeyChanged)
     Q_PROPERTY(int guiScaleIndex READ guiScaleIndex WRITE setGuiScaleIndex
                    NOTIFY guiScaleIndexChanged)
@@ -109,10 +115,16 @@ public:
     [[nodiscard]] bool bedEspFilled() const noexcept { return m_bedEspFilled; }
     [[nodiscard]] bool debugChatEnabled() const noexcept { return m_debugChatEnabled; }
     [[nodiscard]] bool showOwnBedDefenseInfo() const noexcept { return m_showOwnBedDefenseInfo; }
+    [[nodiscard]] bool showTeammateBoxes() const noexcept { return m_showTeammateBoxes; }
+    [[nodiscard]] bool bedDefenseHoldToShow() const noexcept { return m_bedDefenseHoldToShow; }
+    [[nodiscard]] bool bedDefensePerspectiveScale() const noexcept { return m_bedDefensePerspectiveScale; }
     [[nodiscard]] int bedDefenseRadius() const noexcept { return m_bedDefenseRadius; }
     [[nodiscard]] int bedThreatRadius() const noexcept { return m_bedThreatRadius; }
+    [[nodiscard]] int bedDefenseHotkey() const noexcept { return m_bedDefenseHotkey; }
+    [[nodiscard]] int bedDefensePanelOpacity() const noexcept { return m_bedDefensePanelOpacity; }
     [[nodiscard]] QString playerEspColor() const { return m_playerEspColor; }
     [[nodiscard]] QString bedEspColor() const { return m_bedEspColor; }
+    [[nodiscard]] QString bedDefensePanelColor() const { return m_bedDefensePanelColor; }
     [[nodiscard]] int menuHotkey() const noexcept { return m_menuHotkey; }
     [[nodiscard]] int guiScaleIndex() const noexcept { return m_guiScaleIndex; }
     [[nodiscard]] quint32 targetPid() const noexcept { return m_targetPid; }
@@ -161,10 +173,16 @@ public slots:
     void setBedEspFilled(bool enabled);
     void setDebugChatEnabled(bool enabled);
     void setShowOwnBedDefenseInfo(bool enabled);
+    void setShowTeammateBoxes(bool enabled);
+    void setBedDefenseHoldToShow(bool enabled);
+    void setBedDefensePerspectiveScale(bool enabled);
     void setBedDefenseRadius(int radius);
     void setBedThreatRadius(int radius);
+    void setBedDefenseHotkey(int virtualKey);
+    void setBedDefensePanelOpacity(int opacity);
     void setPlayerEspColor(const QString &color);
     void setBedEspColor(const QString &color);
+    void setBedDefensePanelColor(const QString &color);
     void setMenuHotkey(int virtualKey);
     void setGuiScaleIndex(int index);
     void publishHypixelResult(int state, const QString &uuid, const QString &displayName,
@@ -173,6 +191,7 @@ public slots:
                               double winRate, double fkdr, const QString &status);
     void publishPlayerStats(const QString &playerName, const QString &teamPrefix,
                             int stars, double fkdr, int level);
+    void publishPlayerStatsError(const QString &playerName, const QString &reason);
 
 signals:
     void stateChanged();
@@ -305,10 +324,16 @@ private:
     bool m_bedEspFilled = false;
     bool m_debugChatEnabled = true;
     bool m_showOwnBedDefenseInfo = true;
+    bool m_showTeammateBoxes = true;
+    bool m_bedDefenseHoldToShow = true;
+    bool m_bedDefensePerspectiveScale = false;
     int m_bedDefenseRadius = 6;
     int m_bedThreatRadius = 8;
+    int m_bedDefenseHotkey = 0xA4; // VK_LMENU
+    int m_bedDefensePanelOpacity = 78;
     QString m_playerEspColor = QStringLiteral("#FF3B30");
     QString m_bedEspColor = QStringLiteral("#FF5C68");
+    QString m_bedDefensePanelColor = QStringLiteral("#191621");
     int m_menuHotkey = 0xDE; // VK_OEM_7 / apostrophe
     int m_guiScaleIndex = 1; // S/M/L/XL -> 0..3
     bool m_authenticated = false;

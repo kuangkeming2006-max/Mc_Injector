@@ -29,9 +29,16 @@ struct SidebarSnapshot final {
     bool valid = false;
 };
 
+enum class ThreatClassification : std::uint8_t {
+    Teammate,
+    Enemy,
+    UnknownThreat
+};
+
 [[nodiscard]] char formatCode(Team team) noexcept;
 [[nodiscard]] Team fromFormatCode(char code) noexcept;
 [[nodiscard]] Team fromWoolMetadata(std::uint8_t metadata) noexcept;
+[[nodiscard]] Team fromLeatherRgb(std::uint32_t rgb) noexcept;
 [[nodiscard]] std::uint8_t teamIndex(Team team) noexcept;
 
 // Parses the final Sidebar strings after ScorePlayerTeam prefix/suffix have
@@ -40,9 +47,14 @@ struct SidebarSnapshot final {
 [[nodiscard]] SidebarSnapshot parseSidebar(
     std::span<const std::string_view> formattedLines) noexcept;
 
-// Player display names use a different shape, normally "§c[R] name". This
-// helper is intentionally separate from the Sidebar parser so a TAB entry can
-// never activate a match on its own.
+// Player display names use a different shape, normally "§c[R] name".
+// parseRosterTeamTag accepts only a whitelisted explicit Bed Wars team tag and
+// deliberately tolerates rank/reset colours inserted by transformed clients.
+// parseRosterTeam additionally falls back to the first team colour, but only
+// after a match has already been confirmed.
+[[nodiscard]] Team parseRosterTeamTag(std::string_view formattedName) noexcept;
 [[nodiscard]] Team parseRosterTeam(std::string_view formattedName) noexcept;
+[[nodiscard]] ThreatClassification classifyArmorThreat(
+    Team ownTeam, bool chestplatePresent, Team armorTeam) noexcept;
 
 } // namespace mcoverlay::bedwars

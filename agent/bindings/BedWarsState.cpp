@@ -36,6 +36,51 @@ Team markerTeam(const char colour, const char marker) noexcept
     return Team::Unknown;
 }
 
+Team rosterTagTeam(const char colour, const std::string_view tag) noexcept
+{
+    // Hypixel's live roster component is not guaranteed to keep the team
+    // colour active immediately before the short [R]/[B]/... token. Lunar and
+    // several HUD transformers insert a reset/rank colour in that position.
+    // The original detector therefore classified the explicit tag itself and
+    // did not require the surrounding colour to agree. Keep that behaviour:
+    // an explicit, whitelisted Bed Wars tag is safe evidence, while unrelated
+    // rank tags such as [MVP+] still fail closed.
+    if (tag.size() == 1U) {
+        const char marker = static_cast<char>(std::toupper(
+            static_cast<unsigned char>(tag.front())));
+        switch (marker) {
+        case 'R': return Team::Red;
+        case 'B': return Team::Blue;
+        case 'G':
+            // Hypixel historically used S for Gray; accept a gray-coloured G
+            // variant without making an ordinary G ambiguous.
+            return fromFormatCode(colour) == Team::Gray ? Team::Gray : Team::Green;
+        case 'Y': return Team::Yellow;
+        case 'A': return Team::Aqua;
+        case 'W': return Team::White;
+        case 'P': return Team::Pink;
+        case 'S': return Team::Gray;
+        default: return Team::Unknown;
+        }
+    }
+    std::array<char, 7U> upper{};
+    if (tag.empty() || tag.size() >= upper.size()) return Team::Unknown;
+    for (std::size_t index = 0U; index < tag.size(); ++index) {
+        upper[index] = static_cast<char>(std::toupper(
+            static_cast<unsigned char>(tag[index])));
+    }
+    const std::string_view normalized(upper.data(), tag.size());
+    if (normalized == "RED") return Team::Red;
+    if (normalized == "BLUE") return Team::Blue;
+    if (normalized == "GREEN") return Team::Green;
+    if (normalized == "YELLOW") return Team::Yellow;
+    if (normalized == "AQUA") return Team::Aqua;
+    if (normalized == "WHITE") return Team::White;
+    if (normalized == "PINK") return Team::Pink;
+    if (normalized == "GRAY" || normalized == "GREY") return Team::Gray;
+    return Team::Unknown;
+}
+
 bool containsYouWord(const std::string_view line) noexcept
 {
     constexpr std::string_view token{"YOU"};
@@ -136,6 +181,24 @@ Team fromWoolMetadata(const std::uint8_t metadata) noexcept
     }
 }
 
+Team fromLeatherRgb(const std::uint32_t rgb) noexcept
+{
+    const int red = static_cast<int>((rgb >> 16U) & 0xFFU);
+    const int green = static_cast<int>((rgb >> 8U) & 0xFFU);
+    const int blue = static_cast<int>(rgb & 0xFFU);
+    if (red > green * 2 && red > blue * 2) return Team::Red;
+    if (blue * 2 > red * 3 && blue * 2 > green * 3) return Team::Blue;
+    if (green * 2 > red * 3 && green * 2 > blue * 3) return Team::Green;
+    if (red > blue * 2 && green > blue * 2 && red > 150 && green > 150)
+        return Team::Yellow;
+    if (green * 2 > red * 3 && blue * 2 > red * 3 && green > 100 && blue > 100)
+        return Team::Aqua;
+    if (red > 200 && green > 200 && blue > 200) return Team::White;
+    if (red > 150 && blue > 150 && green < 150) return Team::Pink;
+    if (red < 100 && green < 100 && blue < 100) return Team::Gray;
+    return Team::Unknown;
+}
+
 std::uint8_t teamIndex(const Team team) noexcept
 {
     const auto value = static_cast<std::uint8_t>(team);
@@ -164,7 +227,7 @@ SidebarSnapshot parseSidebar(
     return result;
 }
 
-Team parseRosterTeam(const std::string_view formattedName) noexcept
+Team parseRosterTeamTag(const std::string_view formattedName) noexcept
 {
     char activeColour = '\0';
     for (std::size_t offset = 0U; offset < formattedName.size(); ++offset) {
@@ -177,11 +240,47 @@ Team parseRosterTeam(const std::string_view formattedName) noexcept
         }
         if (formattedName[offset] != '[' || offset + 2U >= formattedName.size()) continue;
         const std::size_t close = formattedName.find(']', offset + 1U);
-        if (close == std::string_view::npos || close - offset != 2U) continue;
-        const Team team = markerTeam(activeColour, formattedName[offset + 1U]);
+        if (close == std::string_view::npos || close - offset < 2U ||
+            close - offset > 7U) continue;
+        const Team team = rosterTagTeam(
+            activeColour, formattedName.substr(offset + 1U, close - offset - 1U));
         if (team != Team::Unknown) return team;
     }
     return Team::Unknown;
+}
+
+Team parseRosterTeam(const std::string_view formattedName) noexcept
+{
+    const Team tagged = parseRosterTeamTag(formattedName);
+    if (tagged != Team::Unknown) return tagged;
+    Team firstRecognizedColour = Team::Unknown;
+    for (std::size_t offset = 0U; offset < formattedName.size(); ++offset) {
+        if (!isSection(formattedName, offset)) continue;
+        const char code = static_cast<char>(std::tolower(
+            static_cast<unsigned char>(formattedName[offset + 2U])));
+        if (isColourCode(code)) {
+            firstRecognizedColour = fromFormatCode(code);
+            break;
+        }
+        offset += 2U;
+    }
+    // Some transformed clients omit the short [R]/[B] marker and colour the
+    // complete player name instead. This fallback is only consumed after the
+    // Sidebar match gate is already stable, so rank colours in a lobby cannot
+    // accidentally start team detection.
+    return firstRecognizedColour;
+}
+
+ThreatClassification classifyArmorThreat(const Team ownTeam,
+                                          const bool chestplatePresent,
+                                          const Team armorTeam) noexcept
+{
+    if (!chestplatePresent || armorTeam == Team::Unknown ||
+        ownTeam == Team::Unknown) {
+        return ThreatClassification::UnknownThreat;
+    }
+    return armorTeam == ownTeam ? ThreatClassification::Teammate
+                                : ThreatClassification::Enemy;
 }
 
 } // namespace mcoverlay::bedwars

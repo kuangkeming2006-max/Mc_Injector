@@ -381,11 +381,12 @@ try {
         }
     }
 
-    # Exercise the complete persisted feature-state grammar: twelve flags,
-    # defense/threat radii, and two packed 0xRRGGBB values. The synthetic JVM
+    # Exercise the complete persisted feature-state grammar: fifteen flags,
+    # defense/threat radii, hold key, card opacity, and three packed 0xRRGGBB
+    # values. The synthetic JVM
     # has no Minecraft classes, but the renderer/control protocol must still
     # accept and acknowledge the settings atomically.
-    $writer.WriteLine('FEATURE_STATE 1 1 1 1 1 1 1 1 1 1 1 1 10 32 16777215 0')
+    $writer.WriteLine('FEATURE_STATE 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 10 32 164 78 16777215 0 1644065')
     do {
         $line = Read-ProtocolLine -Reader $reader -Stopwatch $protocolWatch `
             -LimitSeconds $TimeoutSeconds -Operation 'applying the complete feature snapshot' `

@@ -97,7 +97,10 @@ void PlayerStatsService::enqueuePlayer(const QString &playerName,
     }
     // Discovery is still remembered while no key exists. As soon as the user
     // saves one, reloadConfiguration() restarts this current-match roster.
-    if (m_apiKeys == nullptr || !m_apiKeys->configured()) return;
+    if (m_apiKeys == nullptr || !m_apiKeys->configured()) {
+        emit statsFailed(name, QStringLiteral("Hypixel API key is not configured"));
+        return;
+    }
 
     for (auto it = m_deduplicateUntil.begin(); it != m_deduplicateUntil.end();) {
         it = it.value() <= now ? m_deduplicateUntil.erase(it) : ++it;

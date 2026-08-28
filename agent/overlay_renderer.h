@@ -64,9 +64,11 @@ struct HypixelOverlaySnapshot final {
 struct PlayerStatsEntry final {
     std::array<char, 17U> name{};
     std::array<char, 5U> teamPrefix{};
+    std::array<char, 97U> status{};
     std::int32_t stars = 0;
     double fkdr = 0.0;
     std::int32_t level = 0;
+    bool failed = false;
 };
 
 struct PlayerStatsOverlaySnapshot final {
@@ -107,6 +109,7 @@ public:
 private:
     [[nodiscard]] bool initialize(HWND window, HGLRC context) noexcept;
     void pollFallbackInput() noexcept;
+    void captureBackdropTexture() noexcept;
     void renderInventoryBlur(float strength) noexcept;
     void applyGuiScaleStyle(float scale, int fontIndex) noexcept;
     void enqueueFeatureToasts(const FeatureSettings& before,
@@ -149,6 +152,7 @@ private:
     std::array<char, 17U> m_hypixelQuery{};
     std::array<char, 17U> m_hypixelInput{};
     float m_clickGuiProgress = 0.0F;
+    float m_statsPanelProgress = 0.0F;
     float m_toggleAnimation[15]{};
     float m_clickGuiX = -9999.0F;
     float m_clickGuiY = 18.0F;
@@ -194,6 +198,7 @@ private:
     unsigned m_blockTextures[6]{};
     int m_blurWidth = 0;
     int m_blurHeight = 0;
+    bool m_backdropCapturedThisFrame = false;
 
 };
 

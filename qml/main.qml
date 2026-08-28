@@ -1092,15 +1092,18 @@ ApplicationWindow {
 
                                 Repeater {
                                     model: [
-                                        { "label": "ESP master", "detail": "Single-player world-space diagnostics", "key": "master" },
+                                        { "label": "ESP master", "detail": "World-space overlay rendering", "key": "master" },
                                         { "label": "3D living hitboxes", "detail": "Occlusion-independent projected AABB wireframes", "key": "entities" },
                                         { "label": "Players only", "detail": "Hide non-player living-entity boxes", "key": "playersOnly" },
+                                        { "label": "Show teammate boxes", "detail": "Keep 3D boxes around teammates in confirmed matches", "key": "teammateBoxes" },
                                         { "label": "Bed ESP", "detail": "Chunk diffing, bulk section copy and lazy verification", "key": "beds" },
                                         { "label": "Automatic bed refresh", "detail": "Periodically rebuild loaded-chunk bed data", "key": "bedAuto" },
                                         { "label": "Solid translucent bed fill", "detail": "Fill projected bed boxes while retaining the outline", "key": "bedFill" },
                                         { "label": "Bed proximity alert", "detail": "Persistent distance-tracking warning while an enemy is in range", "key": "bedThreat" },
                                         { "label": "Bed defense panel", "detail": "Fixed-size material icons above each detected bed", "key": "bedDefense" },
                                         { "label": "Show own bed materials", "detail": "Include the local team's bed defense information", "key": "ownBedInfo" },
+                                        { "label": "Hold key to show materials", "detail": "Show defense cards only while the configured key is held", "key": "bedHold" },
+                                        { "label": "Perspective-sized cards", "detail": "Near cards appear larger and distant cards smaller", "key": "bedPerspective" },
                                         { "label": "Local Debug chat", "detail": "Show match, team and teammate decisions only in your chat log", "key": "debugChat" },
                                         { "label": "World labels", "detail": "Coordinates and entity identifiers", "key": "labels" },
                                         { "label": "Hypixel panel", "detail": "Show the draggable official-API result card in game", "key": "hypixel" }
@@ -1120,12 +1123,15 @@ ApplicationWindow {
                                             checked: modelData.key === "master" ? OverlayManager.espEnabled
                                                    : modelData.key === "entities" ? OverlayManager.entityEspEnabled
                                                    : modelData.key === "playersOnly" ? OverlayManager.entityEspPlayersOnly
+                                                   : modelData.key === "teammateBoxes" ? OverlayManager.showTeammateBoxes
                                                    : modelData.key === "beds" ? OverlayManager.bedEspEnabled
                                                    : modelData.key === "bedAuto" ? OverlayManager.bedAutoRefreshEnabled
                                                    : modelData.key === "bedFill" ? OverlayManager.bedEspFilled
                                                    : modelData.key === "bedThreat" ? OverlayManager.bedThreatAlertsEnabled
                                                    : modelData.key === "bedDefense" ? OverlayManager.bedDefensePanelEnabled
                                                    : modelData.key === "ownBedInfo" ? OverlayManager.showOwnBedDefenseInfo
+                                                   : modelData.key === "bedHold" ? OverlayManager.bedDefenseHoldToShow
+                                                   : modelData.key === "bedPerspective" ? OverlayManager.bedDefensePerspectiveScale
                                                    : modelData.key === "debugChat" ? OverlayManager.debugChatEnabled
                                                    : modelData.key === "labels" ? OverlayManager.espLabelsEnabled
                                                    : OverlayManager.hypixelPanelEnabled
@@ -1133,12 +1139,15 @@ ApplicationWindow {
                                                 if (modelData.key === "master") OverlayManager.espEnabled = checked
                                                 else if (modelData.key === "entities") OverlayManager.entityEspEnabled = checked
                                                 else if (modelData.key === "playersOnly") OverlayManager.entityEspPlayersOnly = checked
+                                                else if (modelData.key === "teammateBoxes") OverlayManager.showTeammateBoxes = checked
                                                 else if (modelData.key === "beds") OverlayManager.bedEspEnabled = checked
                                                 else if (modelData.key === "bedAuto") OverlayManager.bedAutoRefreshEnabled = checked
                                                 else if (modelData.key === "bedFill") OverlayManager.bedEspFilled = checked
                                                 else if (modelData.key === "bedThreat") OverlayManager.bedThreatAlertsEnabled = checked
                                                 else if (modelData.key === "bedDefense") OverlayManager.bedDefensePanelEnabled = checked
                                                 else if (modelData.key === "ownBedInfo") OverlayManager.showOwnBedDefenseInfo = checked
+                                                else if (modelData.key === "bedHold") OverlayManager.bedDefenseHoldToShow = checked
+                                                else if (modelData.key === "bedPerspective") OverlayManager.bedDefensePerspectiveScale = checked
                                                 else if (modelData.key === "debugChat") OverlayManager.debugChatEnabled = checked
                                                 else if (modelData.key === "labels") OverlayManager.espLabelsEnabled = checked
                                                 else OverlayManager.hypixelPanelEnabled = checked
@@ -1176,6 +1185,74 @@ ApplicationWindow {
                                                 if (!playerColorField.activeFocus) playerColorField.text = OverlayManager.playerEspColor
                                             }
                                         }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 12
+                                    Text { Layout.preferredWidth: 156; text: "Material card color"; color: app.textColor; font.pixelSize: 13; font.weight: Font.Medium }
+                                    Repeater {
+                                        model: ["#191621", "#202532", "#12252A", "#2A181F", "#241E34", "#111111"]
+                                        Rectangle {
+                                            required property string modelData
+                                            width: 26; height: 26; radius: 13; color: modelData
+                                            border.width: OverlayManager.bedDefensePanelColor.toUpperCase() === modelData ? 3 : 1
+                                            border.color: OverlayManager.bedDefensePanelColor.toUpperCase() === modelData ? app.primaryColor : "#8B8490"
+                                            TapHandler { onTapped: OverlayManager.bedDefensePanelColor = parent.modelData }
+                                        }
+                                    }
+                                    MaterialTextField {
+                                        id: materialPanelColorField
+                                        Layout.preferredWidth: 106; Layout.preferredHeight: 40
+                                        text: OverlayManager.bedDefensePanelColor
+                                        maximumLength: 7
+                                        onEditingFinished: {
+                                            if (/^#[0-9a-fA-F]{6}$/.test(text)) OverlayManager.bedDefensePanelColor = text
+                                            text = OverlayManager.bedDefensePanelColor
+                                        }
+                                        Connections {
+                                            target: OverlayManager
+                                            function onFeatureSettingsChanged() {
+                                                if (!materialPanelColorField.activeFocus)
+                                                    materialPanelColorField.text = OverlayManager.bedDefensePanelColor
+                                            }
+                                        }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 14
+                                    Text { Layout.preferredWidth: 156; text: "Material card opacity"; color: app.textColor; font.pixelSize: 13; font.weight: Font.Medium }
+                                    Slider {
+                                        Layout.fillWidth: true
+                                        from: 0; to: 100; stepSize: 1
+                                        value: OverlayManager.bedDefensePanelOpacity
+                                        onMoved: OverlayManager.bedDefensePanelOpacity = Math.round(value)
+                                    }
+                                    Rectangle {
+                                        Layout.preferredWidth: 74; Layout.preferredHeight: 34; radius: 17; color: app.primaryContainer
+                                        Text { anchors.centerIn: parent; text: OverlayManager.bedDefensePanelOpacity + "%"; color: app.primaryColor; font.pixelSize: 12; font.weight: Font.Bold }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 14
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 2
+                                        Text { text: "Hold-to-view key"; color: app.textColor; font.pixelSize: 13; font.weight: Font.Medium }
+                                        Text { text: "Press and hold in game; release to hide the material cards"; color: app.secondaryTextColor; font.pixelSize: 11 }
+                                    }
+                                    KeyCaptureButton {
+                                        Layout.preferredWidth: 190
+                                        virtualKey: OverlayManager.bedDefenseHotkey
+                                        primaryColor: app.primaryColor
+                                        surfaceColor: app.surfaceColor
+                                        textColor: app.textColor
+                                        onKeyCaptured: function(key) { OverlayManager.bedDefenseHotkey = key }
                                     }
                                 }
 
@@ -1278,7 +1355,7 @@ ApplicationWindow {
                                 Text {
                                     Layout.fillWidth: true
                                     text: "Press " + app.menuHotkeyLabel(OverlayManager.menuHotkey)
-                                          + " in Minecraft to open the animated Click GUI. ESP remains hard-locked outside integrated single-player worlds."
+                                          + " in Minecraft to open the animated Click GUI. Match-only team features remain inactive until Sidebar state is confirmed."
                                     color: app.primaryColor
                                     font.pixelSize: 11
                                     wrapMode: Text.WordWrap

@@ -29,6 +29,14 @@ target_link_libraries(McOverlayOpenGlJvmSmoke PRIVATE
     user32)
 add_dependencies(McOverlayOpenGlJvmSmoke McOverlayAgent)
 
+add_executable(McOverlayHotkeyCaptureTests EXCLUDE_FROM_ALL
+    HotkeyCaptureServiceTests.cpp
+    ../src/HotkeyCaptureService.cpp
+    ../src/HotkeyCaptureService.h)
+target_compile_features(McOverlayHotkeyCaptureTests PRIVATE cxx_std_20)
+target_include_directories(McOverlayHotkeyCaptureTests PRIVATE ../src)
+target_link_libraries(McOverlayHotkeyCaptureTests PRIVATE Qt6::Core Qt6::Gui)
+
 if(MSVC)
     target_compile_options(McOverlayOpenGlJvmSmoke PRIVATE /W4 /permissive- /EHsc)
 else()

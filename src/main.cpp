@@ -6,6 +6,7 @@
 #include "AppSettings.h"
 #include "SkinProfileService.h"
 #include "SkinCuboidGeometry.h"
+#include "HotkeyCaptureService.h"
 
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
@@ -48,6 +49,7 @@ int main(int argc, char *argv[])
     HypixelApiClient hypixelApi(&apiKeys);
     PlayerStatsService playerStatsService(&apiKeys);
     SkinProfileService skinProfile;
+    HotkeyCaptureService hotkeyCapture;
 
     // Restore controller preferences before QML or the native Agent observes
     // them. Changes coming back from the in-game GUI are persisted through the
@@ -80,6 +82,8 @@ int main(int argc, char *argv[])
     });
     QObject::connect(&playerStatsService, &PlayerStatsService::statsReady,
                      &overlayManager, &OverlayManager::publishPlayerStats);
+    QObject::connect(&playerStatsService, &PlayerStatsService::statsFailed,
+                     &overlayManager, &OverlayManager::publishPlayerStatsError);
     const auto publishHypixelToAgent = [&overlayManager, &hypixelApi] {
         const QString status = hypixelApi.errorMessage().isEmpty()
             ? hypixelApi.statusMessage() : hypixelApi.errorMessage();
@@ -111,6 +115,8 @@ int main(int argc, char *argv[])
                                  "ProcessScanner", &processScanner);
     qmlRegisterSingletonInstance("McOverlay", 1, 0,
                                  "OverlayManager", &overlayManager);
+    qmlRegisterSingletonInstance("McOverlay", 1, 0,
+                                 "HotkeyCapture", &hotkeyCapture);
     qmlRegisterSingletonInstance("McOverlay", 1, 0,
                                  "HypixelApi", &hypixelApi);
     qmlRegisterSingletonInstance("McOverlay", 1, 0,

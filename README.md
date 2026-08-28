@@ -102,6 +102,69 @@ dashboard sample stale from local receipt time. Mapping resolution failures
 still produce `valid=0` telemetry so the UI can explain the unsupported profile
 without blocking overlay rendering.
 
+## Lightweight console injector (McInjectorLite)
+
+`cli/` contains a pure C++/Win32 front-end for the same native agent. It links
+no Qt module — not even QtCore — and statically links the MinGW runtime, so
+double-clicking `McInjectorLite.exe` opens a terminal REPL and the entire
+runtime is just:
+
+```text
+McInjectorLite.exe
+agent/McOverlayAgent.dll
+tools/McOverlayAttachHelper.jar
+tools/McOverlayNativeLoader.exe
+```
+
+The console REPL performs the full controller pipeline without the QML
+dashboard and without controller-side in-game feature toggles (the agent's
+own Click GUI still provides those, bound to the single quote by default):
+
+- `list` scans java.exe/javaw.exe processes (PID, window title, memory);
+- `select <index|PID>` and `attach [index|PID]` validate the target (x64
+  architecture, executable path), start the authenticated named-pipe session,
+  launch the JVM Attach helper, and fall back to `McOverlayNativeLoader.exe`
+  with the same bounded grace/recovery logic as the Qt controller;
+- `detach`, `status` follow the live session, renderer, and `GAME_STATE`
+  telemetry (health, position, entities, beds, mapping profile);
+- `setkey <KEY>` / `clearkey` store the Hypixel API key with Windows DPAPI in
+  the same registry location the Qt dashboard uses, so both front-ends share
+  one key; `query <player>` runs the manual Bed Wars lookup, while the
+  automatic roster pipeline (PLAYER_FOUND → name resolution → serial Hypixel
+  queries → STATS to the in-game table) works exactly as in the dashboard;
+- `bedrescan`, `hotkey <VK>`, and `scale <0-3>` drive the agent commands.
+
+Configuration and feature defaults live in
+`HKCU\Software\Overlay Studio\MinecraftOverlayManager`, the same QSettings key
+tree as the dashboard.
+
+Build the console injector without any Qt installation:
+
+```powershell
+cmake -S . -B build-cli -G Ninja `
+  -DMC_OVERLAY_BUILD_GUI=OFF `
+  -DCMAKE_BUILD_TYPE=Release `
+  -DCMAKE_C_COMPILER="D:/Qt/Tools/mingw1310_64/bin/gcc.exe" `
+  -DCMAKE_CXX_COMPILER="D:/Qt/Tools/mingw1310_64/bin/g++.exe" `
+  -DMC_AGENT_JDK_ROOT="C:/Program Files/Microsoft/jdk-21.0.10.7-hotspot"
+
+cmake --build build-cli --parallel
+```
+
+The build tree contains:
+
+```text
+build-cli/
+  McInjectorLite.exe
+  agent/McOverlayAgent.dll
+  tools/McOverlayAttachHelper.jar
+  tools/McOverlayNativeLoader.exe
+```
+
+One-shot command-line forms are available for scripting:
+`--list`, `--attach <index|PID>`, `--key <KEY>`, `--clear-key`,
+`--query <player>`, and `--help`.
+
 ## Hypixel Bed Wars statistics
 
 The controller accepts a Minecraft player name, resolves it to the UUID

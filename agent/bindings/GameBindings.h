@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #include "BedWarsState.h"
 #include "MappingProvider.h"
@@ -120,14 +121,17 @@ struct GameSnapshot final {
     std::uint32_t playerCount = 0U;
     std::uint64_t playerRosterGeneration = 0U;
     std::array<char, 17U> localPlayerName{};
-    // True only after two consecutive valid Sidebar snapshots contain at
-    // least two distinct team rows and exactly one team row containing YOU.
+    // True only after two consecutive snapshots agree on a local team. An
+    // explicit [R]/[B]/... roster tag is the primary signal; a complete
+    // Sidebar snapshot is accepted as corroborating evidence.
     bool matchActive = false;
     char ownTeam = 'u';
+    enum class OwnBedSource : std::uint8_t { Unknown, TeamWool, MatchSpawn };
     bool ownBedKnown = false;
     int ownBedX = 0;
     int ownBedY = 0;
     int ownBedZ = 0;
+    OwnBedSource ownBedSource = OwnBedSource::Unknown;
     WorldCameraSnapshot camera{};
     std::uint32_t mappingAttempt = 0U;
     std::uint32_t mappingRetryInMs = 0U;
@@ -190,6 +194,9 @@ public:
     // does not invoke the network handler and therefore cannot send a message
     // to the server. Calls are de-duplicated by the roster generation.
     void publishDebugChat(JNIEnv* env, bool enabled) noexcept;
+    // IPC/query threads may enqueue bounded diagnostics here. The Java chat
+    // call itself is always performed later by the attached render thread.
+    void enqueueDebugChatLine(std::string_view line) noexcept;
     void release(JNIEnv* env) noexcept;
     void abandon() noexcept;
 
@@ -240,11 +247,50 @@ private:
     std::uint64_t m_lastPlayerScan = 0U;
     std::uint64_t m_playerRosterGeneration = 0U;
     std::uint64_t m_debugRosterGeneration = 0U;
+    std::uint64_t m_bedOwnershipGeneration = 0U;
+    std::uint64_t m_debugBedOwnershipGeneration = 0U;
+    struct MatchProbeState final {
+        bool sidebarAvailable = false;
+        bool sidebarEvidence = false;
+        bool rosterEvidence = false;
+        bool armorEvidence = false;
+        std::uint8_t sidebarLines = 0U;
+        std::uint8_t sidebarTeams = 0U;
+        std::uint8_t sidebarYouRows = 0U;
+        std::uint8_t rosterTaggedPlayers = 0U;
+        std::uint8_t rosterTeams = 0U;
+        char rosterOwnTeam = 'u';
+        char localArmorTeam = 'u';
+        std::uint8_t armorTeams = 0U;
+        std::uint8_t stableCount = 0U;
+
+        [[nodiscard]] bool operator==(const MatchProbeState&) const noexcept = default;
+    };
+    MatchProbeState m_matchProbe{};
+    std::uint64_t m_matchProbeGeneration = 0U;
+    std::uint64_t m_debugMatchProbeGeneration = 0U;
     jweak m_lastWorld = nullptr;
     bedwars::Team m_sidebarCandidateTeam = bedwars::Team::Unknown;
     std::uint8_t m_sidebarStableCount = 0U;
     std::uint8_t m_sidebarMissingCount = 0U;
+    bool m_matchAnchorValid = false;
+    double m_matchAnchorX = 0.0;
+    double m_matchAnchorY = 0.0;
+    double m_matchAnchorZ = 0.0;
+    bool m_lockedOwnBedKnown = false;
+    int m_lockedOwnBedX = 0;
+    int m_lockedOwnBedY = 0;
+    int m_lockedOwnBedZ = 0;
+    GameSnapshot::OwnBedSource m_lockedOwnBedSource =
+        GameSnapshot::OwnBedSource::Unknown;
     GameSnapshot m_snapshot{};
+
+    static constexpr std::size_t DebugQueueCapacity = 32U;
+    static constexpr std::size_t DebugLineCapacity = 160U;
+    mutable SRWLOCK m_debugQueueLock = SRWLOCK_INIT;
+    std::array<std::array<char, DebugLineCapacity>, DebugQueueCapacity> m_debugQueue{};
+    std::uint32_t m_debugQueueHead = 0U;
+    std::uint32_t m_debugQueueCount = 0U;
 
     struct PublishedBedCache final {
         std::array<BedMarker, GameSnapshot::MaxBedMarkers> markers{};

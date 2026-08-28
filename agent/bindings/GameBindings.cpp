@@ -1222,31 +1222,64 @@ bool GameBindings::maintainInputReleased(JNIEnv* const env) noexcept
     return released;
 }
 
+void GameBindings::enqueueDebugChatLine(const std::string_view line) noexcept
+{
+    if (line.empty()) return;
+    std::array<char, DebugLineCapacity> copy{};
+    std::size_t length = 0U;
+    for (const char character : line) {
+        if (length + 1U >= copy.size()) break;
+        if (character == '\r' || character == '\n' || character == '\t') continue;
+        copy[length++] = character;
+    }
+    if (length == 0U) return;
+
+    ::AcquireSRWLockExclusive(&m_debugQueueLock);
+    std::uint32_t target = 0U;
+    if (m_debugQueueCount < DebugQueueCapacity) {
+        target = (m_debugQueueHead + m_debugQueueCount) % DebugQueueCapacity;
+        ++m_debugQueueCount;
+    } else {
+        target = m_debugQueueHead;
+        m_debugQueueHead = (m_debugQueueHead + 1U) % DebugQueueCapacity;
+    }
+    m_debugQueue[target] = copy;
+    ::ReleaseSRWLockExclusive(&m_debugQueueLock);
+}
+
 void GameBindings::publishDebugChat(JNIEnv* const env, const bool enabled) noexcept
 {
     if (!enabled) {
         // Re-enabling the option should print the current state even if the
         // roster itself did not change while the option was disabled.
         m_debugRosterGeneration = 0U;
+        m_debugBedOwnershipGeneration = 0U;
+        m_debugMatchProbeGeneration = 0U;
+        ::AcquireSRWLockExclusive(&m_debugQueueLock);
+        m_debugQueueHead = 0U;
+        m_debugQueueCount = 0U;
+        ::ReleaseSRWLockExclusive(&m_debugQueueLock);
         return;
     }
-    if (!m_snapshot.matchActive) {
-        // Lobby ranks, NPCs and coloured nameplates are intentionally never
-        // surfaced as team decisions. Remember the revision so an inactive
-        // roster cannot be printed later after an unrelated render frame.
-        m_debugRosterGeneration = m_snapshot.playerRosterGeneration;
-        return;
-    }
-    if (env == nullptr || m_snapshot.playerRosterGeneration == 0U ||
-        m_snapshot.playerRosterGeneration == m_debugRosterGeneration ||
+    std::uint32_t pendingCount = 0U;
+    ::AcquireSRWLockShared(&m_debugQueueLock);
+    pendingCount = m_debugQueueCount;
+    ::ReleaseSRWLockShared(&m_debugQueueLock);
+    const bool probeChanged = m_matchProbeGeneration !=
+        m_debugMatchProbeGeneration;
+    const bool rosterChanged = m_snapshot.matchActive &&
+        m_snapshot.playerRosterGeneration != 0U &&
+        m_snapshot.playerRosterGeneration != m_debugRosterGeneration;
+    const bool bedChanged = m_snapshot.matchActive &&
+        m_bedOwnershipGeneration !=
+        m_debugBedOwnershipGeneration;
+    if (env == nullptr ||
+        (!probeChanged && !rosterChanged && !bedChanged && pendingCount == 0U) ||
         m_resolutionPhase.load(std::memory_order_acquire) != ResolutionPhase::Resolved ||
         m_cache == nullptr) {
         return;
     }
 
-    // Mark first: a broken optional chat implementation must not retry every
-    // rendered frame and flood the JVM with exceptions.
-    m_debugRosterGeneration = m_snapshot.playerRosterGeneration;
     BindingCache* const cache = m_cache.get();
     if (cache->chatTextClass == nullptr || cache->chatTextConstructor == nullptr ||
         cache->addChatMessage == nullptr || env->PushLocalFrame(192) != JNI_OK) {
@@ -1265,6 +1298,24 @@ void GameBindings::publishDebugChat(JNIEnv* const env, const bool enabled) noexc
         return;
     }
 
+    // Consume generations only after a usable local chat endpoint and player
+    // object exist. This avoids silently discarding the exact diagnostics that
+    // are needed when a transformed client temporarily exposes an incomplete
+    // game state.
+    m_debugMatchProbeGeneration = m_matchProbeGeneration;
+    m_debugRosterGeneration = m_snapshot.playerRosterGeneration;
+    m_debugBedOwnershipGeneration = m_bedOwnershipGeneration;
+    std::array<std::array<char, DebugLineCapacity>, DebugQueueCapacity> queued{};
+    ::AcquireSRWLockExclusive(&m_debugQueueLock);
+    const std::uint32_t queuedCount = m_debugQueueCount;
+    for (std::uint32_t index = 0U; index < queuedCount; ++index) {
+        queued[index] = m_debugQueue[
+            (m_debugQueueHead + index) % DebugQueueCapacity];
+    }
+    m_debugQueueHead = 0U;
+    m_debugQueueCount = 0U;
+    ::ReleaseSRWLockExclusive(&m_debugQueueLock);
+
     // Each letter is deliberately assigned a different legacy chat color.
     // This component is added straight to EntityPlayerSP and never reaches a
     // network handler, so the message remains visible only to this client.
@@ -1281,41 +1332,84 @@ void GameBindings::publishDebugChat(JNIEnv* const env, const bool enabled) noexc
         clearException(env);
     };
 
-    std::string matchLine = std::string("game_started=") +
-        (m_snapshot.matchActive ? "true" : "false") + " own_team=";
-    if (m_snapshot.ownTeam == 'u') {
-        matchLine += "unknown";
-    } else {
-        matchLine += "\xC2\xA7";
-        matchLine.push_back(m_snapshot.ownTeam);
-        matchLine.push_back(m_snapshot.ownTeam);
-        matchLine += "\xC2\xA7r";
+    if (probeChanged) {
+        const auto teamText = [](const char team) noexcept {
+            return team == 'u' ? std::string("unknown") : std::string(1U, team);
+        };
+        std::string body = "match_probe active=";
+        body += m_snapshot.matchActive ? "true" : "false";
+        body += " sidebar=" + std::to_string(m_matchProbe.sidebarAvailable ? 1 : 0);
+        body += " lines=" + std::to_string(m_matchProbe.sidebarLines);
+        body += " teams=" + std::to_string(m_matchProbe.sidebarTeams);
+        body += " you=" + std::to_string(m_matchProbe.sidebarYouRows);
+        body += " roster_tags=" + std::to_string(m_matchProbe.rosterTaggedPlayers);
+        body += " roster_teams=" + std::to_string(m_matchProbe.rosterTeams);
+        body += " roster_own=" + teamText(m_matchProbe.rosterOwnTeam);
+        body += " armor_own=" + teamText(m_matchProbe.localArmorTeam);
+        body += " armor_teams=" + std::to_string(m_matchProbe.armorTeams);
+        body += " evidence=";
+        if (m_matchProbe.sidebarEvidence) body += 'S';
+        if (m_matchProbe.rosterEvidence) body += 'R';
+        if (m_matchProbe.armorEvidence) body += 'A';
+        if (!m_matchProbe.sidebarEvidence && !m_matchProbe.rosterEvidence &&
+            !m_matchProbe.armorEvidence) body += '-';
+        body += " stable=" + std::to_string(m_matchProbe.stableCount);
+        body += " beds=" + std::to_string(m_snapshot.bedMarkerCount);
+        addLine(body);
     }
-    addLine(matchLine);
 
-    for (std::uint32_t index = 0U; index < m_snapshot.playerCount; ++index) {
-        const PlayerIdentity& identity = m_snapshot.players[index];
-        if (identity.name[0U] == '\0') continue;
-        const bool teammate = m_snapshot.ownTeam != 'u' &&
-            identity.teamColor == m_snapshot.ownTeam;
-        std::string body = "player=";
-        if (identity.teamColor != 'u') {
-            body += "\xC2\xA7";
-            body.push_back(identity.teamColor);
+    if (rosterChanged) {
+        std::string matchLine = "game_started=true own_team=";
+        if (m_snapshot.ownTeam == 'u') {
+            matchLine += "unknown";
+        } else {
+            matchLine += "\xC2\xA7";
+            matchLine.push_back(m_snapshot.ownTeam);
+            matchLine.push_back(m_snapshot.ownTeam);
+            matchLine += "\xC2\xA7r";
         }
-        body += identity.name.data();
-        body += "\xC2\xA7r team=";
-        if (identity.teamColor == 'u') {
+        addLine(matchLine);
+
+        for (std::uint32_t index = 0U; index < m_snapshot.playerCount; ++index) {
+            const PlayerIdentity& identity = m_snapshot.players[index];
+            if (identity.name[0U] == '\0') continue;
+            const bool teammate = m_snapshot.ownTeam != 'u' &&
+                identity.teamColor == m_snapshot.ownTeam;
+            std::string body = "player=";
+            if (identity.teamColor != 'u') {
+                body += "\xC2\xA7";
+                body.push_back(identity.teamColor);
+            }
+            body += identity.name.data();
+            body += "\xC2\xA7r team=";
+            if (identity.teamColor == 'u') {
+                body += "unknown";
+            } else {
+                body += "\xC2\xA7";
+                body.push_back(identity.teamColor);
+                body.push_back(identity.teamColor);
+                body += "\xC2\xA7r";
+            }
+            body += " teammate=";
+            body += teammate ? "true" : "false";
+            addLine(body);
+        }
+    }
+    if (bedChanged) {
+        std::string body = "own_bed=";
+        if (!m_snapshot.ownBedKnown) {
             body += "unknown";
         } else {
-            body += "\xC2\xA7";
-            body.push_back(identity.teamColor);
-            body.push_back(identity.teamColor);
-            body += "\xC2\xA7r";
+            body += "true pos=" + std::to_string(m_snapshot.ownBedX) + "," +
+                std::to_string(m_snapshot.ownBedY) + "," +
+                std::to_string(m_snapshot.ownBedZ) + " source=";
+            body += m_snapshot.ownBedSource == GameSnapshot::OwnBedSource::TeamWool
+                ? "team_wool" : "match_spawn";
         }
-        body += " teammate=";
-        body += teammate ? "true" : "false";
         addLine(body);
+    }
+    for (std::uint32_t index = 0U; index < queuedCount; ++index) {
+        if (queued[index][0U] != '\0') addLine(queued[index].data());
     }
     env->PopLocalFrame(nullptr);
 }
@@ -1862,6 +1956,13 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
         m_sidebarCandidateTeam = bedwars::Team::Unknown;
         m_sidebarStableCount = 0U;
         m_sidebarMissingCount = 0U;
+        if (!(m_matchProbe == MatchProbeState{})) {
+            m_matchProbe = {};
+            ++m_matchProbeGeneration;
+        }
+        m_matchAnchorValid = false;
+        m_lockedOwnBedKnown = false;
+        m_lockedOwnBedSource = GameSnapshot::OwnBedSource::Unknown;
         if (m_snapshot.matchActive || m_snapshot.playerCount != 0U ||
             m_snapshot.ownTeam != 'u' ||
             m_snapshot.localPlayerName[0U] != '\0') {
@@ -1871,6 +1972,7 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
             m_snapshot.localPlayerName = {};
             m_snapshot.ownTeam = 'u';
             m_snapshot.ownBedKnown = false;
+            m_snapshot.ownBedSource = GameSnapshot::OwnBedSource::Unknown;
             m_snapshot.playerRosterGeneration = ++m_playerRosterGeneration;
         }
         env->PopLocalFrame(nullptr);
@@ -1887,9 +1989,15 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
         m_sidebarCandidateTeam = bedwars::Team::Unknown;
         m_sidebarStableCount = 0U;
         m_sidebarMissingCount = 0U;
+        m_matchProbe = {};
+        ++m_matchProbeGeneration;
+        m_matchAnchorValid = false;
+        m_lockedOwnBedKnown = false;
+        m_lockedOwnBedSource = GameSnapshot::OwnBedSource::Unknown;
         m_snapshot.matchActive = false;
         m_snapshot.ownTeam = 'u';
         m_snapshot.ownBedKnown = false;
+        m_snapshot.ownBedSource = GameSnapshot::OwnBedSource::Unknown;
         m_snapshot.players = {};
         m_snapshot.playerCount = 0U;
         m_debugRosterGeneration = 0U;
@@ -1982,6 +2090,58 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
                std::isfinite(marker.bounds.maxY) && std::isfinite(marker.bounds.maxZ);
     };
 
+    // Read the actual dyed leather chestplate data, never the rendered/glint
+    // colour. The same routine is used for the local player (match fallback)
+    // and remote players (teammate/threat classification), which prevents the
+    // two paths from drifting apart.
+    auto readPlayerArmorTeam = [&](jobject const playerObject,
+                                   bool& chestplatePresent) noexcept {
+        chestplatePresent = false;
+        if (playerObject == nullptr || cache->inventoryField == nullptr ||
+            cache->armorInventoryField == nullptr || cache->getItem == nullptr ||
+            cache->itemArmorClass == nullptr || cache->hasColor == nullptr ||
+            cache->getColor == nullptr) {
+            return bedwars::Team::Unknown;
+        }
+
+        bedwars::Team result = bedwars::Team::Unknown;
+        jobject inventory = env->GetObjectField(playerObject, cache->inventoryField);
+        if (env->ExceptionCheck() == JNI_TRUE || inventory == nullptr) {
+            clearException(env);
+            return result;
+        }
+        jobjectArray armor = static_cast<jobjectArray>(
+            env->GetObjectField(inventory, cache->armorInventoryField));
+        if (env->ExceptionCheck() != JNI_TRUE && armor != nullptr &&
+            env->GetArrayLength(armor) > 2) {
+            jobject chestplate = env->GetObjectArrayElement(armor, 2);
+            if (env->ExceptionCheck() != JNI_TRUE && chestplate != nullptr) {
+                chestplatePresent = true;
+                jobject item = env->CallObjectMethod(chestplate, cache->getItem);
+                if (env->ExceptionCheck() != JNI_TRUE && item != nullptr &&
+                    env->IsInstanceOf(item, cache->itemArmorClass) == JNI_TRUE) {
+                    const jboolean coloured = env->CallBooleanMethod(
+                        item, cache->hasColor, chestplate);
+                    if (env->ExceptionCheck() != JNI_TRUE && coloured == JNI_TRUE) {
+                        const jint rgb = env->CallIntMethod(item, cache->getColor, chestplate);
+                        if (env->ExceptionCheck() != JNI_TRUE) {
+                            result = bedwars::fromLeatherRgb(
+                                static_cast<std::uint32_t>(rgb));
+                        }
+                    }
+                }
+                clearException(env);
+                if (item != nullptr) env->DeleteLocalRef(item);
+                env->DeleteLocalRef(chestplate);
+            }
+            clearException(env);
+        }
+        if (armor != nullptr) env->DeleteLocalRef(armor);
+        env->DeleteLocalRef(inventory);
+        clearException(env);
+        return result;
+    };
+
     // ESP collection is deliberately unavailable on remote multiplayer worlds.
     // A single List.toArray() avoids one virtual JNI call per list index. The
     // fixed 128-marker cap and 20 Hz cadence are both deterministic; smooth
@@ -2052,47 +2212,10 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
                             if (markerName != nullptr) env->DeleteLocalRef(markerName);
                         }
                         
-                        if (marker.player && cache->inventoryField != nullptr &&
-                            cache->armorInventoryField != nullptr &&
-                            cache->getItem != nullptr && cache->itemArmorClass != nullptr &&
-                            cache->hasColor != nullptr && cache->getColor != nullptr) {
-                            jobject inv = env->GetObjectField(entity, cache->inventoryField);
-                            if (env->ExceptionCheck() != JNI_TRUE && inv != nullptr) {
-                                jobjectArray armor = static_cast<jobjectArray>(env->GetObjectField(inv, cache->armorInventoryField));
-                                if (env->ExceptionCheck() != JNI_TRUE && armor != nullptr && env->GetArrayLength(armor) > 2) {
-                                    jobject chestplate = env->GetObjectArrayElement(armor, 2);
-                                    if (env->ExceptionCheck() != JNI_TRUE && chestplate != nullptr) {
-                                        marker.hasArmor = true;
-                                        jobject item = env->CallObjectMethod(chestplate, cache->getItem);
-                                        if (env->ExceptionCheck() != JNI_TRUE && item != nullptr) {
-                                            if (env->IsInstanceOf(item, cache->itemArmorClass) == JNI_TRUE) {
-                                                jboolean hasCol = env->CallBooleanMethod(item, cache->hasColor, chestplate);
-                                                if (env->ExceptionCheck() != JNI_TRUE && hasCol == JNI_TRUE) {
-                                                    jint col = env->CallIntMethod(item, cache->getColor, chestplate);
-                                                    if (env->ExceptionCheck() != JNI_TRUE) {
-                                                        const int r = (col >> 16) & 0xFF;
-                                                        const int g = (col >> 8) & 0xFF;
-                                                        const int b = col & 0xFF;
-                                                        if (r > g * 2 && r > b * 2) marker.armorTeam = 'c'; // Red
-                                                        else if (b > r * 1.5 && b > g * 1.5) marker.armorTeam = '9'; // Blue
-                                                        else if (g > r * 1.5 && g > b * 1.5) marker.armorTeam = 'a'; // Green
-                                                        else if (r > b * 2 && g > b * 2 && r > 150 && g > 150) marker.armorTeam = 'e'; // Yellow
-                                                        else if (g > r * 1.5 && b > r * 1.5 && g > 100 && b > 100) marker.armorTeam = 'b'; // Aqua
-                                                        else if (r > 200 && g > 200 && b > 200) marker.armorTeam = 'f'; // White
-                                                        else if (r > 150 && b > 150 && g < 150) marker.armorTeam = 'd'; // Pink
-                                                        else if (r < 100 && g < 100 && b < 100) marker.armorTeam = '7'; // Gray
-                                                    }
-                                                }
-                                            }
-                                            env->DeleteLocalRef(item);
-                                        }
-                                        env->DeleteLocalRef(chestplate);
-                                    }
-                                    if (armor != nullptr) env->DeleteLocalRef(armor);
-                                }
-                                env->DeleteLocalRef(inv);
-                            }
-                            env->ExceptionClear();
+                        if (marker.player) {
+                            const bedwars::Team armorTeam =
+                                readPlayerArmorTeam(entity, marker.hasArmor);
+                            marker.armorTeam = bedwars::formatCode(armorTeam);
                         }
 
                         marker.teamColor = marker.armorTeam;
@@ -2122,10 +2245,10 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
     }
     m_snapshot.entitySampleGeneration = ++m_entitySampleGeneration;
 
-    // Multiplayer discovery is metadata-only and independent of ESP. Scan at
-    // 1 Hz, extract the stable username and the first scoreboard color code
-    // from the formatted display component, then publish only roster changes.
-    if (tickMilliseconds - m_lastPlayerScan >= 1000U || m_lastPlayerScan == 0U) {
+    // Multiplayer discovery is metadata-only and independent of ESP. At 2 Hz,
+    // two stable Sidebar snapshots activate a match in about one second while
+    // keeping all collection outside the per-frame renderer path.
+    if (tickMilliseconds - m_lastPlayerScan >= 500U || m_lastPlayerScan == 0U) {
         m_lastPlayerScan = tickMilliseconds;
         const bool previousMatchActive = m_snapshot.matchActive;
         const char previousOwnTeam = m_snapshot.ownTeam;
@@ -2270,19 +2393,88 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
         }
         env->ExceptionClear();
 
+        bool localChestplatePresent = false;
+        const bedwars::Team localArmorTeam =
+            readPlayerArmorTeam(player, localChestplatePresent);
+        (void)localChestplatePresent;
+
+        bedwars::Team rosterTaggedOwnTeam = bedwars::Team::Unknown;
+        bedwars::Team rosterColourOwnTeam = bedwars::Team::Unknown;
+        std::uint16_t rosterTeamMask = 0U;
+        std::uint32_t taggedPlayers = 0U;
+        for (std::uint32_t index = 0U; index < nextCount; ++index) {
+            const bedwars::Team tagged =
+                bedwars::parseRosterTeamTag(rosterFormatted[index]);
+            const std::uint8_t teamIndex = bedwars::teamIndex(tagged);
+            if (teamIndex >= 8U) continue;
+            ++taggedPlayers;
+            rosterTeamMask |= static_cast<std::uint16_t>(1U << teamIndex);
+            if (nextLocalName[0U] != '\0' &&
+                std::strcmp(nextPlayers[index].name.data(), nextLocalName.data()) == 0) {
+                rosterTaggedOwnTeam = tagged;
+                rosterColourOwnTeam =
+                    bedwars::parseRosterTeam(rosterFormatted[index]);
+            }
+        }
+        std::uint8_t rosterDistinctTeams = 0U;
+        for (std::uint16_t mask = rosterTeamMask; mask != 0U; mask >>= 1U)
+            rosterDistinctTeams += static_cast<std::uint8_t>(mask & 1U);
+        // Restore the former roster detector: explicit [R]/[B]/... tags are
+        // match evidence even when Lunar inserts an unrelated colour before
+        // the tag. Prefer an explicit local tag, then the actual dyed local
+        // chestplate, and only then the formatted-name colour.
+        const bedwars::Team rosterOwnTeam =
+            rosterTaggedOwnTeam != bedwars::Team::Unknown ? rosterTaggedOwnTeam :
+            localArmorTeam != bedwars::Team::Unknown ? localArmorTeam :
+            rosterColourOwnTeam;
+        const bool rosterValid = taggedPlayers >= 2U &&
+            rosterDistinctTeams >= 2U && rosterOwnTeam != bedwars::Team::Unknown;
+
         const bedwars::SidebarSnapshot sidebar = bedwars::parseSidebar(
             std::span<const std::string_view>(sidebarViews.data(), sidebarLineCount));
-        if (sidebar.valid) {
+
+        // Last-resort match evidence for transformed clients whose scoreboard
+        // wrappers remove both Sidebar suffixes and roster tags. It is accepted
+        // only when (a) the local leather colour is known, (b) at least two
+        // distinct live player armour teams are present, and (c) the world bed
+        // scanner has found a bed. This avoids treating lobby rank colours as a
+        // match while keeping team detection usable on Lunar.
+        std::uint16_t armorTeamMask = 0U;
+        const std::uint8_t localArmorIndex = bedwars::teamIndex(localArmorTeam);
+        if (localArmorIndex < 8U)
+            armorTeamMask |= static_cast<std::uint16_t>(1U << localArmorIndex);
+        for (std::uint32_t index = 0U; index < m_snapshot.entityMarkerCount; ++index) {
+            const EntityMarker& marker = m_snapshot.entityMarkers[index];
+            if (!marker.player) continue;
+            const std::uint8_t armorIndex = bedwars::teamIndex(
+                bedwars::fromFormatCode(marker.armorTeam));
+            if (armorIndex < 8U)
+                armorTeamMask |= static_cast<std::uint16_t>(1U << armorIndex);
+        }
+        std::uint8_t armorDistinctTeams = 0U;
+        for (std::uint16_t mask = armorTeamMask; mask != 0U; mask >>= 1U)
+            armorDistinctTeams += static_cast<std::uint8_t>(mask & 1U);
+        std::uint32_t publishedBedCount = 0U;
+        ::AcquireSRWLockShared(&m_bedCacheLock);
+        publishedBedCount = m_publishedBedCache.markerCount;
+        ::ReleaseSRWLockShared(&m_bedCacheLock);
+        const bool armorValid = localArmorTeam != bedwars::Team::Unknown &&
+            armorDistinctTeams >= 2U && publishedBedCount > 0U;
+
+        const bool matchEvidenceValid = sidebar.valid || rosterValid || armorValid;
+        const bedwars::Team candidateTeam = sidebar.valid ? sidebar.ownTeam :
+            rosterValid ? rosterOwnTeam : localArmorTeam;
+        if (matchEvidenceValid) {
             m_sidebarMissingCount = 0U;
-            if (sidebar.ownTeam == m_sidebarCandidateTeam) {
+            if (candidateTeam == m_sidebarCandidateTeam) {
                 if (m_sidebarStableCount < UINT8_MAX) ++m_sidebarStableCount;
             } else {
-                m_sidebarCandidateTeam = sidebar.ownTeam;
+                m_sidebarCandidateTeam = candidateTeam;
                 m_sidebarStableCount = 1U;
             }
             if (m_sidebarStableCount >= 2U) {
                 m_snapshot.matchActive = true;
-                m_snapshot.ownTeam = bedwars::formatCode(sidebar.ownTeam);
+                m_snapshot.ownTeam = bedwars::formatCode(candidateTeam);
             }
         } else {
             m_sidebarCandidateTeam = bedwars::Team::Unknown;
@@ -2295,11 +2487,46 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
                 m_snapshot.matchActive = false;
                 m_snapshot.ownTeam = 'u';
                 m_snapshot.ownBedKnown = false;
+                m_snapshot.ownBedSource = GameSnapshot::OwnBedSource::Unknown;
             }
+        }
+
+        MatchProbeState nextProbe{};
+        nextProbe.sidebarAvailable = sidebarAvailable;
+        nextProbe.sidebarEvidence = sidebar.valid;
+        nextProbe.rosterEvidence = rosterValid;
+        nextProbe.armorEvidence = armorValid;
+        nextProbe.sidebarLines = static_cast<std::uint8_t>(
+            std::min<std::size_t>(sidebarLineCount, UINT8_MAX));
+        nextProbe.sidebarTeams = sidebar.distinctTeams;
+        nextProbe.sidebarYouRows = sidebar.youRows;
+        nextProbe.rosterTaggedPlayers = static_cast<std::uint8_t>(
+            std::min<std::uint32_t>(taggedPlayers, UINT8_MAX));
+        nextProbe.rosterTeams = rosterDistinctTeams;
+        nextProbe.rosterOwnTeam = bedwars::formatCode(rosterOwnTeam);
+        nextProbe.localArmorTeam = bedwars::formatCode(localArmorTeam);
+        nextProbe.armorTeams = armorDistinctTeams;
+        nextProbe.stableCount = m_sidebarStableCount;
+        if (!(nextProbe == m_matchProbe)) {
+            m_matchProbe = nextProbe;
+            ++m_matchProbeGeneration;
         }
 
         const bool nextMatchActive = m_snapshot.matchActive;
         const char nextOwnTeam = nextMatchActive ? m_snapshot.ownTeam : 'u';
+        if (nextMatchActive && !previousMatchActive) {
+            m_matchAnchorValid = true;
+            m_matchAnchorX = positionX;
+            m_matchAnchorY = positionY;
+            m_matchAnchorZ = positionZ;
+            m_lockedOwnBedKnown = false;
+            m_lockedOwnBedSource = GameSnapshot::OwnBedSource::Unknown;
+            ++m_bedOwnershipGeneration;
+        } else if (!nextMatchActive && previousMatchActive) {
+            m_matchAnchorValid = false;
+            m_lockedOwnBedKnown = false;
+            m_lockedOwnBedSource = GameSnapshot::OwnBedSource::Unknown;
+        }
         if (nextMatchActive) {
             std::uint32_t compactCount = 0U;
             for (std::uint32_t index = 0U; index < nextCount; ++index) {
@@ -2345,6 +2572,12 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
     // The scanner thread publishes immutable fixed storage. SwapBuffers only
     // takes a short shared SRW lock and performs no block JNI calls.
     if (singlePlayer == JNI_TRUE) {
+        const bool previousOwnBedKnown = m_snapshot.ownBedKnown;
+        const int previousOwnBedX = m_snapshot.ownBedX;
+        const int previousOwnBedY = m_snapshot.ownBedY;
+        const int previousOwnBedZ = m_snapshot.ownBedZ;
+        const GameSnapshot::OwnBedSource previousOwnBedSource =
+            m_snapshot.ownBedSource;
         ::AcquireSRWLockShared(&m_bedCacheLock);
         m_snapshot.bedMarkerCount = m_publishedBedCache.markerCount;
         m_snapshot.bedCount = m_publishedBedCache.markerCount;
@@ -2354,27 +2587,88 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
         ::ReleaseSRWLockShared(&m_bedCacheLock);
 
         m_snapshot.ownBedKnown = false;
+        m_snapshot.ownBedSource = GameSnapshot::OwnBedSource::Unknown;
         if (m_snapshot.matchActive && m_snapshot.ownTeam != 'u') {
-            const BedMarker* candidate = nullptr;
+            const BedMarker* teamCandidate = nullptr;
             std::uint32_t matchingBeds = 0U;
             for (std::uint32_t index = 0U; index < m_snapshot.bedMarkerCount; ++index) {
                 const BedMarker& bed = m_snapshot.bedMarkers[index];
                 if (bed.teamColor != m_snapshot.ownTeam) continue;
-                candidate = &bed;
+                teamCandidate = &bed;
                 ++matchingBeds;
             }
-            if (matchingBeds == 1U && candidate != nullptr) {
-                m_snapshot.ownBedKnown = true;
-                m_snapshot.ownBedX = candidate->x;
-                m_snapshot.ownBedY = candidate->y;
-                m_snapshot.ownBedZ = candidate->z;
+
+            // Team-coloured wool is authoritative whenever exactly one bed
+            // matches. If a bed is initially unprotected, lock the nearest
+            // bed to the stable match-start position and upgrade that lock
+            // later when team-wool evidence arrives.
+            if (matchingBeds == 1U && teamCandidate != nullptr &&
+                (!m_lockedOwnBedKnown ||
+                 m_lockedOwnBedSource == GameSnapshot::OwnBedSource::MatchSpawn)) {
+                m_lockedOwnBedKnown = true;
+                m_lockedOwnBedX = teamCandidate->x;
+                m_lockedOwnBedY = teamCandidate->y;
+                m_lockedOwnBedZ = teamCandidate->z;
+                m_lockedOwnBedSource = GameSnapshot::OwnBedSource::TeamWool;
             }
+            if (!m_lockedOwnBedKnown && m_matchAnchorValid) {
+                const BedMarker* nearest = nullptr;
+                double nearestDistanceSq = 36.0 * 36.0;
+                for (std::uint32_t index = 0U; index < m_snapshot.bedMarkerCount; ++index) {
+                    const BedMarker& bed = m_snapshot.bedMarkers[index];
+                    const double centerX =
+                        (static_cast<double>(bed.x + bed.footX) + 1.0) * 0.5;
+                    const double centerZ =
+                        (static_cast<double>(bed.z + bed.footZ) + 1.0) * 0.5;
+                    const double dx = centerX - m_matchAnchorX;
+                    const double dy = static_cast<double>(bed.y) - m_matchAnchorY;
+                    const double dz = centerZ - m_matchAnchorZ;
+                    if (std::abs(dy) > 16.0) continue;
+                    const double distanceSq = dx * dx + dy * dy + dz * dz;
+                    if (distanceSq < nearestDistanceSq) {
+                        nearestDistanceSq = distanceSq;
+                        nearest = &bed;
+                    }
+                }
+                if (nearest != nullptr) {
+                    m_lockedOwnBedKnown = true;
+                    m_lockedOwnBedX = nearest->x;
+                    m_lockedOwnBedY = nearest->y;
+                    m_lockedOwnBedZ = nearest->z;
+                    m_lockedOwnBedSource = GameSnapshot::OwnBedSource::MatchSpawn;
+                }
+            }
+
+            if (m_lockedOwnBedKnown) {
+                for (std::uint32_t index = 0U; index < m_snapshot.bedMarkerCount; ++index) {
+                    const BedMarker& bed = m_snapshot.bedMarkers[index];
+                    if (bed.x != m_lockedOwnBedX || bed.y != m_lockedOwnBedY ||
+                        bed.z != m_lockedOwnBedZ) continue;
+                    m_snapshot.ownBedKnown = true;
+                    m_snapshot.ownBedX = bed.x;
+                    m_snapshot.ownBedY = bed.y;
+                    m_snapshot.ownBedZ = bed.z;
+                    m_snapshot.ownBedSource = m_lockedOwnBedSource;
+                    break;
+                }
+            }
+        } else {
+            m_lockedOwnBedKnown = false;
+            m_lockedOwnBedSource = GameSnapshot::OwnBedSource::Unknown;
+        }
+        if (previousOwnBedKnown != m_snapshot.ownBedKnown ||
+            previousOwnBedX != m_snapshot.ownBedX ||
+            previousOwnBedY != m_snapshot.ownBedY ||
+            previousOwnBedZ != m_snapshot.ownBedZ ||
+            previousOwnBedSource != m_snapshot.ownBedSource) {
+            ++m_bedOwnershipGeneration;
         }
     } else {
         m_snapshot.bedCount = 0U;
         m_snapshot.bedMarkerCount = 0U;
         m_snapshot.bedScanProgress = 0.0F;
         m_snapshot.ownBedKnown = false;
+        m_snapshot.ownBedSource = GameSnapshot::OwnBedSource::Unknown;
     }
 
     env->PopLocalFrame(nullptr);
@@ -2486,9 +2780,22 @@ void GameBindings::release(JNIEnv* const env) noexcept
     m_lastPlayerScan = 0U;
     m_playerRosterGeneration = 0U;
     m_debugRosterGeneration = 0U;
+    m_bedOwnershipGeneration = 0U;
+    m_debugBedOwnershipGeneration = 0U;
+    m_matchProbe = {};
+    m_matchProbeGeneration = 0U;
+    m_debugMatchProbeGeneration = 0U;
     m_sidebarCandidateTeam = bedwars::Team::Unknown;
     m_sidebarStableCount = 0U;
     m_sidebarMissingCount = 0U;
+    m_matchAnchorValid = false;
+    m_lockedOwnBedKnown = false;
+    m_lockedOwnBedSource = GameSnapshot::OwnBedSource::Unknown;
+    ::AcquireSRWLockExclusive(&m_debugQueueLock);
+    m_debugQueue = {};
+    m_debugQueueHead = 0U;
+    m_debugQueueCount = 0U;
+    ::ReleaseSRWLockExclusive(&m_debugQueueLock);
     m_bedRescanRequested.store(false, std::memory_order_relaxed);
     ::AcquireSRWLockExclusive(&m_bedCacheLock);
     m_publishedBedCache = {};
@@ -2507,6 +2814,9 @@ void GameBindings::abandon() noexcept
     m_resolutionPhase.store(ResolutionPhase::Stopped, std::memory_order_release);
     m_cache.reset();
     m_lastWorld = nullptr;
+    m_matchAnchorValid = false;
+    m_lockedOwnBedKnown = false;
+    m_lockedOwnBedSource = GameSnapshot::OwnBedSource::Unknown;
     m_lwjglMouseClass = nullptr;
     m_lwjglSetGrabbed = nullptr;
 }

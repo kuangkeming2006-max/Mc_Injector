@@ -697,6 +697,10 @@ void AgentRuntime::telemetryMain() noexcept
                     break;
                 }
             }
+            if (allSent && matchActive && playerCount > 0U) {
+                m_bindings->enqueueDebugChatLine(
+                    "stats_query=dispatched players=" + std::to_string(playerCount));
+            }
             if (!matchActive) {
                 ::AcquireSRWLockExclusive(&m_playerStatsLock);
                 m_playerStats.clear();
@@ -1038,6 +1042,46 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
         }
         m_playerStats[std::string(playerName)] = entry;
         ::ReleaseSRWLockExclusive(&m_playerStatsLock);
+        m_bindings->enqueueDebugChatLine(
+            "stats_ready player=" + std::string(playerName) +
+            " stars=" + std::to_string(entry.stars) +
+            " fkdr=" + std::to_string(entry.fkdr) +
+            " level=" + std::to_string(entry.level));
+        return true;
+    }
+    if (command == "STATS_ERROR") {
+        std::string playerToken;
+        std::string reasonToken;
+        std::string trailing;
+        PlayerStatsEntry entry{};
+        if (!(stream >> playerToken >> reasonToken) || (stream >> trailing) ||
+            !percentDecode(playerToken, entry.name) ||
+            !percentDecode(reasonToken, entry.status)) {
+            (void)m_ipc->sendLine("ERROR BAD_STATS_ERROR invalid-payload");
+            return true;
+        }
+        const std::string_view playerName(entry.name.data());
+        const bool validName = !playerName.empty() && playerName.size() <= 16U &&
+            std::all_of(playerName.begin(), playerName.end(), [](const char character) noexcept {
+                return (character >= 'A' && character <= 'Z') ||
+                       (character >= 'a' && character <= 'z') ||
+                       (character >= '0' && character <= '9') || character == '_';
+            });
+        if (!validName || entry.status[0U] == '\0') {
+            (void)m_ipc->sendLine("ERROR BAD_STATS_ERROR invalid-player-or-reason");
+            return true;
+        }
+        entry.failed = true;
+        ::AcquireSRWLockExclusive(&m_playerStatsLock);
+        if (!m_playerStats.contains(std::string(playerName)) &&
+            m_playerStats.size() >= 256U) {
+            m_playerStats.erase(m_playerStats.begin());
+        }
+        m_playerStats[std::string(playerName)] = entry;
+        ::ReleaseSRWLockExclusive(&m_playerStatsLock);
+        m_bindings->enqueueDebugChatLine(
+            "stats_error player=" + std::string(playerName) +
+            " reason=" + std::string(entry.status.data()));
         return true;
     }
     if (command == "HYPIXEL_RESULT") {
@@ -1229,8 +1273,11 @@ void AgentRuntime::beforeSwapBuffers(HDC const deviceContext)
         m_featureBits.load(std::memory_order_acquire),
         m_bedDefenseRadius.load(std::memory_order_acquire),
         m_bedThreatRadius.load(std::memory_order_acquire),
+        m_bedDefenseHotkey.load(std::memory_order_acquire),
+        m_bedDefensePanelOpacity.load(std::memory_order_acquire),
         m_playerEspColor.load(std::memory_order_acquire),
-        m_bedEspColor.load(std::memory_order_acquire));
+        m_bedEspColor.load(std::memory_order_acquire),
+        m_bedDefensePanelColor.load(std::memory_order_acquire));
     const bool interactiveNow = m_interactive.load(std::memory_order_acquire);
     if (env != nullptr) {
         if (interactiveNow && !m_gameInputReleased) {

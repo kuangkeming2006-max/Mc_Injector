@@ -40,8 +40,39 @@ int main()
 
     assert(mcoverlay::bedwars::parseRosterTeam("\xC2\xA7" "c[R] Alice") == Team::Red);
     assert(mcoverlay::bedwars::parseRosterTeam("\xC2\xA7" "9[B] Bob") == Team::Blue);
+    assert(mcoverlay::bedwars::parseRosterTeam("\xC2\xA7" "aAlice") == Team::Green);
+    assert(mcoverlay::bedwars::parseRosterTeamTag("\xC2\xA7" "c[R] Alice") == Team::Red);
+    assert(mcoverlay::bedwars::parseRosterTeamTag("\xC2\xA7" "9[B] Bob") == Team::Blue);
+    assert(mcoverlay::bedwars::parseRosterTeamTag("\xC2\xA7" "a[GREEN] Alice") == Team::Green);
+    // Lunar/rank formatting can reset the colour immediately before a valid
+    // Bed Wars tag. This is the compatibility behaviour used by the previous
+    // working teammate detector.
+    assert(mcoverlay::bedwars::parseRosterTeamTag("\xC2\xA7" "f[R] Alice") == Team::Red);
+    assert(mcoverlay::bedwars::parseRosterTeamTag("\xC2\xA7" "6[BLUE] Bob") == Team::Blue);
+    assert(mcoverlay::bedwars::parseRosterTeamTag("\xC2\xA7" "7[G] Gray") == Team::Gray);
+    assert(mcoverlay::bedwars::parseRosterTeamTag("\xC2\xA7" "aAlice") == Team::Unknown);
+    assert(mcoverlay::bedwars::parseRosterTeamTag("\xC2\xA7" "b[MVP+] Lobby") == Team::Unknown);
     assert(mcoverlay::bedwars::fromWoolMetadata(14U) == Team::Red);
     assert(mcoverlay::bedwars::fromWoolMetadata(11U) == Team::Blue);
     assert(mcoverlay::bedwars::fromWoolMetadata(2U) == Team::Unknown);
+    assert(mcoverlay::bedwars::fromLeatherRgb(0xE02020U) == Team::Red);
+    assert(mcoverlay::bedwars::fromLeatherRgb(0x2020E0U) == Team::Blue);
+    assert(mcoverlay::bedwars::fromLeatherRgb(0x20E020U) == Team::Green);
+    assert(mcoverlay::bedwars::fromLeatherRgb(0xE0E020U) == Team::Yellow);
+    assert(mcoverlay::bedwars::fromLeatherRgb(0x20E0E0U) == Team::Aqua);
+    assert(mcoverlay::bedwars::fromLeatherRgb(0xF0F0F0U) == Team::White);
+    assert(mcoverlay::bedwars::fromLeatherRgb(0xE020E0U) == Team::Pink);
+    assert(mcoverlay::bedwars::fromLeatherRgb(0x303030U) == Team::Gray);
+    using mcoverlay::bedwars::ThreatClassification;
+    assert(mcoverlay::bedwars::classifyArmorThreat(
+        Team::Blue, true, Team::Blue) == ThreatClassification::Teammate);
+    assert(mcoverlay::bedwars::classifyArmorThreat(
+        Team::Blue, true, Team::Red) == ThreatClassification::Enemy);
+    assert(mcoverlay::bedwars::classifyArmorThreat(
+        Team::Blue, true, Team::Green) == ThreatClassification::Enemy);
+    assert(mcoverlay::bedwars::classifyArmorThreat(
+        Team::Blue, false, Team::Unknown) == ThreatClassification::UnknownThreat);
+    assert(mcoverlay::bedwars::classifyArmorThreat(
+        Team::Blue, true, Team::Unknown) == ThreatClassification::UnknownThreat);
     return 0;
 }

@@ -2,88 +2,100 @@ cmake_minimum_required(VERSION 3.24)
 
 project(MinecraftOverlayManager VERSION 1.0.0 LANGUAGES C CXX)
 
-find_package(Qt6 6.5 REQUIRED COMPONENTS
-    Core
-    Gui
-    Qml
-    Quick
-    QuickControls2
-    Quick3D
-    Network
-)
-
-qt_standard_project_setup()
-
 option(MC_OVERLAY_CONSOLE "Keep a console for diagnostics and CI smoke tests" OFF)
+option(MC_OVERLAY_BUILD_GUI
+    "Build the Qt Quick dashboard (MinecraftOverlayManager)" ON)
+option(MC_OVERLAY_BUILD_CLI
+    "Build the lightweight pure-Win32 terminal injector (McInjectorLite)" ON)
 
-qt_add_executable(MinecraftOverlayManager
-    src/main.cpp
-    src/ProcessScanner.h
-    src/ProcessScanner.cpp
-    src/OverlayManager.h
-    src/OverlayManager.cpp
-    src/HypixelApiClient.h
-    src/HypixelApiClient.cpp
-    src/PlayerStatsService.h
-    src/PlayerStatsService.cpp
-    src/ApiKeyStore.h
-    src/ApiKeyStore.cpp
-    src/AppSettings.h
-    src/AppSettings.cpp
-    src/SkinProfileService.h
-    src/SkinProfileService.cpp
-    src/SkinCuboidGeometry.h
-    src/SkinCuboidGeometry.cpp
-)
-
-if(WIN32 AND NOT MC_OVERLAY_CONSOLE)
-    set_target_properties(MinecraftOverlayManager PROPERTIES WIN32_EXECUTABLE TRUE)
-endif()
-
-# Keep the user-facing entry point named main.qml while embedding the whole UI
-# in the executable. Relative component lookup continues to work from /qml.
-qt_add_resources(MinecraftOverlayManager "qml_resources"
-    PREFIX "/"
-    FILES
-        qml/main.qml
-        qml/ProcessCard.qml
-        qml/MaterialButton.qml
-        qml/RippleEffect.qml
-        qml/HypixelStatsCard.qml
-        qml/PlayerStatusPage.qml
-        qml/MaterialTextField.qml
-        qml/KeyCaptureButton.qml
-)
-
-target_compile_features(MinecraftOverlayManager PRIVATE cxx_std_20)
-target_compile_definitions(MinecraftOverlayManager PRIVATE
-    UNICODE
-    _UNICODE
-    WIN32_LEAN_AND_MEAN
-    NOMINMAX
-)
-
-target_include_directories(MinecraftOverlayManager PRIVATE src)
-
-target_link_libraries(MinecraftOverlayManager PRIVATE
-    Qt6::Core
-    Qt6::Gui
-    Qt6::Qml
-    Qt6::Quick
-    Qt6::QuickControls2
-    Qt6::Quick3D
-    Qt6::Network
-)
-
-if(WIN32)
-    # psapi supplies GetProcessMemoryInfo. user32 and dwmapi are used for
-    # process-window association, WinEvent hooks, and transparent composition.
-    target_link_libraries(MinecraftOverlayManager PRIVATE
-        user32
-        dwmapi
-        psapi
-        crypt32
+# Qt is only required by the Qt Quick dashboard. The native agent, the
+# Attach helper, the native loader, and McInjectorLite build without any Qt
+# module, so a CLI-only configure (`-DMC_OVERLAY_BUILD_GUI=OFF`) needs just
+# CMake, a compiler, and a JDK.
+if(MC_OVERLAY_BUILD_GUI)
+    find_package(Qt6 6.5 REQUIRED COMPONENTS
+        Core
+        Gui
+        Qml
+        Quick
+        QuickControls2
+        Quick3D
+        Network
     )
+
+    qt_standard_project_setup()
+
+    qt_add_executable(MinecraftOverlayManager
+        src/main.cpp
+        src/ProcessScanner.h
+        src/ProcessScanner.cpp
+        src/OverlayManager.h
+        src/OverlayManager.cpp
+        src/HypixelApiClient.h
+        src/HypixelApiClient.cpp
+        src/PlayerStatsService.h
+        src/PlayerStatsService.cpp
+        src/ApiKeyStore.h
+        src/ApiKeyStore.cpp
+        src/AppSettings.h
+        src/AppSettings.cpp
+        src/HotkeyCaptureService.h
+        src/HotkeyCaptureService.cpp
+        src/SkinProfileService.h
+        src/SkinProfileService.cpp
+        src/SkinCuboidGeometry.h
+        src/SkinCuboidGeometry.cpp
+    )
+
+    if(WIN32 AND NOT MC_OVERLAY_CONSOLE)
+        set_target_properties(MinecraftOverlayManager PROPERTIES WIN32_EXECUTABLE TRUE)
+    endif()
+
+    # Keep the user-facing entry point named main.qml while embedding the whole UI
+    # in the executable. Relative component lookup continues to work from /qml.
+    qt_add_resources(MinecraftOverlayManager "qml_resources"
+        PREFIX "/"
+        FILES
+            qml/main.qml
+            qml/ProcessCard.qml
+            qml/MaterialButton.qml
+            qml/RippleEffect.qml
+            qml/HypixelStatsCard.qml
+            qml/PlayerStatusPage.qml
+            qml/MaterialTextField.qml
+            qml/KeyCaptureButton.qml
+    )
+
+    target_compile_features(MinecraftOverlayManager PRIVATE cxx_std_20)
+    target_compile_definitions(MinecraftOverlayManager PRIVATE
+        UNICODE
+        _UNICODE
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+    )
+
+    target_include_directories(MinecraftOverlayManager PRIVATE src)
+
+    target_link_libraries(MinecraftOverlayManager PRIVATE
+        Qt6::Core
+        Qt6::Gui
+        Qt6::Qml
+        Qt6::Quick
+        Qt6::QuickControls2
+        Qt6::Quick3D
+        Qt6::Network
+    )
+
+    if(WIN32)
+        # psapi supplies GetProcessMemoryInfo. user32 and dwmapi are used for
+        # process-window association, WinEvent hooks, and transparent composition.
+        target_link_libraries(MinecraftOverlayManager PRIVATE
+            user32
+            dwmapi
+            psapi
+            crypt32
+        )
+    endif()
 endif()
 
 option(MC_OVERLAY_FETCH_AGENT_DEPENDENCIES
@@ -97,35 +109,52 @@ endif()
 add_subdirectory(agent)
 add_subdirectory(attach-helper)
 add_subdirectory(native-loader)
-add_subdirectory(tests EXCLUDE_FROM_ALL)
+# The opt-in GUI-only tests reference HotkeyCaptureService, which needs QtGui.
+if(MC_OVERLAY_BUILD_GUI)
+    add_subdirectory(tests EXCLUDE_FROM_ALL)
+endif()
+if(MC_OVERLAY_BUILD_CLI)
+    add_subdirectory(cli)
+endif()
 
 # Keep the deployment layout deterministic. OverlayManager locates these files
 # relative to the controller executable, so running directly from the build
-# tree exercises the same paths as a packaged installation.
-add_custom_target(mc_overlay_runtime_files ALL
-    COMMAND "${CMAKE_COMMAND}" -E make_directory
-            "$<TARGET_FILE_DIR:MinecraftOverlayManager>/agent"
-    COMMAND "${CMAKE_COMMAND}" -E make_directory
-            "$<TARGET_FILE_DIR:MinecraftOverlayManager>/tools"
-    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "$<TARGET_FILE:McOverlayAgent>"
-            "$<TARGET_FILE_DIR:MinecraftOverlayManager>/agent/McOverlayAgent.dll"
-    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "${MC_OVERLAY_ATTACH_HELPER_JAR}"
-            "$<TARGET_FILE_DIR:MinecraftOverlayManager>/tools/McOverlayAttachHelper.jar"
-    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-            "$<TARGET_FILE:McOverlayNativeLoader>"
-            "$<TARGET_FILE_DIR:MinecraftOverlayManager>/tools/McOverlayNativeLoader.exe"
-    DEPENDS
-        McOverlayAgent
-        McOverlayNativeLoader
-        mc_overlay_attach_helper
-    VERBATIM)
-add_dependencies(MinecraftOverlayManager mc_overlay_runtime_files)
+# tree exercises the same paths as a packaged installation. The console build
+# deploys the same runtime next to McInjectorLite.exe through its own
+# post-build rule in cli/CMakeLists.txt.
+if(MC_OVERLAY_BUILD_GUI)
+    add_custom_target(mc_overlay_runtime_files ALL
+        COMMAND "${CMAKE_COMMAND}" -E make_directory
+                "$<TARGET_FILE_DIR:MinecraftOverlayManager>/agent"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory
+                "$<TARGET_FILE_DIR:MinecraftOverlayManager>/tools"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "$<TARGET_FILE:McOverlayAgent>"
+                "$<TARGET_FILE_DIR:MinecraftOverlayManager>/agent/McOverlayAgent.dll"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${MC_OVERLAY_ATTACH_HELPER_JAR}"
+                "$<TARGET_FILE_DIR:MinecraftOverlayManager>/tools/McOverlayAttachHelper.jar"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "$<TARGET_FILE:McOverlayNativeLoader>"
+                "$<TARGET_FILE_DIR:MinecraftOverlayManager>/tools/McOverlayNativeLoader.exe"
+        DEPENDS
+            McOverlayAgent
+            McOverlayNativeLoader
+            mc_overlay_attach_helper
+        VERBATIM)
+    add_dependencies(MinecraftOverlayManager mc_overlay_runtime_files)
+endif()
 
-install(TARGETS MinecraftOverlayManager
-    RUNTIME DESTINATION .
-)
+if(MC_OVERLAY_BUILD_GUI)
+    install(TARGETS MinecraftOverlayManager
+        RUNTIME DESTINATION .
+    )
+endif()
+if(MC_OVERLAY_BUILD_CLI)
+    install(TARGETS McInjectorLite
+        RUNTIME DESTINATION .
+    )
+endif()
 install(TARGETS McOverlayAgent RUNTIME DESTINATION agent)
 install(TARGETS McOverlayNativeLoader RUNTIME DESTINATION tools)
 install(FILES "${MC_OVERLAY_ATTACH_HELPER_JAR}" DESTINATION tools)

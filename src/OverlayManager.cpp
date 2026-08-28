@@ -1,7 +1,6 @@
 #include "OverlayManager.h"
 
 #include <QCoreApplication>
-#include <QColor>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -32,10 +31,39 @@ constexpr qsizetype kMaximumAgentMessageBytes = 64 * 1024;
 constexpr qint64 kAgentReadChunkBytes = 4096;
 constexpr qint64 kGameStateStaleAfterMilliseconds = 3500;
 
+// QML color pickers and QSettings store feature colours exclusively as
+// six-digit "#RRGGBB" strings. Parsing them directly keeps this shared
+// controller backend free of QtGui so the lightweight console injector can
+// link QtCore/QtNetwork only.
 QString normalizedRgbColor(const QString &value)
 {
-    const QColor color(value.trimmed());
-    return color.isValid() ? color.name(QColor::HexRgb).toUpper() : QString{};
+    const QString trimmed = value.trimmed();
+    if (trimmed.size() != 7 || trimmed.at(0) != QLatin1Char('#'))
+        return {};
+
+    bool hexadecimal = true;
+    for (qsizetype index = 1; index < trimmed.size(); ++index) {
+        const QChar character = trimmed.at(index);
+        const bool digit = character >= QLatin1Char('0') && character <= QLatin1Char('9');
+        const bool upper = character >= QLatin1Char('A') && character <= QLatin1Char('F');
+        const bool lower = character >= QLatin1Char('a') && character <= QLatin1Char('f');
+        if (!digit && !upper && !lower) {
+            hexadecimal = false;
+            break;
+        }
+    }
+    return hexadecimal ? trimmed.toUpper() : QString{};
+}
+
+quint32 rgbFromHexColor(const QString &value)
+{
+    const QString normalized = normalizedRgbColor(value);
+    if (normalized.isEmpty())
+        return 0U;
+
+    bool valid = false;
+    const quint32 rgb = normalized.mid(1).toUInt(&valid, 16);
+    return valid ? rgb & 0xFFFFFFU : 0U;
 }
 
 QString decodeProtocolToken(const QByteArray &token)
@@ -606,6 +634,33 @@ void OverlayManager::setShowOwnBedDefenseInfo(const bool enabled)
     sendFeatureSnapshot();
 }
 
+void OverlayManager::setShowTeammateBoxes(const bool enabled)
+{
+    if (m_showTeammateBoxes == enabled) return;
+    m_showTeammateBoxes = enabled;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setBedDefenseHoldToShow(const bool enabled)
+{
+    if (m_bedDefenseHoldToShow == enabled) return;
+    m_bedDefenseHoldToShow = enabled;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setBedDefensePerspectiveScale(const bool enabled)
+{
+    if (m_bedDefensePerspectiveScale == enabled) return;
+    m_bedDefensePerspectiveScale = enabled;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
 void OverlayManager::setBedDefenseRadius(const int radius)
 {
     const int bounded = std::clamp(radius, 3, 10);
@@ -626,6 +681,25 @@ void OverlayManager::setBedThreatRadius(const int radius)
     sendFeatureSnapshot();
 }
 
+void OverlayManager::setBedDefenseHotkey(const int virtualKey)
+{
+    if (virtualKey < 8 || virtualKey > 254 || m_bedDefenseHotkey == virtualKey) return;
+    m_bedDefenseHotkey = virtualKey;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setBedDefensePanelOpacity(const int opacity)
+{
+    const int bounded = std::clamp(opacity, 0, 100);
+    if (m_bedDefensePanelOpacity == bounded) return;
+    m_bedDefensePanelOpacity = bounded;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
 void OverlayManager::setPlayerEspColor(const QString &color)
 {
     const QString normalized = normalizedRgbColor(color);
@@ -641,6 +715,16 @@ void OverlayManager::setBedEspColor(const QString &color)
     const QString normalized = normalizedRgbColor(color);
     if (normalized.isEmpty() || normalized == m_bedEspColor) return;
     m_bedEspColor = normalized;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setBedDefensePanelColor(const QString &color)
+{
+    const QString normalized = normalizedRgbColor(color);
+    if (normalized.isEmpty() || normalized == m_bedDefensePanelColor) return;
+    m_bedDefensePanelColor = normalized;
     storeFeatureSettings();
     emit featureSettingsChanged();
     sendFeatureSnapshot();
@@ -710,6 +794,19 @@ void OverlayManager::publishPlayerStats(const QString &playerName,
                       encodeProtocolToken(team) + ' ' + QByteArray::number(stars) + ' ' +
                       QByteArray::number(fkdr, 'g', 9) + ' ' +
                       QByteArray::number(level) + '\n');
+}
+
+void OverlayManager::publishPlayerStatsError(const QString &playerName,
+                                             const QString &reason)
+{
+    if (!m_authenticated) return;
+    static const QRegularExpression nameExpression(
+        QStringLiteral("^[A-Za-z0-9_]{1,16}$"));
+    const QString safeReason = reason.simplified().left(96);
+    if (!nameExpression.match(playerName).hasMatch() || safeReason.isEmpty()) return;
+    writeAgentCommand(QByteArrayLiteral("STATS_ERROR ") +
+                      encodeProtocolToken(playerName) + ' ' +
+                      encodeProtocolToken(safeReason) + '\n');
 }
 
 void OverlayManager::acceptAgentConnection()
@@ -1233,29 +1330,40 @@ void OverlayManager::processAgentLine(const QByteArray &line)
             emit interactiveChanged();
         }
     } else if (type == QByteArrayLiteral("FEATURE_STATE_CHANGED")) {
-        if (fields.size() != 17) return;
-        std::array<bool, 12U> values{};
-        for (int index = 0; index < 12; ++index) {
+        if (fields.size() != 23) return;
+        std::array<bool, 15U> values{};
+        for (int index = 0; index < 15; ++index) {
             const QByteArray token = fields.at(index + 1);
             if (token != QByteArrayLiteral("0") && token != QByteArrayLiteral("1")) return;
             values[static_cast<std::size_t>(index)] = token == QByteArrayLiteral("1");
         }
         bool defenseRadiusOk = false;
         bool threatRadiusOk = false;
+        bool bedHotkeyOk = false;
+        bool panelOpacityOk = false;
         bool playerColorOk = false;
         bool bedColorOk = false;
-        const int defenseRadius = fields.at(13).toInt(&defenseRadiusOk);
-        const int threatRadius = fields.at(14).toInt(&threatRadiusOk);
-        const quint32 playerColor = fields.at(15).toUInt(&playerColorOk);
-        const quint32 bedColor = fields.at(16).toUInt(&bedColorOk);
+        bool panelColorOk = false;
+        const int defenseRadius = fields.at(16).toInt(&defenseRadiusOk);
+        const int threatRadius = fields.at(17).toInt(&threatRadiusOk);
+        const int bedHotkey = fields.at(18).toInt(&bedHotkeyOk);
+        const int panelOpacity = fields.at(19).toInt(&panelOpacityOk);
+        const quint32 playerColor = fields.at(20).toUInt(&playerColorOk);
+        const quint32 bedColor = fields.at(21).toUInt(&bedColorOk);
+        const quint32 panelColor = fields.at(22).toUInt(&panelColorOk);
         if (!defenseRadiusOk || defenseRadius < 3 || defenseRadius > 10 ||
             !threatRadiusOk || threatRadius < 3 || threatRadius > 32 ||
+            !bedHotkeyOk || bedHotkey < 8 || bedHotkey > 254 ||
+            !panelOpacityOk || panelOpacity < 0 || panelOpacity > 100 ||
             !playerColorOk || playerColor > 0xFFFFFFU ||
-            !bedColorOk || bedColor > 0xFFFFFFU) return;
+            !bedColorOk || bedColor > 0xFFFFFFU ||
+            !panelColorOk || panelColor > 0xFFFFFFU) return;
         const QString playerColorName = QStringLiteral("#%1")
             .arg(playerColor, 6, 16, QLatin1Char('0')).toUpper();
         const QString bedColorName = QStringLiteral("#%1")
             .arg(bedColor, 6, 16, QLatin1Char('0')).toUpper();
+        const QString panelColorName = QStringLiteral("#%1")
+            .arg(panelColor, 6, 16, QLatin1Char('0')).toUpper();
         const bool changed = m_espEnabled != values[0] ||
             m_entityEspEnabled != values[1] || m_bedEspEnabled != values[2] ||
             m_espLabelsEnabled != values[3] || m_hypixelPanelEnabled != values[4] ||
@@ -1264,8 +1372,14 @@ void OverlayManager::processAgentLine(const QByteArray &line)
             m_entityEspPlayersOnly != values[7] ||
             m_bedAutoRefreshEnabled != values[8] || m_bedEspFilled != values[9] ||
             m_debugChatEnabled != values[10] || m_showOwnBedDefenseInfo != values[11] ||
+            m_showTeammateBoxes != values[12] ||
+            m_bedDefenseHoldToShow != values[13] ||
+            m_bedDefensePerspectiveScale != values[14] ||
             m_bedDefenseRadius != defenseRadius || m_bedThreatRadius != threatRadius ||
-            m_playerEspColor != playerColorName || m_bedEspColor != bedColorName;
+            m_bedDefenseHotkey != bedHotkey ||
+            m_bedDefensePanelOpacity != panelOpacity ||
+            m_playerEspColor != playerColorName || m_bedEspColor != bedColorName ||
+            m_bedDefensePanelColor != panelColorName;
         m_espEnabled = values[0];
         m_entityEspEnabled = values[1];
         m_bedEspEnabled = values[2];
@@ -1278,10 +1392,16 @@ void OverlayManager::processAgentLine(const QByteArray &line)
         m_bedEspFilled = values[9];
         m_debugChatEnabled = values[10];
         m_showOwnBedDefenseInfo = values[11];
+        m_showTeammateBoxes = values[12];
+        m_bedDefenseHoldToShow = values[13];
+        m_bedDefensePerspectiveScale = values[14];
         m_bedDefenseRadius = defenseRadius;
         m_bedThreatRadius = threatRadius;
+        m_bedDefenseHotkey = bedHotkey;
+        m_bedDefensePanelOpacity = panelOpacity;
         m_playerEspColor = playerColorName;
         m_bedEspColor = bedColorName;
+        m_bedDefensePanelColor = panelColorName;
         if (changed) {
             storeFeatureSettings();
             emit featureSettingsChanged();
@@ -1471,16 +1591,27 @@ void OverlayManager::loadFeatureSettings()
     m_bedEspFilled = settings.value(QStringLiteral("bedEspFilled"), false).toBool();
     m_debugChatEnabled = settings.value(QStringLiteral("debugChatEnabled"), true).toBool();
     m_showOwnBedDefenseInfo = settings.value(QStringLiteral("showOwnBedDefenseInfo"), true).toBool();
+    m_showTeammateBoxes = settings.value(QStringLiteral("showTeammateBoxes"), true).toBool();
+    m_bedDefenseHoldToShow = settings.value(QStringLiteral("bedDefenseHoldToShow"), true).toBool();
+    m_bedDefensePerspectiveScale = settings.value(QStringLiteral("bedDefensePerspectiveScale"), false).toBool();
     m_bedDefenseRadius = std::clamp(
         settings.value(QStringLiteral("bedDefenseRadius"), 6).toInt(), 3, 10);
     m_bedThreatRadius = std::clamp(
         settings.value(QStringLiteral("bedThreatRadius"), 8).toInt(), 3, 32);
+    m_bedDefenseHotkey = std::clamp(
+        settings.value(QStringLiteral("bedDefenseHotkey"), 0xA4).toInt(), 8, 254);
+    m_bedDefensePanelOpacity = std::clamp(
+        settings.value(QStringLiteral("bedDefensePanelOpacity"), 78).toInt(), 0, 100);
     const QString savedPlayerColor = normalizedRgbColor(
         settings.value(QStringLiteral("playerEspColor"), QStringLiteral("#FF3B30")).toString());
     const QString savedBedColor = normalizedRgbColor(
         settings.value(QStringLiteral("bedEspColor"), QStringLiteral("#FF5C68")).toString());
+    const QString savedPanelColor = normalizedRgbColor(
+        settings.value(QStringLiteral("bedDefensePanelColor"), QStringLiteral("#191621")).toString());
     m_playerEspColor = savedPlayerColor.isEmpty() ? QStringLiteral("#FF3B30") : savedPlayerColor;
     m_bedEspColor = savedBedColor.isEmpty() ? QStringLiteral("#FF5C68") : savedBedColor;
+    m_bedDefensePanelColor = savedPanelColor.isEmpty()
+        ? QStringLiteral("#191621") : savedPanelColor;
     settings.endGroup();
 }
 
@@ -1505,10 +1636,16 @@ void OverlayManager::flushFeatureSettings() const
     settings.setValue(QStringLiteral("bedEspFilled"), m_bedEspFilled);
     settings.setValue(QStringLiteral("debugChatEnabled"), m_debugChatEnabled);
     settings.setValue(QStringLiteral("showOwnBedDefenseInfo"), m_showOwnBedDefenseInfo);
+    settings.setValue(QStringLiteral("showTeammateBoxes"), m_showTeammateBoxes);
+    settings.setValue(QStringLiteral("bedDefenseHoldToShow"), m_bedDefenseHoldToShow);
+    settings.setValue(QStringLiteral("bedDefensePerspectiveScale"), m_bedDefensePerspectiveScale);
     settings.setValue(QStringLiteral("bedDefenseRadius"), m_bedDefenseRadius);
     settings.setValue(QStringLiteral("bedThreatRadius"), m_bedThreatRadius);
+    settings.setValue(QStringLiteral("bedDefenseHotkey"), m_bedDefenseHotkey);
+    settings.setValue(QStringLiteral("bedDefensePanelOpacity"), m_bedDefensePanelOpacity);
     settings.setValue(QStringLiteral("playerEspColor"), m_playerEspColor);
     settings.setValue(QStringLiteral("bedEspColor"), m_bedEspColor);
+    settings.setValue(QStringLiteral("bedDefensePanelColor"), m_bedDefensePanelColor);
     settings.endGroup();
     settings.sync();
 }
@@ -1529,10 +1666,16 @@ void OverlayManager::sendFeatureSnapshot()
                       + (m_bedEspFilled ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
                       + (m_debugChatEnabled ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
                       + (m_showOwnBedDefenseInfo ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_showTeammateBoxes ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_bedDefenseHoldToShow ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_bedDefensePerspectiveScale ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
                       + QByteArray::number(std::clamp(m_bedDefenseRadius, 3, 10)) + ' '
                       + QByteArray::number(std::clamp(m_bedThreatRadius, 3, 32)) + ' '
-                      + QByteArray::number(QColor(m_playerEspColor).rgb() & 0xFFFFFFU) + ' '
-                      + QByteArray::number(QColor(m_bedEspColor).rgb() & 0xFFFFFFU) + '\n');
+                      + QByteArray::number(std::clamp(m_bedDefenseHotkey, 8, 254)) + ' '
+                      + QByteArray::number(std::clamp(m_bedDefensePanelOpacity, 0, 100)) + ' '
+                      + QByteArray::number(rgbFromHexColor(m_playerEspColor)) + ' '
+                      + QByteArray::number(rgbFromHexColor(m_bedEspColor)) + ' '
+                      + QByteArray::number(rgbFromHexColor(m_bedDefensePanelColor)) + '\n');
 }
 
 void OverlayManager::sendBindSnapshot()
