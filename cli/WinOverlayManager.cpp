@@ -19,11 +19,11 @@
 namespace cli {
 namespace {
 
-constexpr UINT kAttachTimeoutMilliseconds = 15000;
-constexpr UINT kDetachTimeoutMilliseconds = 2500;
-constexpr UINT kFallbackGraceMilliseconds = 2200;
+constexpr unsigned long long kAttachTimeoutMilliseconds = 15000;
+constexpr unsigned long long kDetachTimeoutMilliseconds = 2500;
+constexpr unsigned long long kFallbackGraceMilliseconds = 2200;
+constexpr unsigned long long kTargetMonitorIntervalMilliseconds = 1000;
 constexpr std::size_t kMaximumAgentMessageBytes = 64 * 1024;
-constexpr unsigned long long kGameStateStaleAfterMilliseconds = 3500;
 
 class ScopedHandle
 {
@@ -106,14 +106,6 @@ std::string trim(std::string text)
     return text;
 }
 
-bool parseI64(const std::string &token, long long &out)
-{
-    if (token.empty())
-        return false;
-    const auto result = std::from_chars(token.data(), token.data() + token.size(), out);
-    return result.ec == std::errc{} && result.ptr == token.data() + token.size();
-}
-
 bool parseU64(const std::string &token, unsigned long long &out)
 {
     if (token.empty())
@@ -122,16 +114,7 @@ bool parseU64(const std::string &token, unsigned long long &out)
     return result.ec == std::errc{} && result.ptr == token.data() + token.size();
 }
 
-bool parseDouble(const std::string &token, double &out)
-{
-    if (token.empty())
-        return false;
-    const auto result = std::from_chars(token.data(), token.data() + token.size(), out);
-    return result.ec == std::errc{} && result.ptr == token.data() + token.size();
-}
-
-// The agent protocol is line-oriented; fields are separated by one or more
-// ASCII spaces.
+// The agent protocol is line-oriented; fields are separated by ASCII spaces.
 std::vector<std::string> splitFields(const std::string &line)
 {
     std::vector<std::string> fields;
@@ -148,118 +131,6 @@ std::vector<std::string> splitFields(const std::string &line)
         begin = end + 1;
     }
     return fields;
-}
-
-std::string encodeToken(const std::wstring &value)
-{
-    if (value.empty())
-        return "-";
-    const std::string utf8 = wideToUtf8(value);
-    static constexpr char hex[] = "0123456789ABCDEF";
-    std::string out;
-    out.reserve(utf8.size());
-    for (const unsigned char character : utf8) {
-        const bool unreserved = (character >= 'A' && character <= 'Z')
-            || (character >= 'a' && character <= 'z')
-            || (character >= '0' && character <= '9')
-            || character == '-' || character == '.' || character == '_'
-            || character == '~';
-        if (unreserved) {
-            out += static_cast<char>(character);
-        } else {
-            out += '%';
-            out += hex[character >> 4U];
-            out += hex[character & 0xFU];
-        }
-    }
-    return out;
-}
-
-std::wstring decodeToken(const std::string &token)
-{
-    if (token == "-")
-        return {};
-    std::string utf8;
-    utf8.reserve(token.size());
-    for (std::size_t index = 0; index < token.size(); ++index) {
-        if (token[index] == '%' && index + 2 < token.size()
-            && isxdigit(static_cast<unsigned char>(token[index + 1])) != 0
-            && isxdigit(static_cast<unsigned char>(token[index + 2])) != 0) {
-            auto hexValue = [](const char character) -> unsigned {
-                if (character >= '0' && character <= '9')
-                    return static_cast<unsigned>(character - '0');
-                if (character >= 'a' && character <= 'f')
-                    return static_cast<unsigned>(character - 'a') + 10U;
-                return static_cast<unsigned>(character - 'A') + 10U;
-            };
-            utf8 += static_cast<char>((hexValue(token[index + 1]) << 4U)
-                                      | hexValue(token[index + 2]));
-            index += 2;
-        } else {
-            utf8 += token[index];
-        }
-    }
-    return utf8ToWide(utf8);
-}
-
-bool validPlayerName(const std::wstring &name)
-{
-    if (name.empty() || name.size() > 16)
-        return false;
-    return std::all_of(name.cbegin(), name.cend(), [](const wchar_t c) {
-        return (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z')
-            || (c >= L'0' && c <= L'9') || c == L'_';
-    });
-}
-
-bool validTeamPrefix(const std::wstring &prefix)
-{
-    if (prefix.size() != 2 || prefix.at(0) != static_cast<wchar_t>(0x00A7))
-        return false;
-    const wchar_t color = prefix.at(1);
-    return (color >= L'0' && color <= L'9') || (color >= L'a' && color <= L'f');
-}
-
-std::wstring normalizedRgbColor(const std::wstring &value)
-{
-    const std::wstring trimmed = trim(value);
-    if (trimmed.size() != 7 || trimmed.at(0) != L'#')
-        return {};
-    bool hexadecimal = true;
-    for (std::size_t index = 1; index < trimmed.size(); ++index) {
-        const wchar_t character = trimmed.at(index);
-        const bool digit = character >= L'0' && character <= L'9';
-        const bool upper = character >= L'A' && character <= L'F';
-        const bool lower = character >= L'a' && character <= L'f';
-        if (!digit && !upper && !lower) {
-            hexadecimal = false;
-            break;
-        }
-    }
-    if (!hexadecimal)
-        return {};
-    std::wstring normalized = trimmed;
-    for (auto &character : normalized)
-        character = towupper(character);
-    return normalized;
-}
-
-uint32_t rgbFromHexColor(const std::wstring &value)
-{
-    const std::wstring normalized = normalizedRgbColor(value);
-    if (normalized.empty())
-        return 0U;
-    uint32_t rgb = 0;
-    for (std::size_t index = 1; index < normalized.size(); ++index) {
-        const wchar_t character = normalized.at(index);
-        uint32_t digit = 0;
-        if (character >= L'0' && character <= L'9')
-            digit = static_cast<uint32_t>(character - L'0');
-        else
-            digit = static_cast<uint32_t>(character - L'A') + 10U;
-        rgb = (rgb << 4U) | digit;
-    }
-    return rgb & 0xFFFFFFU;
 }
 
 std::string randomHex32()
@@ -362,11 +233,14 @@ bool modularRuntimeContainsAttach(const std::wstring &runtimeRoot)
 }
 
 // Named-pipe security descriptor equivalent to QLocalServer::UserAccessOption:
-// only the current Windows user may connect.
+// only the current Windows user may connect. The user SID is copied into
+// static storage: SetSecurityDescriptorOwner only stores the pointer, so a
+// stack-local SID would dangle after the first call.
 SECURITY_ATTRIBUTES userOnlySecurityAttributes()
 {
     static SECURITY_DESCRIPTOR descriptor;
     static PACL acl = nullptr;
+    static std::vector<BYTE> sidStorage;
     static bool built = false;
     if (!built) {
         built = true;
@@ -380,20 +254,26 @@ SECURITY_ATTRIBUTES userOnlySecurityAttributes()
                     reinterpret_cast<TOKEN_USER *>(buffer.data());
                 if (::GetTokenInformation(token, TokenUser, tokenUser, size, &size)
                     != FALSE) {
-                    EXPLICIT_ACCESSW access{};
-                    access.grfAccessPermissions = GENERIC_READ | GENERIC_WRITE;
-                    access.grfAccessMode = SET_ACCESS;
-                    access.grfInheritance = NO_INHERITANCE;
-                    access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
-                    access.Trustee.TrusteeType = TRUSTEE_IS_USER;
-                    access.Trustee.ptstrName =
-                        reinterpret_cast<LPWSTR>(tokenUser->User.Sid);
-                    (void) ::SetEntriesInAclW(1, &access, nullptr, &acl);
-                    ::InitializeSecurityDescriptor(&descriptor,
-                                                   SECURITY_DESCRIPTOR_REVISION);
-                    (void) ::SetSecurityDescriptorOwner(&descriptor,
-                                                        tokenUser->User.Sid, FALSE);
-                    (void) ::SetSecurityDescriptorDacl(&descriptor, TRUE, acl, FALSE);
+                    const DWORD sidLength = ::GetLengthSid(tokenUser->User.Sid);
+                    sidStorage.assign(sidLength, 0);
+                    if (::CopySid(sidLength, sidStorage.data(),
+                                  tokenUser->User.Sid) != FALSE) {
+                        EXPLICIT_ACCESSW access{};
+                        access.grfAccessPermissions = GENERIC_READ | GENERIC_WRITE;
+                        access.grfAccessMode = SET_ACCESS;
+                        access.grfInheritance = NO_INHERITANCE;
+                        access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+                        access.Trustee.TrusteeType = TRUSTEE_IS_USER;
+                        access.Trustee.ptstrName =
+                            reinterpret_cast<LPWSTR>(sidStorage.data());
+                        (void) ::SetEntriesInAclW(1, &access, nullptr, &acl);
+                        ::InitializeSecurityDescriptor(&descriptor,
+                                                       SECURITY_DESCRIPTOR_REVISION);
+                        (void) ::SetSecurityDescriptorOwner(
+                            &descriptor, sidStorage.data(), FALSE);
+                        (void) ::SetSecurityDescriptorDacl(&descriptor, TRUE,
+                                                           acl, FALSE);
+                    }
                 }
             }
             ::CloseHandle(token);
@@ -448,9 +328,6 @@ BOOL CALLBACK findTargetWindow(HWND window, LPARAM context)
 WinOverlayManager::WinOverlayManager()
 {
     m_pipeStopEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    m_menuHotkey = m_settings.menuHotkey();
-    m_guiScaleIndex = m_settings.guiScaleIndex();
-    m_features = m_settings.loadFeatures();
 }
 
 WinOverlayManager::~WinOverlayManager()
@@ -532,7 +409,6 @@ void WinOverlayManager::fail(const std::wstring &code, const std::wstring &detai
 {
     (void) closeSessionTransport();
     setRenderer({});
-    resetGameState();
     setError(code, detail);
 }
 
@@ -696,35 +572,34 @@ void WinOverlayManager::postDrain()
     (void) attachToProcess(pid);
 }
 
-void WinOverlayManager::onTimer(const TimerId id)
+void WinOverlayManager::onTick()
 {
-    switch (id) {
-    case TimerAttach:
+    const unsigned long long now = ::GetTickCount64();
+
+    if (m_attachTimerActive && now >= m_attachDeadline) {
+        m_attachTimerActive = false;
         if (!m_authenticated) {
             fail(L"AGENT_HANDSHAKE_TIMEOUT",
                  L"No authenticated native-agent connection arrived within 15 seconds.");
         }
-        break;
-    case TimerFallbackGrace:
+    }
+    if (m_graceTimerActive && now >= m_graceDeadline) {
+        m_graceTimerActive = false;
         if (!m_authenticated && m_state == State::WaitingForAgent
             && m_loaderKind == LoaderKind::JvmAttach
             && !m_nativeFallbackAttempted) {
             (void) startNativeLoaderFallback();
         }
-        break;
-    case TimerDetach:
+    }
+    if (m_detachTimerActive && now >= m_detachDeadline) {
+        m_detachTimerActive = false;
         if (m_state == State::Detaching && !m_detachTransportComplete)
             completeDetach(true);
-        break;
-    case TimerTargetMonitor:
-        monitorTarget();
-        break;
-    case TimerFreshness:
-        refreshFreshness();
-        break;
-    case TimerFeatureStore:
-        m_settings.storeFeatures(m_features);
-        break;
+    }
+    if (now >= m_nextMonitorTick) {
+        m_nextMonitorTick = now + kTargetMonitorIntervalMilliseconds;
+        if (m_targetPid != 0)
+            monitorTarget();
     }
 }
 
@@ -756,14 +631,12 @@ bool WinOverlayManager::attachToProcess(const uint32_t pid)
 
     clearError();
     setRenderer({});
-    resetGameState();
     m_pipeToken.clear();
     m_agentDllPath.clear();
     m_agentOptions.clear();
     m_loaderKind = LoaderKind::None;
     m_nativeFallbackAttempted = false;
-    if (cancelTimer)
-        cancelTimer(TimerFallbackGrace);
+    m_graceTimerActive = false;
     if (m_targetPid != 0 || !m_targetTitle.empty()) {
         m_targetPid = 0;
         m_targetTitle.clear();
@@ -856,10 +729,9 @@ bool WinOverlayManager::attachToProcess(const uint32_t pid)
     m_helperRunning = true;
 
     setState(State::WaitingForAgent);
-    if (requestTimer)
-        requestTimer(TimerAttach, kAttachTimeoutMilliseconds);
-    if (requestTimer)
-        requestTimer(TimerTargetMonitor, 1000);
+    m_attachTimerActive = true;
+    m_attachDeadline = ::GetTickCount64() + kAttachTimeoutMilliseconds;
+    m_nextMonitorTick = ::GetTickCount64();
     return true;
 }
 
@@ -880,8 +752,7 @@ void WinOverlayManager::beginDetach()
         return;
     }
 
-    if (cancelTimer)
-        cancelTimer(TimerAttach);
+    m_attachTimerActive = false;
     m_detachTransportComplete = false;
     m_detachTimedOut = false;
     setState(State::Detaching);
@@ -891,8 +762,8 @@ void WinOverlayManager::beginDetach()
     // incomplete attach there is no runtime whose shutdown can be confirmed,
     // so close that partial session immediately.
     if (m_authenticated && writeAgentLine("DETACH")) {
-        if (requestTimer)
-            requestTimer(TimerDetach, kDetachTimeoutMilliseconds);
+        m_detachTimerActive = true;
+        m_detachDeadline = ::GetTickCount64() + kDetachTimeoutMilliseconds;
         return;
     }
     completeDetach(false);
@@ -905,13 +776,13 @@ void WinOverlayManager::completeDetach(const bool timedOut)
 
     m_detachTimedOut = timedOut;
     m_detachTransportComplete = true;
+    m_detachTimerActive = false;
     (void) closeSessionTransport();
 
     m_targetPid = 0;
     m_targetTitle.clear();
     m_pipeToken.clear();
     setRenderer({});
-    resetGameState();
 
     finalizeDetachedState();
 }
@@ -933,13 +804,9 @@ bool WinOverlayManager::closeSessionTransport()
         return !m_helperRunning;
     m_closingTransport = true;
 
-    if (cancelTimer) {
-        cancelTimer(TimerAttach);
-        cancelTimer(TimerFallbackGrace);
-        cancelTimer(TimerDetach);
-        cancelTimer(TimerTargetMonitor);
-        cancelTimer(TimerFeatureStore);
-    }
+    m_attachTimerActive = false;
+    m_graceTimerActive = false;
+    m_detachTimerActive = false;
     m_authenticated = false;
     m_loaderKind = LoaderKind::None;
 
@@ -1015,8 +882,8 @@ void WinOverlayManager::handleHelperMessage(const HelperMessage &message)
         m_jvmAttachFallbackReason = trim(utf8ToWide(message.stderrText));
         setState(State::WaitingForAgent);
         setStatus(L"JVM Attach returned a compatibility error; waiting briefly for its asynchronous Agent handshake...");
-        if (requestTimer)
-            requestTimer(TimerFallbackGrace, kFallbackGraceMilliseconds);
+        m_graceTimerActive = true;
+        m_graceDeadline = ::GetTickCount64() + kFallbackGraceMilliseconds;
         return;
     }
 
@@ -1065,8 +932,8 @@ void WinOverlayManager::handleAgentDisconnected()
             L"The JVM Attach agent disconnected before the session stabilized.";
         setState(State::WaitingForAgent);
         setStatus(L"Forge agent pipe closed during startup; waiting briefly before native recovery...");
-        if (requestTimer)
-            requestTimer(TimerFallbackGrace, kFallbackGraceMilliseconds);
+        m_graceTimerActive = true;
+        m_graceDeadline = ::GetTickCount64() + kFallbackGraceMilliseconds;
     } else if (m_state != State::Detached && m_state != State::Error) {
         fail(L"AGENT_DISCONNECTED",
              L"The native agent disconnected from its control pipe.");
@@ -1092,15 +959,11 @@ void WinOverlayManager::handleAgentLine(const std::string &line)
         }
 
         m_authenticated = true;
-        if (cancelTimer) {
-            cancelTimer(TimerAttach);
-            cancelTimer(TimerFallbackGrace);
-        }
+        m_attachTimerActive = false;
+        m_graceTimerActive = false;
         setState(State::WaitingForOpenGL);
         setStatus(L"Native DLL loaded; waiting for Minecraft's first OpenGL frame...");
-        sendStateSnapshot();
-        if (onSessionReady)
-            onSessionReady();
+        sendInitialSnapshot();
         return;
     }
 
@@ -1115,216 +978,9 @@ void WinOverlayManager::handleAgentLine(const std::string &line)
         setState(State::Active);
         setStatus(L"Native " + (m_renderer.empty() ? L"OpenGL" : m_renderer)
                   + L" overlay is active inside Minecraft");
-    } else if (type == "STATE_CHANGED") {
-        if (fields.size() != 3 || (fields.at(1) != "0" && fields.at(1) != "1")
-            || (fields.at(2) != "0" && fields.at(2) != "1")) {
-            fail(L"AGENT_PROTOCOL_ERROR",
-                 L"The native agent sent an invalid STATE_CHANGED message.");
-            return;
-        }
-        m_overlayEnabled = fields.at(1) == "1";
-        m_interactive = fields.at(2) == "1";
-    } else if (type == "FEATURE_STATE_CHANGED") {
-        if (fields.size() != 23)
-            return;
-        std::array<bool, 15> values{};
-        for (std::size_t index = 0; index < values.size(); ++index) {
-            if (fields.at(index + 1) != "0" && fields.at(index + 1) != "1")
-                return;
-            values[index] = fields.at(index + 1) == "1";
-        }
-        long long defenseRadius = 0;
-        long long threatRadius = 0;
-        long long bedHotkey = 0;
-        long long panelOpacity = 0;
-        long long playerColor = 0;
-        long long bedColor = 0;
-        long long panelColor = 0;
-        if (!parseI64(fields.at(16), defenseRadius)
-            || !parseI64(fields.at(17), threatRadius)
-            || !parseI64(fields.at(18), bedHotkey)
-            || !parseI64(fields.at(19), panelOpacity)
-            || !parseI64(fields.at(20), playerColor)
-            || !parseI64(fields.at(21), bedColor)
-            || !parseI64(fields.at(22), panelColor)) {
-            return;
-        }
-        if (defenseRadius < 3 || defenseRadius > 10 || threatRadius < 3
-            || threatRadius > 32 || bedHotkey < 8 || bedHotkey > 254
-            || panelOpacity < 0 || panelOpacity > 100
-            || playerColor < 0 || playerColor > 0xFFFFFF
-            || bedColor < 0 || bedColor > 0xFFFFFF
-            || panelColor < 0 || panelColor > 0xFFFFFF) {
-            return;
-        }
-
-        m_features.espEnabled = values[0];
-        m_features.entityEspEnabled = values[1];
-        m_features.bedEspEnabled = values[2];
-        m_features.espLabelsEnabled = values[3];
-        m_features.hypixelPanelEnabled = values[4];
-        m_features.bedThreatAlertsEnabled = values[5];
-        m_features.bedDefensePanelEnabled = values[6];
-        m_features.entityEspPlayersOnly = values[7];
-        m_features.bedAutoRefreshEnabled = values[8];
-        m_features.bedEspFilled = values[9];
-        m_features.debugChatEnabled = values[10];
-        m_features.showOwnBedDefenseInfo = values[11];
-        m_features.showTeammateBoxes = values[12];
-        m_features.bedDefenseHoldToShow = values[13];
-        m_features.bedDefensePerspectiveScale = values[14];
-        m_features.bedDefenseRadius = static_cast<int>(defenseRadius);
-        m_features.bedThreatRadius = static_cast<int>(threatRadius);
-        m_features.bedDefenseHotkey = static_cast<int>(bedHotkey);
-        m_features.bedDefensePanelOpacity = static_cast<int>(panelOpacity);
-        wchar_t color[16]{};
-        swprintf(color, std::size(color), L"#%06llX",
-                 static_cast<unsigned long long>(playerColor));
-        m_features.playerEspColor = color;
-        swprintf(color, std::size(color), L"#%06llX",
-                 static_cast<unsigned long long>(bedColor));
-        m_features.bedEspColor = color;
-        swprintf(color, std::size(color), L"#%06llX",
-                 static_cast<unsigned long long>(panelColor));
-        m_features.bedDefensePanelColor = color;
-        storeFeatureSettings();
-    } else if (type == "BIND_CHANGED") {
-        long long virtualKey = 0;
-        if (fields.size() == 2 && parseI64(fields.at(1), virtualKey)
-            && virtualKey >= 8 && virtualKey <= 254
-            && m_menuHotkey != static_cast<int>(virtualKey)) {
-            m_menuHotkey = static_cast<int>(virtualKey);
-            m_settings.setMenuHotkey(m_menuHotkey);
-            if (onMenuHotkeyChanged)
-                onMenuHotkeyChanged(m_menuHotkey);
-        }
-    } else if (type == "GUI_SCALE_CHANGED") {
-        long long index = 0;
-        if (fields.size() == 2 && parseI64(fields.at(1), index)
-            && index >= 0 && index <= 3
-            && m_guiScaleIndex != static_cast<int>(index)) {
-            m_guiScaleIndex = static_cast<int>(index);
-            m_settings.setGuiScaleIndex(m_guiScaleIndex);
-            if (onGuiScaleIndexChanged)
-                onGuiScaleIndexChanged(m_guiScaleIndex);
-        }
-    } else if (type == "PLAYER_FOUND") {
-        if (fields.size() != 3)
-            return;
-        const std::wstring playerName = decodeToken(fields.at(1));
-        std::wstring teamPrefix = decodeToken(fields.at(2));
-        std::transform(teamPrefix.begin(), teamPrefix.end(), teamPrefix.begin(),
-                       [](const wchar_t c) { return towlower(c); });
-        if (validPlayerName(playerName) && validTeamPrefix(teamPrefix)
-            && onPlayerFound) {
-            onPlayerFound(playerName, teamPrefix);
-        }
-    } else if (type == "MATCH_STATE") {
-        if (fields.size() != 2
-            || (fields.at(1) != "0" && fields.at(1) != "1")) {
-            return;
-        }
-        const bool active = fields.at(1) == "1";
-        if (m_matchActive != active) {
-            m_matchActive = active;
-            if (onMatchState)
-                onMatchState(active);
-        }
-    } else if (type == "PLAYER_STATUS") {
-        if (fields.size() != 2)
-            return;
-        const std::wstring name = decodeToken(fields.at(1));
-        if (validPlayerName(name) && name != m_playerName) {
-            m_playerName = name;
-            if (onPlayerName)
-                onPlayerName(name);
-        }
-    } else if (type == "HYPIXEL_QUERY") {
-        if (fields.size() != 2)
-            return;
-        const std::wstring playerId = decodeToken(fields.at(1));
-        if (validPlayerName(playerId) && onHypixelQuery)
-            onHypixelQuery(playerId);
     } else if (type == "DETACH_COMPLETE") {
         if (fields.size() == 1 && m_state == State::Detaching)
             completeDetach(false);
-    } else if (type == "GAME_STATE") {
-        // Protocol v1:
-        // GAME_STATE 1 seq unixMs valid hp maxHp entityId x y z
-        //            loadedEntities bedCount mappingPct statePct
-        if (fields.size() != 15 || fields.at(1) != "1")
-            return;
-
-        unsigned long long sequence = 0;
-        long long timestamp = 0;
-        double health = 0.0;
-        double maxHealth = 0.0;
-        long long entityId = 0;
-        double x = 0.0;
-        double y = 0.0;
-        double z = 0.0;
-        long long entities = 0;
-        long long beds = 0;
-        const bool validToken = fields.at(4) == "0" || fields.at(4) == "1";
-        const bool available = fields.at(4) == "1";
-        const bool numericOk = parseU64(fields.at(2), sequence)
-            && parseI64(fields.at(3), timestamp)
-            && parseDouble(fields.at(5), health)
-            && parseDouble(fields.at(6), maxHealth)
-            && parseI64(fields.at(7), entityId)
-            && parseDouble(fields.at(8), x)
-            && parseDouble(fields.at(9), y)
-            && parseDouble(fields.at(10), z)
-            && parseI64(fields.at(11), entities)
-            && parseI64(fields.at(12), beds);
-
-        const bool finiteNumbers = std::isfinite(health)
-            && std::isfinite(maxHealth) && std::isfinite(x)
-            && std::isfinite(y) && std::isfinite(z);
-        const bool sensibleRanges = health >= -2048.0 && health <= 1000000.0
-            && maxHealth >= 0.0 && maxHealth <= 1000000.0
-            && std::abs(x) <= 100000000.0 && std::abs(y) <= 100000000.0
-            && std::abs(z) <= 100000000.0 && entities >= 0
-            && entities <= 10000000 && beds >= 0 && beds <= 10000000;
-        if (!numericOk || sequence == 0 || timestamp < 0 || !validToken
-            || !finiteNumbers || !sensibleRanges) {
-            return;
-        }
-
-        // Never surface stale or attacker-supplied gameplay values from a
-        // valid=0 frame: every numeric placeholder must be zero.
-        if (!available && (health != 0.0 || maxHealth != 0.0
-                           || entityId != 0 || x != 0.0 || y != 0.0
-                           || z != 0.0 || entities != 0 || beds != 0)) {
-            return;
-        }
-
-        // Ignore delayed/reordered samples within one authenticated session.
-        if (m_game.received && sequence <= m_game.sequence)
-            return;
-
-        m_game.received = true;
-        m_game.available = available;
-        m_game.stale = false;
-        m_game.health = health;
-        m_game.maxHealth = maxHealth;
-        m_game.entityId = static_cast<int>(entityId);
-        m_game.x = x;
-        m_game.y = y;
-        m_game.z = z;
-        m_game.loadedEntities = static_cast<int>(entities);
-        m_game.bedCount = static_cast<int>(beds);
-        m_game.mappingProfile = decodeToken(fields.at(13));
-        m_game.mappingState = decodeToken(fields.at(14));
-        if (m_game.mappingState.empty()) {
-            m_game.mappingState =
-                available ? L"ready" : L"unavailable";
-        }
-        m_game.timestampMs = static_cast<unsigned long long>(timestamp);
-        m_lastGameStateReceiptTick = ::GetTickCount64();
-        m_game.sequence = sequence;
-        if (onTelemetry)
-            onTelemetry();
     } else if (type == "STATUS") {
         const std::size_t separator = line.find(' ');
         if (separator != std::string::npos)
@@ -1343,179 +999,20 @@ void WinOverlayManager::handleAgentLine(const std::string &line)
     }
 }
 
-void WinOverlayManager::sendStateSnapshot()
+void WinOverlayManager::sendInitialSnapshot()
 {
     if (!m_authenticated)
         return;
-    (void) writeAgentLine(std::string("STATE ")
-                          + (m_overlayEnabled ? "1 " : "0 ")
-                          + (m_interactive ? "1" : "0"));
-    sendFeatureSnapshot();
-    sendBindSnapshot();
-    sendGuiScaleSnapshot();
-}
-
-void WinOverlayManager::sendFeatureSnapshot()
-{
-    if (!m_authenticated)
-        return;
-    const auto boolean = [](const bool value) {
-        return value ? "1 " : "0 ";
-    };
-    std::string line = "FEATURE_STATE ";
-    line += boolean(m_features.espEnabled);
-    line += boolean(m_features.entityEspEnabled);
-    line += boolean(m_features.bedEspEnabled);
-    line += boolean(m_features.espLabelsEnabled);
-    line += boolean(m_features.hypixelPanelEnabled);
-    line += boolean(m_features.bedThreatAlertsEnabled);
-    line += boolean(m_features.bedDefensePanelEnabled);
-    line += boolean(m_features.entityEspPlayersOnly);
-    line += boolean(m_features.bedAutoRefreshEnabled);
-    line += boolean(m_features.bedEspFilled);
-    line += boolean(m_features.debugChatEnabled);
-    line += boolean(m_features.showOwnBedDefenseInfo);
-    line += boolean(m_features.showTeammateBoxes);
-    line += boolean(m_features.bedDefenseHoldToShow);
-    line += boolean(m_features.bedDefensePerspectiveScale);
-    line += std::to_string(std::clamp(m_features.bedDefenseRadius, 3, 10)) + ' ';
-    line += std::to_string(std::clamp(m_features.bedThreatRadius, 3, 32)) + ' ';
-    line += std::to_string(std::clamp(m_features.bedDefenseHotkey, 8, 254)) + ' ';
-    line += std::to_string(std::clamp(m_features.bedDefensePanelOpacity, 0, 100)) + ' ';
-    line += std::to_string(rgbFromHexColor(m_features.playerEspColor)) + ' ';
-    line += std::to_string(rgbFromHexColor(m_features.bedEspColor)) + ' ';
-    line += std::to_string(rgbFromHexColor(m_features.bedDefensePanelColor));
-    (void) writeAgentLine(line);
-}
-
-void WinOverlayManager::sendBindSnapshot()
-{
-    if (!m_authenticated)
-        return;
-    (void) writeAgentLine("BIND " + std::to_string(std::clamp(m_menuHotkey, 8, 254)));
-}
-
-void WinOverlayManager::sendGuiScaleSnapshot()
-{
-    if (!m_authenticated)
-        return;
-    (void) writeAgentLine("GUI_SCALE "
-                          + std::to_string(std::clamp(m_guiScaleIndex, 0, 3)));
-}
-
-void WinOverlayManager::storeFeatureSettings()
-{
-    if (requestTimer)
-        requestTimer(TimerFeatureStore, 300);
-}
-
-void WinOverlayManager::setMenuHotkey(const int virtualKey)
-{
-    if (virtualKey < 8 || virtualKey > 254 || m_menuHotkey == virtualKey)
-        return;
-    m_menuHotkey = virtualKey;
-    m_settings.setMenuHotkey(m_menuHotkey);
-    if (onMenuHotkeyChanged)
-        onMenuHotkeyChanged(m_menuHotkey);
-    sendBindSnapshot();
-}
-
-void WinOverlayManager::setGuiScaleIndex(const int index)
-{
-    const int bounded = std::clamp(index, 0, 3);
-    if (m_guiScaleIndex == bounded)
-        return;
-    m_guiScaleIndex = bounded;
-    m_settings.setGuiScaleIndex(m_guiScaleIndex);
-    if (onGuiScaleIndexChanged)
-        onGuiScaleIndexChanged(m_guiScaleIndex);
-    sendGuiScaleSnapshot();
-}
-
-void WinOverlayManager::refreshBedCache()
-{
-    if (!m_authenticated)
-        return;
-    (void) writeAgentLine("BED_RESCAN");
-    setStatus(L"Immediate bed-cache refresh requested");
-}
-
-void WinOverlayManager::publishHypixelResult(
-    const int state, const std::wstring &uuid, const std::wstring &displayName,
-    const long long wins, const long long losses, const long long finalKills,
-    const long long finalDeaths, const long long bedsBroken,
-    const long long bedsLost, const double winRate, const double fkdr,
-    const std::wstring &status)
-{
-    if (!m_authenticated)
-        return;
-    auto formatDouble = [](const double value) {
-        char buffer[40]{};
-        snprintf(buffer, std::size(buffer), "%.9g",
-                 std::isfinite(value) ? value : 0.0);
-        return std::string(buffer);
-    };
-    const std::string line =
-        "HYPIXEL_RESULT " + std::to_string(std::clamp(state, 0, 3)) + ' '
-        + encodeToken(uuid) + ' ' + encodeToken(displayName) + ' '
-        + std::to_string(wins) + ' ' + std::to_string(losses) + ' '
-        + std::to_string(finalKills) + ' ' + std::to_string(finalDeaths) + ' '
-        + std::to_string(bedsBroken) + ' ' + std::to_string(bedsLost) + ' '
-        + formatDouble(winRate) + ' ' + formatDouble(fkdr) + ' '
-        + encodeToken(status);
-    (void) writeAgentLine(line);
-}
-
-void WinOverlayManager::publishPlayerStats(const std::wstring &playerName,
-                                           const std::wstring &teamPrefix,
-                                           const int stars,
-                                           const double fkdr,
-                                           const int level)
-{
-    if (!m_authenticated)
-        return;
-    std::wstring team = teamPrefix;
-    std::transform(team.begin(), team.end(), team.begin(),
-                   [](const wchar_t c) { return towlower(c); });
-    if (!validPlayerName(playerName) || !validTeamPrefix(team) || stars < 0
-        || level < 0 || !std::isfinite(fkdr) || fkdr < 0.0) {
-        return;
-    }
-    char buffer[40]{};
-    snprintf(buffer, std::size(buffer), "%.9g", fkdr);
-    (void) writeAgentLine("STATS " + encodeToken(playerName) + ' '
-                          + encodeToken(team) + ' ' + std::to_string(stars)
-                          + ' ' + buffer + ' ' + std::to_string(level));
-}
-
-void WinOverlayManager::publishPlayerStatsError(const std::wstring &playerName,
-                                                const std::wstring &reason)
-{
-    if (!m_authenticated)
-        return;
-    if (!validPlayerName(playerName))
-        return;
-
-    // Collapse whitespace and bound the reason the way the Qt controller does.
-    std::wstring safe;
-    bool pendingSpace = false;
-    for (const wchar_t character : reason) {
-        if (iswspace(character) != 0) {
-            pendingSpace = !safe.empty();
-            continue;
-        }
-        if (pendingSpace && !safe.empty()) {
-            safe += L' ';
-        }
-        pendingSpace = false;
-        safe += character;
-        if (safe.size() >= 96)
-            break;
-    }
-    if (safe.empty())
-        return;
-    (void) writeAgentLine("STATS_ERROR " + encodeToken(playerName) + ' '
-                          + encodeToken(safe));
+    // The agent applies controller snapshots on top of its own defaults. Send
+    // the stock configuration once so the in-game Click GUI starts exactly as
+    // it does under the Qt dashboard (single-quote bind, M size, default
+    // feature set); the console front-end offers no toggles.
+    (void) writeAgentLine("STATE 1 0");
+    (void) writeAgentLine(
+        "FEATURE_STATE 1 1 1 1 1 1 1 0 0 0 1 1 1 1 0 6 8 164 78 "
+        "16719152 16735592 1644065");
+    (void) writeAgentLine("BIND 222");
+    (void) writeAgentLine("GUI_SCALE 1");
 }
 
 void WinOverlayManager::monitorTarget()
@@ -1535,46 +1032,6 @@ void WinOverlayManager::monitorTarget()
         if (onTargetExited)
             onTargetExited(exitedPid);
     }
-}
-
-void WinOverlayManager::refreshFreshness()
-{
-    if (!m_game.received || m_game.stale)
-        return;
-    if (::GetTickCount64() - m_lastGameStateReceiptTick
-        <= kGameStateStaleAfterMilliseconds) {
-        return;
-    }
-    m_game.stale = true;
-    if (onTelemetry)
-        onTelemetry();
-}
-
-void WinOverlayManager::resetGameState()
-{
-    const bool changed = m_game.received || m_game.available || m_game.stale
-        || m_game.health != 0.0 || m_game.maxHealth != 0.0
-        || m_game.entityId != 0 || m_game.x != 0.0 || m_game.y != 0.0
-        || m_game.z != 0.0 || m_game.loadedEntities != 0
-        || m_game.bedCount != 0 || !m_game.mappingProfile.empty()
-        || m_game.mappingState != L"waiting" || m_game.timestampMs != 0
-        || m_game.sequence != 0;
-
-    m_game = GameSnapshot{};
-    m_lastGameStateReceiptTick = 0;
-
-    if (!m_playerName.empty()) {
-        m_playerName.clear();
-        if (onPlayerName)
-            onPlayerName(L"");
-    }
-    if (m_matchActive) {
-        m_matchActive = false;
-        if (onMatchState)
-            onMatchState(false);
-    }
-    if (changed && onTelemetry)
-        onTelemetry();
 }
 
 bool WinOverlayManager::spawnHelper(const std::wstring &executable,
@@ -1649,8 +1106,6 @@ void WinOverlayManager::helperReaperProc(HANDLE process, HANDLE stderrPipe,
 bool WinOverlayManager::startNativeLoaderFallback()
 {
     m_nativeFallbackAttempted = true;
-    if (cancelTimer)
-        cancelTimer(TimerFallbackGrace);
     if (!targetHasLoadedModule(m_targetPid, L"jvm.dll")
         || trim(targetWindowTitle(m_targetPid)).empty()) {
         fail(L"NATIVE_LOADER_TARGET_REJECTED",
@@ -1686,8 +1141,8 @@ bool WinOverlayManager::startNativeLoaderFallback()
 
     // Give the fallback a full handshake window instead of consuming the
     // remainder of the failed Attach attempt's timer.
-    if (requestTimer)
-        requestTimer(TimerAttach, kAttachTimeoutMilliseconds);
+    m_attachTimerActive = true;
+    m_attachDeadline = ::GetTickCount64() + kAttachTimeoutMilliseconds;
     setState(State::WaitingForAgent);
     return true;
 }
@@ -1890,3 +1345,5 @@ bool WinOverlayManager::targetHasLoadedModule(const uint32_t pid,
 }
 
 } // namespace cli
+
+

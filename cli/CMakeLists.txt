@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.24)
 
-# The lightweight console injector. Pure C++/Win32 â€” it deliberately links no
+# The lightweight console injector. Pure C++/Win32 â€?it deliberately links no
 # Qt module. The executable is a console-subsystem binary (double-clicking it
-# opens the terminal REPL), statically links the MinGW runtime, and deploys
-# the agent DLL, the Attach helper JAR, and the native loader fallback beside
+# opens the minimal TUI), statically links the MinGW runtime, and deploys the
+# agent DLL, the Attach helper JAR, and the native loader fallback beside
 # itself, so the whole runtime is: McInjectorLite.exe + agent/ + tools/.
 
 if(NOT MC_OVERLAY_BUILD_CLI)
@@ -12,25 +12,11 @@ endif()
 
 add_executable(McInjectorLite
     main.cpp
-    ConsoleIo.h
-    ConsoleIo.cpp
-    Json.h
-    Json.cpp
     ThreadQueue.h
-    WinApiKeyStore.h
-    WinApiKeyStore.cpp
-    WinHttpClient.h
-    WinHttpClient.cpp
     WinOverlayManager.h
     WinOverlayManager.cpp
     WinProcessScanner.h
     WinProcessScanner.cpp
-    WinSettings.h
-    WinSettings.cpp
-    HypixelService.h
-    HypixelService.cpp
-    PlayerStatsService.h
-    PlayerStatsService.cpp
 )
 
 target_compile_features(McInjectorLite PRIVATE cxx_std_20)
@@ -46,8 +32,6 @@ target_compile_definitions(McInjectorLite PRIVATE
 target_link_libraries(McInjectorLite PRIVATE
     user32
     advapi32
-    crypt32
-    winhttp
     psapi
 )
 
@@ -73,8 +57,8 @@ set_target_properties(McInjectorLite PROPERTIES
     AUTOUIC OFF
     AUTORCC OFF)
 
-# Deploy the exact runtime OverlayManager locates relative to the executable:
-# agent/McOverlayAgent.dll, tools/McOverlayAttachHelper.jar, and
+# Deploy the exact runtime WinOverlayManager locates relative to the
+# executable: agent/McOverlayAgent.dll, tools/McOverlayAttachHelper.jar, and
 # tools/McOverlayNativeLoader.exe. No other files are required.
 add_custom_command(TARGET McInjectorLite POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E make_directory
@@ -95,3 +79,5 @@ add_custom_command(TARGET McInjectorLite POST_BUILD
         McOverlayNativeLoader
         mc_overlay_attach_helper
     VERBATIM)
+
+

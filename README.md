@@ -104,10 +104,10 @@ without blocking overlay rendering.
 
 ## Lightweight console injector (McInjectorLite)
 
-`cli/` contains a pure C++/Win32 front-end for the same native agent. It links
-no Qt module — not even QtCore — and statically links the MinGW runtime, so
-double-clicking `McInjectorLite.exe` opens a terminal REPL and the entire
-runtime is just:
+`cli/` contains a minimal pure C++/Win32 front-end for the same native agent.
+It links no Qt module — not even QtCore — and statically links the MinGW
+runtime, so double-clicking `McInjectorLite.exe` opens a small terminal TUI
+and the entire runtime is just:
 
 ```text
 McInjectorLite.exe
@@ -116,27 +116,33 @@ tools/McOverlayAttachHelper.jar
 tools/McOverlayNativeLoader.exe
 ```
 
-The console REPL performs the full controller pipeline without the QML
-dashboard and without controller-side in-game feature toggles (the agent's
-own Click GUI still provides those, bound to the single quote by default):
+The TUI does exactly one thing: it scans for running Minecraft
+(javaw.exe/java.exe) processes at startup and lists them.
 
-- `list` scans java.exe/javaw.exe processes (PID, window title, memory);
-- `select <index|PID>` and `attach [index|PID]` validate the target (x64
-  architecture, executable path), start the authenticated named-pipe session,
-  launch the JVM Attach helper, and fall back to `McOverlayNativeLoader.exe`
-  with the same bounded grace/recovery logic as the Qt controller;
-- `detach`, `status` follow the live session, renderer, and `GAME_STATE`
-  telemetry (health, position, entities, beds, mapping profile);
-- `setkey <KEY>` / `clearkey` store the Hypixel API key with Windows DPAPI in
-  the same registry location the Qt dashboard uses, so both front-ends share
-  one key; `query <player>` runs the manual Bed Wars lookup, while the
-  automatic roster pipeline (PLAYER_FOUND → name resolution → serial Hypixel
-  queries → STATS to the in-game table) works exactly as in the dashboard;
-- `bedrescan`, `hotkey <VK>`, and `scale <0-3>` drive the agent commands.
+```text
+McInjectorLite · Minecraft 极简注入器
+--------------------------------------------
+  > 1. Minecraft 1.8.9            PID 12345   2.1 GiB
+    2. javaw.exe                  PID 23456   800 MiB
 
-Configuration and feature defaults live in
-`HKCU\Software\Overlay Studio\MinecraftOverlayManager`, the same QSettings key
-tree as the dashboard.
+状态: 注入成功 — 覆盖层已激活（游戏内按 ' 打开菜单）
+↑/↓ 选择   Enter 注入   R 刷新   Q 退出
+```
+
+- `↑` / `↓` (or `W` / `S`) moves the selection, `Enter` injects into the
+  chosen process, `R` rescans, `Q` / `Esc` exits (detaching gracefully).
+- Injection uses the same pipeline as the Qt controller: target validation
+  (x64 architecture, executable path), the authenticated named-pipe session,
+  the JVM Attach helper, and the visible `McOverlayNativeLoader.exe` fallback
+  with the Forge recovery grace. The screen reports the result — handshake,
+  hook installation, activation, or the structured error — and stays resident
+  to supervise the session; it rescans automatically when the target exits.
+- Hypixel keys, statistics, telemetry, and controller-side feature toggles
+  were deliberately removed; the agent's own Click GUI keeps its stock
+  configuration (single-quote bind).
+
+One-shot scripting form: `McInjectorLite.exe --attach <index|PID>` performs
+the injection, prints the result, and exits (30 s bound).
 
 Build the console injector without any Qt installation:
 
@@ -160,10 +166,6 @@ build-cli/
   tools/McOverlayAttachHelper.jar
   tools/McOverlayNativeLoader.exe
 ```
-
-One-shot command-line forms are available for scripting:
-`--list`, `--attach <index|PID>`, `--key <KEY>`, `--clear-key`,
-`--query <player>`, and `--help`.
 
 ## Hypixel Bed Wars statistics
 

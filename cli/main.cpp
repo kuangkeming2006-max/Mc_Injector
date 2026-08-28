@@ -1,14 +1,12 @@
-// McInjectorLite — a pure C++/Win32 terminal injector for the native
-// Minecraft overlay agent. No Qt, no runtime DLLs: double-clicking the
-// executable opens a console REPL that scans Java processes, manages the
-// DPAPI-protected Hypixel API key, injects the agent (JVM Attach with the
-// visible native-DLL fallback), and follows the live telemetry/statistics
-// pipeline. The agent's own Click GUI still provides in-game feature toggles.
+// McInjectorLite — minimal pure-Win32 Minecraft injector.
+//
+// Double-click the executable: it scans for running Minecraft
+// (javaw.exe/java.exe) processes, lists them in the console, and lets the
+// user pick one with the arrow keys (or W/S). Enter injects the native
+// overlay agent (JVM Attach with the visible native-DLL fallback), R
+// rescans, Q/Esc exits. Injection status is shown on the same screen; the
+// process stays resident so the agent session remains supervised.
 
-#include "ConsoleIo.h"
-#include "HypixelService.h"
-#include "PlayerStatsService.h"
-#include "WinApiKeyStore.h"
 #include "WinOverlayManager.h"
 #include "WinProcessScanner.h"
 
@@ -16,12 +14,8 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
-#include <cmath>
 #include <cstdlib>
 #include <cwctype>
-#include <iterator>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -29,577 +23,247 @@ using namespace cli;
 
 namespace {
 
-WinOverlayManager *g_manager = nullptr;
-HWND g_messageWindow = nullptr;
-HANDLE g_shutdownEvent = nullptr;
+HANDLE g_stdout = nullptr;
+HANDLE g_stdin = nullptr;
+bool g_consoleOutput = false;
+constexpr WORD kDefaultAttributes =
+    FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
+// FOREGROUND_BLACK is 0 and not always defined by MinGW's wincon.h.
+constexpr WORD kSelectedAttributes =
+    BACKGROUND_GREEN | BACKGROUND_INTENSITY;
 
-std::wstring formatDouble(const double value, const int precision = 1)
+void writeText(const std::wstring &text)
 {
-    wchar_t buffer[64]{};
-    swprintf(buffer, std::size(buffer), L"%.*f", precision, value);
-    return buffer;
+    if (g_consoleOutput) {
+        DWORD written = 0;
+        (void) ::WriteConsoleW(g_stdout, text.data(),
+                               static_cast<DWORD>(text.size()), &written, nullptr);
+        return;
+    }
+    const int needed = ::WideCharToMultiByte(CP_UTF8, 0, text.data(),
+                                             static_cast<int>(text.size()),
+                                             nullptr, 0, nullptr, nullptr);
+    if (needed <= 0)
+        return;
+    std::string utf8(static_cast<std::size_t>(needed), '\0');
+    (void) ::WideCharToMultiByte(CP_UTF8, 0, text.data(),
+                                 static_cast<int>(text.size()), utf8.data(),
+                                 needed, nullptr, nullptr);
+    DWORD written = 0;
+    (void) ::WriteFile(g_stdout, utf8.data(), static_cast<DWORD>(utf8.size()),
+                       &written, nullptr);
 }
 
-// ---------------------------------------------------------------------------
-// Timer bridge: the manager's timer ids map directly onto window timers of a
-// message-only window.
-// ---------------------------------------------------------------------------
-
-LRESULT CALLBACK messageWindowProc(HWND window, UINT message, WPARAM wParam,
-                                   LPARAM lParam)
+void writeLine(const std::wstring &line)
 {
-    if (message == WM_TIMER && g_manager != nullptr) {
-        g_manager->onTimer(static_cast<WinOverlayManager::TimerId>(wParam));
-        return 0;
-    }
-    if (message == WM_DESTROY) {
-        ::PostQuitMessage(0);
-        return 0;
-    }
-    return ::DefWindowProcW(window, message, wParam, lParam);
+    writeText(line + L"\r\n");
 }
 
-// ---------------------------------------------------------------------------
-// REPL
-// ---------------------------------------------------------------------------
-
-struct Repl
+void writeLineStyled(const std::wstring &line, const WORD attributes)
 {
-    WinApiKeyStore keys;
+    if (g_consoleOutput)
+        ::SetConsoleTextAttribute(g_stdout, attributes);
+    writeLine(line);
+    if (g_consoleOutput)
+        ::SetConsoleTextAttribute(g_stdout, kDefaultAttributes);
+}
+
+void clearScreen()
+{
+    if (!g_consoleOutput)
+        return;
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    if (::GetConsoleScreenBufferInfo(g_stdout, &info) == FALSE)
+        return;
+    const DWORD size = static_cast<DWORD>(info.dwSize.X * info.dwSize.Y);
+    DWORD written = 0;
+    (void) ::FillConsoleOutputCharacterW(g_stdout, L' ', size, {0, 0}, &written);
+    (void) ::FillConsoleOutputAttribute(g_stdout, info.wAttributes, size,
+                                        {0, 0}, &written);
+    (void) ::SetConsoleCursorPosition(g_stdout, {0, 0});
+}
+
+std::wstring stateText(const WinOverlayManager::State state)
+{
+    switch (state) {
+    case WinOverlayManager::State::Detached:
+        return L"未注入";
+    case WinOverlayManager::State::Validating:
+        return L"正在验证目标进程…";
+    case WinOverlayManager::State::StartingIpc:
+        return L"正在建立 IPC 管道…";
+    case WinOverlayManager::State::LaunchingAttachHelper:
+        return L"正在启动注入器…";
+    case WinOverlayManager::State::WaitingForAgent:
+        return L"等待 Agent 认证握手…";
+    case WinOverlayManager::State::WaitingForOpenGL:
+        return L"已注入 — 等待游戏 OpenGL 首帧…";
+    case WinOverlayManager::State::Active:
+        return L"注入成功 — 覆盖层已激活（游戏内按 ' 打开菜单）";
+    case WinOverlayManager::State::Detaching:
+        return L"正在断开…";
+    case WinOverlayManager::State::Error:
+        return L"注入失败";
+    }
+    return {};
+}
+
+struct App
+{
     WinOverlayManager manager;
-    HypixelService hypixel{&keys};
-    PlayerStatsService stats{&keys};
-
     std::vector<JavaProcess> processes;
-    uint32_t selectedPid = 0;
-    uint64_t lastPrintedSequence = 0;
-    unsigned long long lastTelemetryPrintTick = 0;
-    bool quitting = false;
-    bool helpShown = false;
+    int selection = 0;
+    bool dirty = true;
+    bool running = true;
+    bool consoleInput = false;
 
-    bool start()
+    void init()
     {
-        g_manager = &manager;
-
-        // Freshness marking runs every second regardless of session state.
-        manager.requestTimer = [](const WinOverlayManager::TimerId id,
-                                  const UINT milliseconds) {
-            if (g_messageWindow != nullptr) {
-                ::SetTimer(g_messageWindow, static_cast<UINT_PTR>(id),
-                           milliseconds, nullptr);
-            }
+        processes = scanJavaProcesses();
+        manager.onStateChanged = [this] { dirty = true; };
+        manager.onStatus = [this](const std::wstring &) { dirty = true; };
+        manager.onError = [this](const std::wstring &, const std::wstring &) {
+            dirty = true;
         };
-        manager.cancelTimer = [](const WinOverlayManager::TimerId id) {
-            if (g_messageWindow != nullptr)
-                ::KillTimer(g_messageWindow, static_cast<UINT_PTR>(id));
-        };
-        manager.requestTimer(WinOverlayManager::TimerFreshness, 1000);
-
-        wireCallbacks();
-
-        hypixel.start();
-        stats.start();
-        return true;
-    }
-
-    void wireCallbacks()
-    {
-        const auto publishHypixelToAgent = [this] {
-            const HypixelService::Result &result = hypixel.result();
-            const std::wstring status = hypixel.errorMessage().empty()
-                ? hypixel.statusMessage()
-                : hypixel.errorMessage();
-            manager.publishHypixelResult(
-                static_cast<int>(hypixel.state()), result.uuid,
-                result.displayName, result.wins, result.losses,
-                result.finalKills, result.finalDeaths, result.bedsBroken,
-                result.bedsLost, result.winRate, result.fkdr, status);
-        };
-
-        manager.onStateChanged = [this] { console::print(L"[状态] " + stateLabel()); };
-        manager.onStatus = [this](const std::wstring &status) {
-            console::print(L"[状态] " + status);
-        };
-        manager.onError = [this](const std::wstring &code,
-                                 const std::wstring &detail) {
-            if (!code.empty())
-                console::print(L"[错误] " + code + L": " + detail);
-        };
-        manager.onRenderer = [](const std::wstring &renderer) {
-            if (!renderer.empty())
-                console::print(L"[渲染器] " + renderer);
-        };
-        manager.onTelemetry = [this] { printTelemetry(); };
-        manager.onPlayerName = [this](const std::wstring &name) {
-            if (!name.empty())
-                console::print(L"[玩家] 当前玩家: " + name);
-        };
-        manager.onMatchState = [this](const bool active) {
-            console::print(active
-                               ? L"[对局] 进入 Bed Wars 对局，自动统计查询已启动"
-                               : L"[对局] Bed Wars 对局结束");
-        };
-        manager.onPlayerFound = [this](const std::wstring &playerName,
-                                       const std::wstring &teamPrefix) {
-            console::print(L"[队伍] 发现玩家 " + playerName + L"（队伍色 "
-                           + teamPrefix + L"），已进入自动查询队列");
-            stats.enqueuePlayer(playerName, teamPrefix);
-        };
-        manager.onHypixelQuery = [this](const std::wstring &playerId) {
-            console::print(L"[Hypixel] 游戏内请求查询 " + playerId + L" ...");
-            hypixel.lookupPlayer(playerId);
-        };
-        manager.onTargetExited = [this](const uint32_t pid) {
-            console::print(L"[提示] 目标进程 " + std::to_wstring(pid)
-                           + L" 已退出，注入会话结束。");
-            selectedPid = 0;
+        manager.onRenderer = [this](const std::wstring &) { dirty = true; };
+        manager.onTargetExited = [this](uint32_t) {
             processes = scanJavaProcesses();
-            printProcesses();
-        };
-        manager.onMenuHotkeyChanged = [](const int virtualKey) {
-            console::print(L"[设置] 游戏内 Click GUI 呼出键已更新为虚拟键码 "
-                           + std::to_wstring(virtualKey));
-        };
-        manager.onGuiScaleIndexChanged = [](const int index) {
-            console::print(L"[设置] 游戏内界面尺寸已更新为 "
-                           + std::to_wstring(index));
-        };
-        manager.onSessionReady = [this, publishHypixelToAgent] {
-            publishHypixelToAgent();
-        };
-
-        stats.onStatsReady = [this](const std::wstring &playerName,
-                                    const std::wstring &teamPrefix,
-                                    const int stars, const double fkdr,
-                                    const int level) {
-            manager.publishPlayerStats(playerName, teamPrefix, stars, fkdr,
-                                       level);
-            console::print(L"[统计] " + playerName + L"（" + teamPrefix
-                           + L"） 星级 " + std::to_wstring(stars)
-                           + L"  FKDR " + formatDouble(fkdr, 2)
-                           + L"  网络等级 " + std::to_wstring(level));
-        };
-        stats.onStatsFailed = [this](const std::wstring &playerName,
-                                     const std::wstring &reason) {
-            manager.publishPlayerStatsError(playerName, reason);
-            console::print(L"[统计] " + playerName + L" 查询失败: " + reason);
-        };
-
-        hypixel.onChanged = [this, publishHypixelToAgent] {
-            publishHypixelToAgent();
-        };
-        hypixel.onResultReady = [this] {
-            const HypixelService::Result &result = hypixel.result();
-            if (result.displayName.empty())
-                return;
-            console::print(L"[Hypixel] " + result.displayName
-                           + L"  胜 " + std::to_wstring(result.wins)
-                           + L"  负 " + std::to_wstring(result.losses)
-                           + L"  终杀 " + std::to_wstring(result.finalKills)
-                           + L"  终死 " + std::to_wstring(result.finalDeaths)
-                           + L"  拆床 " + std::to_wstring(result.bedsBroken)
-                           + L"  失床 " + std::to_wstring(result.bedsLost)
-                           + L"  胜率 " + formatDouble(result.winRate, 2)
-                           + L"  FKDR " + formatDouble(result.fkdr, 2));
+            selection = 0;
+            dirty = true;
         };
     }
 
-    std::wstring stateLabel() const
-    {
-        switch (manager.state()) {
-        case WinOverlayManager::State::Detached:
-            return L"已断开（等待选择进程）";
-        case WinOverlayManager::State::Validating:
-            return L"正在验证目标进程…";
-        case WinOverlayManager::State::StartingIpc:
-            return L"正在建立 IPC 管道…";
-        case WinOverlayManager::State::LaunchingAttachHelper:
-            return L"正在启动注入器…";
-        case WinOverlayManager::State::WaitingForAgent:
-            return L"等待 Agent 认证握手…";
-        case WinOverlayManager::State::WaitingForOpenGL:
-            return L"等待 Minecraft 的 OpenGL 首帧…";
-        case WinOverlayManager::State::Active:
-            return L"覆盖层已激活";
-        case WinOverlayManager::State::Detaching:
-            return L"正在断开…";
-        case WinOverlayManager::State::Error:
-            return L"错误";
-        }
-        return {};
-    }
-
-    void printTelemetry()
-    {
-        const GameSnapshot &game = manager.game();
-        if (!game.received)
-            return;
-        if (lastPrintedSequence == game.sequence
-            && lastTelemetryPrintTick != 0) {
-            return;
-        }
-        const unsigned long long now = ::GetTickCount64();
-        if (lastTelemetryPrintTick != 0 && now - lastTelemetryPrintTick < 1000)
-            return;
-        lastPrintedSequence = game.sequence;
-        lastTelemetryPrintTick = now;
-
-        if (!game.available) {
-            console::print(L"[遥测] 映射未就绪: " + game.mappingProfile + L" ("
-                           + game.mappingState + L")");
-            return;
-        }
-        console::print(L"[遥测] 生命 " + formatDouble(game.health) + L"/"
-                       + formatDouble(game.maxHealth)
-                       + L"  坐标 (" + formatDouble(game.x) + L", "
-                       + formatDouble(game.y) + L", "
-                       + formatDouble(game.z) + L")"
-                       + L"  实体 " + std::to_wstring(game.loadedEntities)
-                       + L"  床 " + std::to_wstring(game.bedCount)
-                       + L"  映射 " + game.mappingProfile + L"("
-                       + game.mappingState + L")"
-                       + L"  seq " + std::to_wstring(game.sequence));
-    }
-
-    void printBanner()
-    {
-        console::print(L"======================================================");
-        console::print(L"  McInjectorLite — 轻量版 Minecraft 覆盖层注入器（纯 Win32 终端版）");
-        console::print(L"  与 MinecraftOverlayManager 共用同一 Agent 与注入后端");
-        console::print(L"======================================================");
-    }
-
-    void printHelp()
-    {
-        helpShown = true;
-        console::print(L"命令说明:");
-        console::print(L"  进程选择与注入:");
-        console::print(L"    list, l          扫描运行中的 java.exe / javaw.exe 进程");
-        console::print(L"    select <序号|PID> 选择要注入的进程");
-        console::print(L"    attach [序号|PID] 注入覆盖层（优先 JVM Attach，自动回退原生 DLL 加载）");
-        console::print(L"    detach, d        优雅断开当前注入会话");
-        console::print(L"    status, st       查看会话状态与游戏遥测");
-        console::print(L"");
-        console::print(L"  Hypixel API:");
-        console::print(L"    key, k           查看 API Key 状态");
-        console::print(L"    setkey <KEY>     保存 Hypixel API Key（Windows DPAPI 用户级加密）");
-        console::print(L"    clearkey         删除已保存的 API Key");
-        console::print(L"    query <玩家名>   手动查询玩家的 Bed Wars 数据");
-        console::print(L"");
-        console::print(L"  游戏内控制:");
-        console::print(L"    bedrescan        请求立即刷新床缓存");
-        console::print(L"    hotkey <VK>      设置 Click GUI 呼出键虚拟键码（默认 0xDE 单引号）");
-        console::print(L"    scale <0-3>      设置游戏内界面尺寸 0=S 1=M 2=L 3=XL");
-        console::print(L"");
-        console::print(L"  其他:");
-        console::print(L"    help, ?          显示本帮助");
-        console::print(L"    quit, exit       退出");
-        console::print(L"");
-        console::print(L"  游戏内按单引号键打开 Click GUI，可开关各项功能。");
-    }
-
-    void printProcesses()
+    void clampSelection()
     {
         if (processes.empty()) {
-            console::print(L"（未发现 java.exe/javaw.exe 进程。请先启动 Minecraft 1.8.9。）");
+            selection = 0;
             return;
         }
-        console::print(L"序号   PID       窗口标题                                    内存");
-        for (std::size_t index = 0; index < processes.size(); ++index) {
-            const JavaProcess &process = processes.at(index);
-            const std::wstring marker =
-                process.pid == selectedPid ? L"* " : L"  ";
-            std::wstring title = process.windowTitle;
-            if (title.size() > 40)
-                title = title.substr(0, 40);
-            while (title.size() < 40)
-                title += L' ';
-            console::print(marker + std::to_wstring(index + 1) + L"  "
-                           + std::to_wstring(process.pid) + L"    "
-                           + title + L" " + process.memoryText);
-        }
+        if (selection < 0)
+            selection = 0;
+        if (selection >= static_cast<int>(processes.size()))
+            selection = static_cast<int>(processes.size()) - 1;
     }
 
-    void printKeyStatus()
+    void rescan()
     {
-        console::print(std::wstring(L"Hypixel Key: ")
-                       + (keys.configured() ? L"已配置（DPAPI 加密存储）"
-                                            : L"未配置（输入 setkey <KEY> 保存）")
-                       + L" — " + keys.statusMessage());
-    }
-
-    void printSessionStatus()
-    {
-        console::print(L"会话状态: " + stateLabel());
-        if (manager.targetPid() != 0) {
-            console::print(L"目标进程: PID " + std::to_wstring(manager.targetPid())
-                           + L" — " + manager.targetTitle());
-        }
-        if (!manager.renderer().empty())
-            console::print(L"渲染器: " + manager.renderer());
-        const GameSnapshot &game = manager.game();
-        if (game.received) {
-            console::print(std::wstring(L"遥测: ")
-                           + (game.available ? L"可用" : L"映射不可用")
-                           + L" | 生命 " + formatDouble(game.health)
-                           + L"/" + formatDouble(game.maxHealth)
-                           + L" | 坐标 (" + formatDouble(game.x) + L", "
-                           + formatDouble(game.y) + L", "
-                           + formatDouble(game.z) + L")"
-                           + L" | 实体 " + std::to_wstring(game.loadedEntities)
-                           + L" | 床 " + std::to_wstring(game.bedCount)
-                           + L" | 映射 " + game.mappingProfile + L" ("
-                           + game.mappingState + L")"
-                           + L" | seq " + std::to_wstring(game.sequence));
-        } else {
-            console::print(L"遥测: 尚未收到 GAME_STATE 数据");
-        }
-        if (!manager.playerName().empty())
-            console::print(L"当前玩家: " + manager.playerName());
-        console::print(std::wstring(L"对局: ")
-                       + (manager.matchActive() ? L"Bed Wars 进行中" : L"无"));
-        printKeyStatus();
-    }
-
-    uint32_t parseTarget(const std::wstring &token) const
-    {
-        wchar_t *end = nullptr;
-        const unsigned long value = wcstoul(token.c_str(), &end, 10);
-        if (end == token.c_str() || *end != L'\0' || value == 0
-            || value > UINT32_MAX) {
-            return 0;
-        }
-        const uint32_t numeric = static_cast<uint32_t>(value);
-        for (const JavaProcess &process : processes) {
-            if (process.pid == numeric)
-                return numeric;
-        }
-        if (numeric <= processes.size())
-            return processes.at(numeric - 1).pid;
-        return 0;
-    }
-
-    void handleSelect(const std::vector<std::wstring> &parts)
-    {
-        if (parts.size() < 2) {
-            if (selectedPid != 0)
-                console::print(L"当前选择: PID " + std::to_wstring(selectedPid));
-            else
-                console::print(L"尚未选择进程（select <序号|PID>，用 list 查看列表）");
-            return;
-        }
         processes = scanJavaProcesses();
-        const uint32_t pid = parseTarget(parts.at(1));
-        if (pid == 0) {
-            console::print(L"[错误] 无效的序号/PID: " + parts.at(1)
-                           + L"（先运行 list 查看进程）");
-            return;
-        }
-        selectedPid = pid;
-        console::print(L"已选择 PID " + std::to_wstring(pid)
-                       + L"（输入 attach 注入）");
+        clampSelection();
+        dirty = true;
     }
 
-    void handleAttach(const std::vector<std::wstring> &parts)
+    void attachSelection()
     {
-        if (manager.busy()) {
-            console::print(L"[提示] 已有注入操作在进行中，请稍候。");
+        if (manager.busy())
+            return;
+        if (processes.empty()) {
+            rescan();
             return;
         }
-        uint32_t pid = 0;
-        if (parts.size() > 1) {
-            processes = scanJavaProcesses();
-            pid = parseTarget(parts.at(1));
-            if (pid == 0) {
-                console::print(L"[错误] 无效的序号/PID: " + parts.at(1)
-                               + L"（先运行 list 查看进程）");
-                return;
-            }
-        } else {
-            pid = selectedPid;
-            if (pid == 0) {
-                processes = scanJavaProcesses();
-                if (processes.size() == 1) {
-                    pid = processes.front().pid;
-                } else {
-                    console::print(L"[提示] 请先选择进程: attach <序号|PID>（运行 list 查看）");
-                    return;
-                }
-            }
-        }
-        selectedPid = pid;
-        console::print(L"正在注入 PID " + std::to_wstring(pid) + L" …");
-        manager.attachToProcess(pid);
+        clampSelection();
+        manager.attachToProcess(processes.at(static_cast<std::size_t>(selection)).pid);
+        dirty = true;
     }
 
-    void handleCommand(const std::wstring &line)
+    void consumeInput()
     {
-        std::vector<std::wstring> parts;
-        std::size_t begin = 0;
-        while (begin < line.size()) {
-            while (begin < line.size() && iswspace(line[begin]) != 0)
-                ++begin;
-            if (begin >= line.size())
+        for (int iteration = 0; iteration < 32 && running; ++iteration) {
+            INPUT_RECORD record{};
+            DWORD count = 0;
+            if (::PeekConsoleInputW(g_stdin, &record, 1, &count) == FALSE
+                || count == 0) {
                 break;
-            std::size_t end = line.find(L' ', begin);
-            if (end == std::wstring::npos)
-                end = line.size();
-            parts.push_back(line.substr(begin, end - begin));
-            begin = end + 1;
+            }
+            if (::ReadConsoleInputW(g_stdin, &record, 1, &count) == FALSE
+                || count != 1) {
+                break;
+            }
+            if (record.EventType != KEY_EVENT
+                || record.Event.KeyEvent.bKeyDown == FALSE) {
+                continue;
+            }
+            handleKey(record.Event.KeyEvent.wVirtualKeyCode,
+                      record.Event.KeyEvent.uChar.UnicodeChar);
         }
-        if (parts.empty()) {
-            console::prompt();
-            return;
-        }
-
-        std::wstring command = parts.front();
-        for (auto &character : command)
-            character = towlower(character);
-
-        if (command == L"help" || command == L"?" || command == L"h") {
-            printHelp();
-        } else if (command == L"list" || command == L"scan" || command == L"l") {
-            processes = scanJavaProcesses();
-            printProcesses();
-        } else if (command == L"select" || command == L"s") {
-            handleSelect(parts);
-        } else if (command == L"attach" || command == L"a") {
-            handleAttach(parts);
-        } else if (command == L"detach" || command == L"d") {
-            if (!manager.attached()
-                && manager.state() == WinOverlayManager::State::Detached) {
-                console::print(L"[提示] 当前没有注入会话。");
-            } else {
-                console::print(L"正在断开…");
-                manager.detach();
-            }
-        } else if (command == L"status" || command == L"st") {
-            printSessionStatus();
-        } else if (command == L"key" || command == L"k") {
-            printKeyStatus();
-        } else if (command == L"setkey") {
-            if (parts.size() < 2) {
-                console::print(L"用法: setkey <API_KEY>（在 developer.hypixel.net 注册应用获取）");
-            } else if (!keys.saveKey(parts.at(1))) {
-                console::print(L"[错误] " + keys.statusMessage());
-            } else {
-                console::print(L"[密钥] " + keys.statusMessage());
-                hypixel.reloadConfiguration();
-                stats.reloadConfiguration();
-            }
-        } else if (command == L"clearkey") {
-            keys.clearKey();
-            console::print(L"[密钥] " + keys.statusMessage());
-            hypixel.reloadConfiguration();
-            stats.reloadConfiguration();
-        } else if (command == L"query" || command == L"q") {
-            if (parts.size() < 2) {
-                console::print(L"用法: query <玩家名>");
-            } else {
-                console::print(L"[Hypixel] 正在查询 " + parts.at(1) + L" …");
-                hypixel.lookupPlayer(parts.at(1));
-            }
-        } else if (command == L"bedrescan") {
-            if (!manager.attached()) {
-                console::print(L"[提示] 尚未注入任何进程。");
-            } else {
-                manager.refreshBedCache();
-                console::print(L"[提示] 已请求刷新床缓存。");
-            }
-        } else if (command == L"hotkey") {
-            if (parts.size() < 2) {
-                console::print(L"用法: hotkey <虚拟键码>（当前: "
-                               + std::to_wstring(manager.menuHotkey()) + L"）");
-            } else {
-                wchar_t *end = nullptr;
-                const long virtualKey = wcstol(parts.at(1).c_str(), &end, 10);
-                if (end == parts.at(1).c_str() || *end != L'\0'
-                    || virtualKey < 8 || virtualKey > 254) {
-                    console::print(L"[错误] 虚拟键码需在 8..254 之间。");
-                } else {
-                    manager.setMenuHotkey(static_cast<int>(virtualKey));
-                }
-            }
-        } else if (command == L"scale") {
-            if (parts.size() < 2) {
-                console::print(L"用法: scale <0-3>（0=S 1=M 2=L 3=XL，当前: "
-                               + std::to_wstring(manager.guiScaleIndex()) + L"）");
-            } else {
-                wchar_t *end = nullptr;
-                const long index = wcstol(parts.at(1).c_str(), &end, 10);
-                if (end == parts.at(1).c_str() || *end != L'\0'
-                    || index < 0 || index > 3) {
-                    console::print(L"[错误] 尺寸需在 0..3 之间。");
-                } else {
-                    manager.setGuiScaleIndex(static_cast<int>(index));
-                }
-            }
-        } else if (command == L"quit" || command == L"exit") {
-            console::print(L"再见。注入会话将优雅断开。");
-            quitting = true;
-            ::SetEvent(g_shutdownEvent);
-            return;
-        } else {
-            console::print(L"[错误] 未知命令: " + command
-                           + L"（输入 help 查看帮助）");
-        }
-        console::prompt();
     }
 
-    void processArguments(const std::vector<std::wstring> &arguments)
+    void handleKey(const WORD virtualKey, const wchar_t character)
     {
-        for (std::size_t index = 1; index < arguments.size(); ++index) {
-            const std::wstring &argument = arguments.at(index);
-            if (argument == L"--help" || argument == L"-h") {
-                printHelp();
-                ::SetEvent(g_shutdownEvent);
-                return;
-            }
-            if (argument == L"--list") {
-                processes = scanJavaProcesses();
-                printProcesses();
-                ::SetEvent(g_shutdownEvent);
-                return;
-            }
-            if ((argument == L"--attach" || argument == L"--pid")
-                && index + 1 < arguments.size()) {
-                processes = scanJavaProcesses();
-                const uint32_t pid = parseTarget(arguments.at(index + 1));
-                ++index;
-                if (pid == 0) {
-                    console::print(L"[错误] 无效的进程序号/PID: "
-                                   + arguments.at(index));
-                } else {
-                    selectedPid = pid;
-                    manager.attachToProcess(pid);
-                }
-                continue;
-            }
-            if (argument == L"--key" && index + 1 < arguments.size()) {
-                ++index;
-                (void) keys.saveKey(arguments.at(index));
-                console::print(L"[密钥] " + keys.statusMessage());
-                hypixel.reloadConfiguration();
-                stats.reloadConfiguration();
-                continue;
-            }
-            if (argument == L"--clear-key") {
-                keys.clearKey();
-                console::print(L"[密钥] " + keys.statusMessage());
-                hypixel.reloadConfiguration();
-                stats.reloadConfiguration();
-                continue;
-            }
-            if (argument == L"--query" && index + 1 < arguments.size()) {
-                ++index;
-                console::print(L"[Hypixel] 正在查询 " + arguments.at(index)
-                               + L" …");
-                hypixel.lookupPlayer(arguments.at(index));
-                continue;
-            }
-            console::print(L"[错误] 未知参数: " + argument);
-            ::SetEvent(g_shutdownEvent);
+        const bool up = virtualKey == VK_UP || character == L'w' || character == L'W';
+        const bool down = virtualKey == VK_DOWN || character == L's' || character == L'S';
+        const bool quit = virtualKey == VK_ESCAPE || character == L'q' || character == L'Q';
+
+        if (quit) {
+            running = false;
             return;
+        }
+        if (character == L'r' || character == L'R') {
+            rescan();
+            return;
+        }
+
+        if (manager.state() == WinOverlayManager::State::Error) {
+            if (virtualKey == VK_RETURN)
+                rescan();
+            return;
+        }
+
+        if (up) {
+            --selection;
+            clampSelection();
+            dirty = true;
+        } else if (down) {
+            ++selection;
+            clampSelection();
+            dirty = true;
+        } else if (virtualKey == VK_RETURN) {
+            attachSelection();
+        }
+    }
+
+    void render()
+    {
+        clearScreen();
+        writeLine(L"McInjectorLite · Minecraft 极简注入器");
+        writeLine(L"--------------------------------------------");
+        if (processes.empty()) {
+            writeLine(L"");
+            writeLine(L"  未发现 Minecraft 进程 — 按 R 重新扫描");
+        } else {
+            for (std::size_t index = 0; index < processes.size(); ++index) {
+                const JavaProcess &process = processes.at(index);
+                std::wstring title = process.windowTitle;
+                if (title.size() > 36) {
+                    title.resize(36);
+                    title += L"...";
+                }
+                while (title.size() < 39)
+                    title += L' ';
+                const std::wstring row =
+                    (static_cast<int>(index) == selection ? L"  > " : L"    ")
+                    + std::to_wstring(index + 1) + L". " + title
+                    + L" PID " + std::to_wstring(process.pid)
+                    + L"   " + process.memoryText;
+                if (static_cast<int>(index) == selection) {
+                    writeLineStyled(row, kSelectedAttributes);
+                } else {
+                    writeLine(row);
+                }
+            }
+        }
+        writeLine(L"");
+        writeLine(L"状态: " + stateText(manager.state()));
+        if (manager.state() == WinOverlayManager::State::Error) {
+            writeLine(L"错误: " + manager.errorCode() + L" — "
+                      + manager.errorDetail());
+        } else if (!manager.statusMessage().empty()
+                   && manager.state() != WinOverlayManager::State::Detached) {
+            writeLine(L"详情: " + manager.statusMessage());
+        }
+        if (manager.state() == WinOverlayManager::State::Error) {
+            writeLine(L"Enter 返回列表   Q 退出");
+        } else {
+            writeLine(L"↑/↓ 选择   Enter 注入   R 刷新   Q 退出");
         }
     }
 };
@@ -608,119 +272,126 @@ struct Repl
 
 int wmain(int argc, wchar_t **argv)
 {
-    console::initialize();
+    g_stdout = ::GetStdHandle(STD_OUTPUT_HANDLE);
+    g_stdin = ::GetStdHandle(STD_INPUT_HANDLE);
 
-    g_shutdownEvent = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
-
-    // Message-only window carrying the manager's one-shot/repeating timers.
-    const HINSTANCE instance = ::GetModuleHandleW(nullptr);
-    WNDCLASSW windowClass{};
-    windowClass.lpfnWndProc = messageWindowProc;
-    windowClass.hInstance = instance;
-    windowClass.lpszClassName = L"McInjectorLiteMessageWindow";
-    if (::RegisterClassW(&windowClass) == 0
-        && ::GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
-        console::print(L"[错误] 无法注册消息窗口类。");
-        return EXIT_FAILURE;
-    }
-    g_messageWindow = ::CreateWindowExW(
-        0, windowClass.lpszClassName, L"McInjectorLite", 0, 0, 0, 0, 0,
-        HWND_MESSAGE, nullptr, instance, nullptr);
-    if (g_messageWindow == nullptr) {
-        console::print(L"[错误] 无法创建消息窗口。");
-        return EXIT_FAILURE;
+    DWORD consoleMode = 0;
+    g_consoleOutput = ::GetConsoleMode(g_stdout, &consoleMode) != FALSE;
+    DWORD originalInputMode = 0;
+    const bool consoleInput =
+        ::GetConsoleMode(g_stdin, &originalInputMode) != FALSE;
+    if (consoleInput) {
+        // Raw key input: no line buffering, no echo. Ctrl+C processing stays.
+        (void) ::SetConsoleMode(g_stdin, (originalInputMode
+                                          & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT))
+                                             | ENABLE_EXTENDED_FLAGS);
     }
 
-    Repl repl;
-    if (!repl.start()) {
-        console::print(L"[错误] 初始化失败。");
-        return EXIT_FAILURE;
-    }
+    App app;
+    app.init();
+    app.consoleInput = consoleInput;
 
-    // Startup banner, key status, and the initial process list.
-    repl.printBanner();
-    repl.printKeyStatus();
-    repl.processes = scanJavaProcesses();
-    repl.printProcesses();
-    repl.printHelp();
-    console::print(L"");
-    console::prompt();
-
-    repl.processArguments(std::vector<std::wstring>(argv, argv + argc));
-
-    // Blocking stdin reader thread feeding the REPL through the main loop.
-    console::startInput([&repl](const std::optional<std::wstring> &line) {
-        if (!line.has_value()) {
-            console::print(L"");
-            console::print(L"[提示] 标准输入已关闭，退出。");
-            ::SetEvent(g_shutdownEvent);
-            return;
+    // Optional one-shot form: McInjectorLite.exe --attach <序号|PID>
+    for (int index = 1; index < argc; ++index) {
+        if (std::wstring(argv[index]) == L"--attach" && index + 1 < argc) {
+            app.rescan();
+            wchar_t *end = nullptr;
+            const unsigned long value = wcstoul(argv[index + 1], &end, 10);
+            if (end != argv[index + 1] && *end == L'\0' && value > 0) {
+                for (std::size_t row = 0; row < app.processes.size(); ++row) {
+                    if (app.processes.at(row).pid == value
+                        || value == row + 1) {
+                        app.selection = static_cast<int>(row);
+                        break;
+                    }
+                }
+                app.attachSelection();
+            }
+            ++index;
         }
-        repl.handleCommand(*line);
-    });
+    }
 
-    const std::array<HANDLE, 5> waitHandles = {
-        console::inputEvent(), repl.manager.pipeEvent(),
-        repl.hypixel.event(), repl.stats.event(), g_shutdownEvent};
+    app.render();
 
-    bool running = true;
-    while (running && !repl.quitting) {
+    // Scripted mode (redirected stdin, e.g. `McInjectorLite.exe --attach 2`):
+    // no TUI. With --attach, wait for the injection result and exit; without
+    // it, the process list above is the whole output.
+    if (!consoleInput) {
+        const bool attached = app.manager.targetPid() != 0
+            || app.manager.busy()
+            || app.manager.state() == WinOverlayManager::State::Error;
+        if (!attached)
+            return EXIT_SUCCESS;
+
+        const std::array<HANDLE, 2> scriptHandles = {
+            app.manager.pipeEvent(), app.manager.helperEvent()};
+        const unsigned long long deadline =
+            ::GetTickCount64() + 30'000ULL; // bound scripted runs
+        const auto finished = [&app] {
+            return app.manager.state() == WinOverlayManager::State::Active
+                || app.manager.state() == WinOverlayManager::State::WaitingForOpenGL
+                || app.manager.state() == WinOverlayManager::State::Error;
+        };
+        while (app.running && !finished() && ::GetTickCount64() < deadline) {
+            const DWORD result = ::MsgWaitForMultipleObjectsEx(
+                static_cast<DWORD>(scriptHandles.size()), scriptHandles.data(),
+                400, 0, 0);
+            if (result == WAIT_OBJECT_0 || result == WAIT_OBJECT_0 + 1)
+                app.manager.processMessages();
+            app.manager.onTick();
+            app.manager.postDrain();
+            if (app.dirty) {
+                app.render();
+                app.dirty = false;
+            }
+        }
+        if (app.manager.state() == WinOverlayManager::State::Active) {
+            writeLine(L"");
+            writeLine(L"注入成功 — 覆盖层已激活");
+        } else if (app.manager.state() == WinOverlayManager::State::WaitingForOpenGL) {
+            writeLine(L"");
+            writeLine(L"注入成功 — Agent 已加载，等待游戏首帧");
+        } else if (app.manager.state() == WinOverlayManager::State::Error) {
+            writeLine(L"");
+            writeLine(L"注入失败: " + app.manager.errorCode() + L" — "
+                      + app.manager.errorDetail());
+        } else {
+            writeLine(L"");
+            writeLine(L"注入超时或未完成");
+        }
+        app.manager.shutdown();
+        return EXIT_SUCCESS;
+    }
+
+    const std::array<HANDLE, 3> waitHandles = {
+        g_stdin, app.manager.pipeEvent(), app.manager.helperEvent()};
+
+    while (app.running) {
         const DWORD result = ::MsgWaitForMultipleObjectsEx(
-            static_cast<DWORD>(waitHandles.size()), waitHandles.data(),
-            INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
-        const DWORD index = result - WAIT_OBJECT_0;
+            static_cast<DWORD>(waitHandles.size()), waitHandles.data(), 400,
+            QS_ALLINPUT, 0);
 
-        if (result == WAIT_OBJECT_0 + waitHandles.size()) {
-            // A message arrived (WM_TIMER or WM_PAINT on the hidden window).
+        if (result == WAIT_OBJECT_0) {
+            app.consumeInput();
+        } else if (result == WAIT_OBJECT_0 + 1 || result == WAIT_OBJECT_0 + 2) {
+            app.manager.processMessages();
+        } else if (result == WAIT_OBJECT_0 + waitHandles.size()) {
             MSG message{};
             while (::PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE) != FALSE) {
-                if (message.message == WM_QUIT) {
-                    running = false;
-                    break;
-                }
                 ::TranslateMessage(&message);
                 ::DispatchMessageW(&message);
             }
-            continue;
         }
 
-        if (result >= WAIT_OBJECT_0
-            && result < WAIT_OBJECT_0 + waitHandles.size()) {
-            switch (index) {
-            case 0:
-                console::drainInput();
-                break;
-            case 1:
-                repl.manager.processMessages();
-                break;
-            case 2:
-                repl.hypixel.processMessages();
-                break;
-            case 3:
-                repl.stats.processMessages();
-                break;
-            case 4:
-                running = false;
-                break;
-            default:
-                break;
-            }
-            repl.manager.postDrain();
-            continue;
+        app.manager.onTick();
+        app.manager.postDrain();
+        if (app.dirty) {
+            app.render();
+            app.dirty = false;
         }
-        // WAIT_TIMEOUT and failures simply loop again.
     }
 
-    // Graceful teardown: stop the network workers, then the agent session.
-    repl.hypixel.shutdown();
-    repl.stats.shutdown();
-    repl.manager.shutdown();
-    console::stopInput();
-    g_manager = nullptr;
-    if (g_messageWindow != nullptr) {
-        ::DestroyWindow(g_messageWindow);
-        g_messageWindow = nullptr;
-    }
-    ::CloseHandle(g_shutdownEvent);
+    app.manager.shutdown();
+    (void) ::SetConsoleMode(g_stdin, originalInputMode);
     return EXIT_SUCCESS;
 }
