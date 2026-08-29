@@ -6,23 +6,31 @@ import McOverlay 1.0
 ApplicationWindow {
     id: app
 
-    width: 1420
-    height: 880
+    width: AppSettings.windowWidth
+    height: AppSettings.windowHeight
     minimumWidth: 1040
     minimumHeight: 680
     visible: true
     title: "Java Overlay Studio"
     color: backgroundColor
 
-    readonly property color backgroundColor: "#F7F2FA"
-    readonly property color surfaceColor: "#FFFBFE"
-    readonly property color surfaceVariant: "#E7E0EC"
-    readonly property color primaryColor: "#6750A4"
-    readonly property color primaryContainer: "#EADDFF"
-    readonly property color primaryContainerText: "#21005D"
-    readonly property color textColor: "#1D1B20"
-    readonly property color secondaryTextColor: "#49454F"
-    readonly property color outlineColor: "#79747E"
+    readonly property bool darkTheme: AppSettings.darkTheme
+    readonly property color backgroundColor: darkTheme ? "#101217" : "#F7F2FA"
+    readonly property color surfaceColor: darkTheme ? "#181B21" : "#FFFBFE"
+    readonly property color surfaceElevatedColor: darkTheme ? "#20242C" : "#FFFFFF"
+    readonly property color surfaceVariant: darkTheme ? "#2A2E37" : "#E7E0EC"
+    readonly property color primaryColor: darkTheme ? "#C9B7FF" : "#6750A4"
+    readonly property color primaryContainer: darkTheme ? "#493B68" : "#EADDFF"
+    readonly property color primaryContainerText: darkTheme ? "#F0E8FF" : "#21005D"
+    readonly property color textColor: darkTheme ? "#F1EEF4" : "#1D1B20"
+    readonly property color secondaryTextColor: darkTheme ? "#C9C3CF" : "#49454F"
+    readonly property color outlineColor: darkTheme ? "#97919D" : "#79747E"
+    readonly property color outlineVariantColor: darkTheme ? "#3C4049" : "#DED8E2"
+    readonly property color hoverColor: darkTheme ? "#30343D" : "#E3DDE7"
+    readonly property color selectedIconColor: darkTheme ? "#5B4B7D" : "#D7C7F5"
+    readonly property color onPrimaryColor: darkTheme ? "#24163E" : "#FFFFFF"
+    readonly property color primaryContainerMutedText: darkTheme ? "#D4C4F4" : "#4F378B"
+    property bool windowPersistenceReady: false
     readonly property var menuHotkeyOptions: [
         { "label": "Apostrophe (')", "value": 222 },
         { "label": "Insert", "value": 45 },
@@ -80,6 +88,7 @@ ApplicationWindow {
                                                     : setupNavigationItems
 
     property string activeRoute: "scanner"
+    onActiveRouteChanged: Qt.callLater(function() { pageEnterAnimation.restart() })
     property alias autoRefresh: autoRefreshBinding.value
     QtObject {
         id: autoRefreshBinding
@@ -109,12 +118,38 @@ ApplicationWindow {
     }
 
     onRequestedNavigationPaneWidthChanged: navigationWidthSave.restart()
+    onWidthChanged: if (windowPersistenceReady) windowSizeSave.restart()
+    onHeightChanged: if (windowPersistenceReady) windowSizeSave.restart()
+    onClosing: function(close) {
+        AppSettings.windowWidth = width
+        AppSettings.windowHeight = height
+    }
+
+    Component.onCompleted: windowPersistenceReady = true
+
+    Behavior on color {
+        ColorAnimation {
+            duration: 320
+            easing.type: Easing.BezierSpline
+            easing.bezierCurve: [0.2, 0.0, 0.0, 1.0, 1.0, 1.0]
+        }
+    }
 
     Timer {
         id: navigationWidthSave
         interval: 180
         repeat: false
         onTriggered: AppSettings.navigationPaneWidth = app.requestedNavigationPaneWidth
+    }
+
+    Timer {
+        id: windowSizeSave
+        interval: 260
+        repeat: false
+        onTriggered: {
+            AppSettings.windowWidth = app.width
+            AppSettings.windowHeight = app.height
+        }
     }
 
     // This is phase progress, not a fabricated byte/percent counter. Each
@@ -310,7 +345,9 @@ ApplicationWindow {
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.bottom: parent.bottom
-        color: "#F1ECF4"
+        color: app.darkTheme ? "#15181E" : "#F1ECF4"
+
+        Behavior on color { ColorAnimation { duration: 320 } }
 
         ColumnLayout {
             anchors.fill: parent
@@ -333,7 +370,7 @@ ApplicationWindow {
                     Text {
                         anchors.centerIn: parent
                         text: "J"
-                        color: "white"
+                        color: app.onPrimaryColor
                         font.pixelSize: 25
                         font.weight: Font.Bold
                     }
@@ -363,7 +400,7 @@ ApplicationWindow {
             Rectangle {
                 Layout.fillWidth: true
                 Layout.preferredHeight: 1
-                color: "#DDD6E1"
+                color: app.outlineVariantColor
             }
 
             Item {
@@ -491,11 +528,17 @@ ApplicationWindow {
                         radius: 20
                         color: app.activeRoute === modelData.route
                                ? app.primaryContainer
-                               : (navMouse.containsMouse ? "#E3DDE7" : "transparent")
+                               : "transparent"
                         scale: navMouse.pressed ? 0.985 : 1
                         transformOrigin: Item.Center
 
-                        Behavior on color { ColorAnimation { duration: 180 } }
+                        Behavior on color {
+                            ColorAnimation {
+                                duration: 260
+                                easing.type: Easing.BezierSpline
+                                easing.bezierCurve: [0.2, 0.0, 0.0, 1.0, 1.0, 1.0]
+                            }
+                        }
                         Behavior on scale {
                             NumberAnimation {
                                 duration: 240
@@ -504,11 +547,26 @@ ApplicationWindow {
                             }
                         }
 
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: navPill.radius
+                            color: app.hoverColor
+                            opacity: app.activeRoute !== modelData.route
+                                     && navMouse.containsMouse ? 1 : 0
+                            Behavior on opacity {
+                                NumberAnimation {
+                                    duration: 220
+                                    easing.type: Easing.BezierSpline
+                                    easing.bezierCurve: [0.2, 0.0, 0.0, 1.0, 1.0, 1.0]
+                                }
+                            }
+                        }
+
                         RippleEffect {
                             id: navRipple
                             anchors.fill: parent
                             rippleColor: app.primaryColor
-                            peakOpacity: 0.13
+                            peakOpacity: 0.07
                             cornerRadius: navPill.radius
                         }
 
@@ -523,7 +581,15 @@ ApplicationWindow {
                                 Layout.preferredHeight: 40
                                 radius: 13
                                 color: app.activeRoute === modelData.route
-                                       ? "#D7C7F5" : "#E7E0EC"
+                                       ? app.selectedIconColor : app.surfaceVariant
+
+                                Behavior on color {
+                                    ColorAnimation {
+                                        duration: 260
+                                        easing.type: Easing.BezierSpline
+                                        easing.bezierCurve: [0.2, 0.0, 0.0, 1.0, 1.0, 1.0]
+                                    }
+                                }
 
                                 Text {
                                     anchors.centerIn: parent
@@ -576,9 +642,9 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 Layout.preferredHeight: app.hasSelectedProcess ? 148 : 94
                 radius: 24
-                color: app.hasSelectedProcess ? "#FFFBFE" : "#E7E0EC"
+                color: app.hasSelectedProcess ? app.surfaceColor : app.surfaceVariant
                 border.width: app.hasSelectedProcess ? 1 : 0
-                border.color: "#DED8E2"
+                border.color: app.outlineVariantColor
 
                 Behavior on Layout.preferredHeight {
                     NumberAnimation {
@@ -668,7 +734,7 @@ ApplicationWindow {
             anchors.top: parent.top
             anchors.bottom: parent.bottom
             width: 1
-            color: "#DDD6E1"
+            color: app.outlineVariantColor
         }
 
         // A 12 px hit area straddles the visual divider, so the resize target
@@ -716,7 +782,7 @@ ApplicationWindow {
                 height: navigationResizeHandle.containsMouse ? 52 : 36
                 radius: width / 2
                 color: navigationResizeHandle.containsMouse
-                       ? app.primaryColor : "#9A949E"
+                       ? app.primaryColor : app.outlineColor
                 opacity: navigationResizeHandle.containsMouse ? 0.9 : 0.45
 
                 Behavior on height {
@@ -738,6 +804,31 @@ ApplicationWindow {
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.bottom: actionBar.top
+        transformOrigin: Item.Center
+
+        SequentialAnimation {
+            id: pageEnterAnimation
+            PropertyAction { target: workspace; property: "opacity"; value: 0.72 }
+            PropertyAction { target: workspace; property: "scale"; value: 0.982 }
+            ParallelAnimation {
+                NumberAnimation {
+                    target: workspace
+                    property: "opacity"
+                    to: 1
+                    duration: 330
+                    easing.type: Easing.BezierSpline
+                    easing.bezierCurve: [0.05, 0.7, 0.1, 1.0, 1.0, 1.0]
+                }
+                NumberAnimation {
+                    target: workspace
+                    property: "scale"
+                    to: 1
+                    duration: 420
+                    easing.type: Easing.BezierSpline
+                    easing.bezierCurve: [0.05, 0.7, 0.1, 1.0, 1.0, 1.0]
+                }
+            }
+        }
 
         StackLayout {
             anchors.fill: parent
@@ -970,7 +1061,7 @@ ApplicationWindow {
                                 Layout.preferredWidth: liveStateLabel.implicitWidth + 34
                                 Layout.preferredHeight: 38
                                 radius: 19
-                                color: !OverlayManager.gameStateReceived ? "#E7E0EC"
+                                color: !OverlayManager.gameStateReceived ? app.surfaceVariant
                                      : (OverlayManager.gameStateStale ? "#FFE2E0"
                                         : (OverlayManager.gameStateAvailable ? "#D7F7DD" : "#FFF1C7"))
 
@@ -1072,7 +1163,7 @@ ApplicationWindow {
                             radius: 24
                             color: app.surfaceColor
                             border.width: 1
-                            border.color: "#E7E0EC"
+                            border.color: app.outlineVariantColor
 
                             ColumnLayout {
                                 id: featureControls
@@ -1432,8 +1523,8 @@ ApplicationWindow {
                                             text: radiusValue.toString()
                                             filled: OverlayManager.bedDefenseRadius === radiusValue
                                             containerColor: app.primaryColor
-                                            foregroundColor: filled ? "white" : app.primaryColor
-                                            outlineColor: "#CAC4D0"
+                                            foregroundColor: filled ? app.onPrimaryColor : app.primaryColor
+                                            outlineColor: app.outlineVariantColor
                                             onClicked: OverlayManager.bedDefenseRadius = radiusValue
                                         }
                                     }
@@ -1456,7 +1547,7 @@ ApplicationWindow {
                                         filled: false
                                         enabled: OverlayManager.attached
                                         foregroundColor: app.primaryColor
-                                        outlineColor: "#CAC4D0"
+                                        outlineColor: app.outlineVariantColor
                                         onClicked: OverlayManager.refreshBedCache()
                                     }
                                 }
@@ -1494,7 +1585,7 @@ ApplicationWindow {
                                                  ? "#" + OverlayManager.playerEntityId : "—",
                                         "detail": "Local player",
                                         "icon": "ID",
-                                        "tint": "#EADDFF"
+                                        "tint": app.primaryContainer
                                     },
                                     {
                                         "label": "ENTITIES",
@@ -1519,9 +1610,9 @@ ApplicationWindow {
                                     Layout.fillWidth: true
                                     Layout.preferredHeight: 154
                                     radius: 22
-                                    color: metricHover.hovered ? "#FFFFFF" : app.surfaceColor
+                                    color: metricHover.hovered ? app.surfaceElevatedColor : app.surfaceColor
                                     border.width: 1
-                                    border.color: metricHover.hovered ? "#C9BED1" : "#E7E0EC"
+                                    border.color: metricHover.hovered ? app.primaryColor : app.outlineVariantColor
                                     scale: metricHover.hovered ? 1.012 : 1
 
                                     HoverHandler { id: metricHover }
@@ -1596,7 +1687,7 @@ ApplicationWindow {
                                 radius: 22
                                 color: app.surfaceColor
                                 border.width: 1
-                                border.color: "#E7E0EC"
+                                border.color: app.outlineVariantColor
 
                                 ColumnLayout {
                                     anchors.fill: parent
@@ -1640,7 +1731,7 @@ ApplicationWindow {
                                     spacing: 7
                                     Text {
                                         text: "MAPPING PROFILE"
-                                        color: "#CAC4D0"
+                                        color: app.secondaryTextColor
                                         font.pixelSize: 10
                                         font.weight: Font.Bold
                                         font.letterSpacing: 0.9
@@ -1649,7 +1740,7 @@ ApplicationWindow {
                                         Layout.fillWidth: true
                                         text: OverlayManager.mappingProfile.length > 0
                                               ? OverlayManager.mappingProfile : "Not detected"
-                                        color: "#FFFBFE"
+                                        color: app.textColor
                                         font.pixelSize: 18
                                         font.weight: Font.DemiBold
                                         elide: Text.ElideRight
@@ -1701,7 +1792,7 @@ ApplicationWindow {
                             radius: 24
                             color: app.surfaceColor
                             border.width: 1
-                            border.color: "#E7E0EC"
+                            border.color: app.outlineVariantColor
 
                             ColumnLayout {
                                 anchors.fill: parent
@@ -1752,7 +1843,7 @@ ApplicationWindow {
                                 Rectangle {
                                     Layout.fillWidth: true
                                     Layout.preferredHeight: 1
-                                    color: "#E7E0EC"
+                                    color: app.outlineVariantColor
                                 }
 
                                 ColumnLayout {
@@ -2104,12 +2195,12 @@ ApplicationWindow {
 
                         Rectangle {
                             Layout.fillWidth: true; Layout.preferredHeight: 210
-                            radius: 26; color: "#EADDFF"
+                            radius: 26; color: app.primaryContainer
                             RowLayout {
                                 anchors.fill: parent; anchors.margins: 28; spacing: 24
                                 Rectangle {
                                     Layout.preferredWidth: 76; Layout.preferredHeight: 76; radius: 25; color: app.primaryColor
-                                    Text { anchors.centerIn: parent; text: "MC"; color: "white"; font.pixelSize: 20; font.weight: Font.Bold }
+                                    Text { anchors.centerIn: parent; text: "MC"; color: app.onPrimaryColor; font.pixelSize: 20; font.weight: Font.Bold }
                                 }
                                 ColumnLayout {
                                     Layout.fillWidth: true; spacing: 8
@@ -2117,7 +2208,7 @@ ApplicationWindow {
                                     Text {
                                         Layout.fillWidth: true
                                         text: "C++20 · Qt 6/QML · JVMTI/JNI · Dear ImGui · OpenGL 2 · authenticated bidirectional IPC"
-                                        color: "#4F378B"; font.pixelSize: 14; wrapMode: Text.WordWrap
+                                        color: app.primaryContainerMutedText; font.pixelSize: 14; wrapMode: Text.WordWrap
                                     }
                                 }
                             }
@@ -2135,7 +2226,7 @@ ApplicationWindow {
                                 delegate: Rectangle {
                                     required property var modelData
                                     Layout.fillWidth: true; Layout.preferredHeight: 150
-                                    radius: 22; color: app.surfaceColor; border.width: 1; border.color: "#E7E0EC"
+                                    radius: 22; color: app.surfaceColor; border.width: 1; border.color: app.outlineVariantColor
                                     ColumnLayout {
                                         anchors.fill: parent; anchors.margins: 20; spacing: 8
                                         Text { text: modelData.title; color: app.textColor; font.pixelSize: 17; font.weight: Font.DemiBold }
@@ -2179,11 +2270,61 @@ ApplicationWindow {
 
                     Rectangle {
                         Layout.fillWidth: true
+                        Layout.preferredHeight: 118
+                        radius: 22
+                        color: app.surfaceColor
+                        border.width: 1
+                        border.color: app.outlineVariantColor
+
+                        Behavior on color { ColorAnimation { duration: 300 } }
+                        Behavior on border.color { ColorAnimation { duration: 300 } }
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.margins: 22
+                            spacing: 18
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                Text {
+                                    text: "Controller appearance"
+                                    color: app.textColor
+                                    font.pixelSize: 17
+                                    font.weight: Font.DemiBold
+                                }
+                                Text {
+                                    text: "Theme and window size are restored on the next launch"
+                                    color: app.secondaryTextColor
+                                    font.pixelSize: 13
+                                }
+                            }
+                            MaterialButton {
+                                Layout.preferredWidth: 92
+                                text: "☀  Light"
+                                filled: !app.darkTheme
+                                containerColor: app.primaryColor
+                                foregroundColor: filled ? app.onPrimaryColor : app.textColor
+                                outlineColor: app.outlineVariantColor
+                                onClicked: AppSettings.darkTheme = false
+                            }
+                            MaterialButton {
+                                Layout.preferredWidth: 92
+                                text: "☾  Dark"
+                                filled: app.darkTheme
+                                containerColor: app.primaryColor
+                                foregroundColor: filled ? app.onPrimaryColor : app.textColor
+                                outlineColor: app.outlineVariantColor
+                                onClicked: AppSettings.darkTheme = true
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        Layout.fillWidth: true
                         Layout.preferredHeight: 104
                         radius: 22
                         color: app.surfaceColor
                         border.width: 1
-                        border.color: "#E7E0EC"
+                        border.color: app.outlineVariantColor
 
                         RowLayout {
                             anchors.fill: parent
@@ -2206,7 +2347,7 @@ ApplicationWindow {
                         radius: 22
                         color: app.surfaceColor
                         border.width: 1
-                        border.color: "#E7E0EC"
+                        border.color: app.outlineVariantColor
 
                         ColumnLayout {
                             anchors.fill: parent; anchors.margins: 20; spacing: 8
@@ -2220,7 +2361,7 @@ ApplicationWindow {
                                 MaterialButton {
                                     text: "Remove"; filled: false; visible: ApiKeys.configured
                                     Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
-                                    foregroundColor: "#BA1A1A"; outlineColor: "#E7E0EC"
+                                    foregroundColor: "#FFB4AB"; outlineColor: app.outlineVariantColor
                                     onClicked: ApiKeys.clearKey()
                                 }
                             }
@@ -2252,7 +2393,7 @@ ApplicationWindow {
                         radius: 22
                         color: app.surfaceColor
                         border.width: 1
-                        border.color: "#E7E0EC"
+                        border.color: app.outlineVariantColor
 
                         RowLayout {
                             anchors.fill: parent
@@ -2267,7 +2408,7 @@ ApplicationWindow {
                                 Layout.preferredWidth: 190
                                 virtualKey: OverlayManager.menuHotkey
                                 primaryColor: app.primaryColor
-                                surfaceColor: "#F7F2FA"
+                                surfaceColor: app.backgroundColor
                                 textColor: app.textColor
                                 onKeyCaptured: function(key) { OverlayManager.menuHotkey = key }
                                 Accessible.name: "Click GUI hotkey"
@@ -2281,7 +2422,7 @@ ApplicationWindow {
                         radius: 22
                         color: app.surfaceColor
                         border.width: 1
-                        border.color: "#E7E0EC"
+                        border.color: app.outlineVariantColor
 
                         RowLayout {
                             anchors.fill: parent
@@ -2302,8 +2443,8 @@ ApplicationWindow {
                                     text: modelData
                                     filled: OverlayManager.guiScaleIndex === index
                                     containerColor: app.primaryColor
-                                    foregroundColor: filled ? "white" : app.primaryColor
-                                    outlineColor: "#CAC4D0"
+                                    foregroundColor: filled ? app.onPrimaryColor : app.primaryColor
+                                    outlineColor: app.outlineVariantColor
                                     onClicked: OverlayManager.guiScaleIndex = index
                                 }
                             }
@@ -2314,7 +2455,7 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.preferredHeight: 176
                         radius: 22
-                        color: "#EADDFF"
+                        color: app.primaryContainer
 
                         RowLayout {
                             anchors.fill: parent
@@ -2325,7 +2466,7 @@ ApplicationWindow {
                                 Layout.preferredHeight: 56
                                 radius: 18
                                 color: app.primaryColor
-                                Text { anchors.centerIn: parent; text: "GPU"; color: "white"; font.pixelSize: 13; font.weight: Font.Bold }
+                                Text { anchors.centerIn: parent; text: "GPU"; color: app.onPrimaryColor; font.pixelSize: 13; font.weight: Font.Bold }
                             }
                             ColumnLayout {
                                 Layout.fillWidth: true
@@ -2334,7 +2475,7 @@ ApplicationWindow {
                                 Text {
                                     Layout.fillWidth: true
                                     text: "The controller first uses JVM Attach and can fall back to the standard Windows DLL loader when runtime Attach is unavailable. The agent renders before SwapBuffers in Minecraft's own LWJGL 2 OpenGL context."
-                                    color: "#4F378B"
+                                    color: app.primaryContainerMutedText
                                     font.pixelSize: 13
                                     wrapMode: Text.WordWrap
                                 }
@@ -2348,7 +2489,7 @@ ApplicationWindow {
                         radius: 22
                         color: app.surfaceColor
                         border.width: 1
-                        border.color: "#E7E0EC"
+                        border.color: app.outlineVariantColor
 
                         ColumnLayout {
                             anchors.fill: parent
@@ -2378,14 +2519,16 @@ ApplicationWindow {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         height: 86
-        color: "#FDF8FF"
+        color: app.darkTheme ? "#171A20" : "#FDF8FF"
+
+        Behavior on color { ColorAnimation { duration: 320 } }
 
         Rectangle {
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.top: parent.top
             height: 1
-            color: "#DED8E2"
+            color: app.outlineVariantColor
         }
 
         RowLayout {
@@ -2577,7 +2720,7 @@ ApplicationWindow {
             radius: 26
             color: app.surfaceColor
             border.width: 1
-            border.color: "#E7E0EC"
+            border.color: app.outlineVariantColor
         }
 
         contentItem: ColumnLayout {

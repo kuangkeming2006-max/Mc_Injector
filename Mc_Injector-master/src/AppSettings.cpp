@@ -11,6 +11,9 @@ constexpr auto kNavigationPaneWidth = "ui/navigationPaneWidth";
 constexpr auto kMenuHotkey = "overlay/menuHotkey";
 constexpr auto kGuiScaleIndex = "overlay/guiScaleIndex";
 constexpr auto kProcessAutoRefresh = "scanner/autoRefresh";
+constexpr auto kDarkTheme = "ui/darkTheme";
+constexpr auto kWindowWidth = "ui/windowWidth";
+constexpr auto kWindowHeight = "ui/windowHeight";
 }
 
 AppSettings::AppSettings(QObject *parent)
@@ -26,6 +29,12 @@ AppSettings::AppSettings(QObject *parent)
         settings.value(QLatin1StringView(kGuiScaleIndex), 1).toInt(), 0, 3);
     m_processAutoRefresh = settings.value(
         QLatin1StringView(kProcessAutoRefresh), false).toBool();
+    m_darkTheme = settings.value(
+        QLatin1StringView(kDarkTheme), false).toBool();
+    m_windowWidth = std::clamp(settings.value(
+        QLatin1StringView(kWindowWidth), 1420).toInt(), 1040, 7680);
+    m_windowHeight = std::clamp(settings.value(
+        QLatin1StringView(kWindowHeight), 880).toInt(), 680, 4320);
 }
 
 void AppSettings::store(const char *key, const QVariant &value)
@@ -73,4 +82,33 @@ void AppSettings::setProcessAutoRefresh(const bool enabled)
     m_processAutoRefresh = enabled;
     store(kProcessAutoRefresh, enabled);
     emit processAutoRefreshChanged();
+}
+
+void AppSettings::setDarkTheme(const bool enabled)
+{
+    if (enabled == m_darkTheme)
+        return;
+    m_darkTheme = enabled;
+    store(kDarkTheme, enabled);
+    emit darkThemeChanged();
+}
+
+void AppSettings::setWindowWidth(const int width)
+{
+    const int bounded = std::clamp(width, 1040, 7680);
+    if (bounded == m_windowWidth)
+        return;
+    m_windowWidth = bounded;
+    store(kWindowWidth, bounded);
+    emit windowWidthChanged();
+}
+
+void AppSettings::setWindowHeight(const int height)
+{
+    const int bounded = std::clamp(height, 680, 4320);
+    if (bounded == m_windowHeight)
+        return;
+    m_windowHeight = bounded;
+    store(kWindowHeight, bounded);
+    emit windowHeightChanged();
 }

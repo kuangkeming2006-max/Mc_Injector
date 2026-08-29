@@ -17,6 +17,12 @@ class AppSettings final : public QObject
                    WRITE setGuiScaleIndex NOTIFY guiScaleIndexChanged)
     Q_PROPERTY(bool processAutoRefresh READ processAutoRefresh
                    WRITE setProcessAutoRefresh NOTIFY processAutoRefreshChanged)
+    Q_PROPERTY(bool darkTheme READ darkTheme
+                   WRITE setDarkTheme NOTIFY darkThemeChanged)
+    Q_PROPERTY(int windowWidth READ windowWidth
+                   WRITE setWindowWidth NOTIFY windowWidthChanged)
+    Q_PROPERTY(int windowHeight READ windowHeight
+                   WRITE setWindowHeight NOTIFY windowHeightChanged)
 
 public:
     explicit AppSettings(QObject *parent = nullptr);
@@ -28,18 +34,27 @@ public:
     [[nodiscard]] int menuHotkey() const noexcept { return m_menuHotkey; }
     [[nodiscard]] int guiScaleIndex() const noexcept { return m_guiScaleIndex; }
     [[nodiscard]] bool processAutoRefresh() const noexcept { return m_processAutoRefresh; }
+    [[nodiscard]] bool darkTheme() const noexcept { return m_darkTheme; }
+    [[nodiscard]] int windowWidth() const noexcept { return m_windowWidth; }
+    [[nodiscard]] int windowHeight() const noexcept { return m_windowHeight; }
 
 public slots:
     void setNavigationPaneWidth(double width);
     void setMenuHotkey(int virtualKey);
     void setGuiScaleIndex(int index);
     void setProcessAutoRefresh(bool enabled);
+    void setDarkTheme(bool enabled);
+    void setWindowWidth(int width);
+    void setWindowHeight(int height);
 
 signals:
     void navigationPaneWidthChanged();
     void menuHotkeyChanged();
     void guiScaleIndexChanged();
     void processAutoRefreshChanged();
+    void darkThemeChanged();
+    void windowWidthChanged();
+    void windowHeightChanged();
 
 private:
     void store(const char *key, const QVariant &value);
@@ -48,4 +63,7 @@ private:
     int m_menuHotkey = 0xDE; // VK_OEM_7 / apostrophe
     int m_guiScaleIndex = 1; // M
     bool m_processAutoRefresh = false;
+    bool m_darkTheme = false;
+    int m_windowWidth = 1420;
+    int m_windowHeight = 880;
 };

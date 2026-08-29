@@ -79,6 +79,12 @@ uses its separate DPAPI-protected store. Skin PNGs are downloaded from the
 trusted Mojang texture host, validated as 64-pixel Minecraft textures, and
 atomically cached as local files before Quick3D renders them.
 
+The Qt controller also persists its last window width/height and light/dark
+appearance. Navigation selection and hover use separate layers, preventing a
+hover transition from briefly darkening the selected route. Page changes use
+one compositor-friendly opacity/scale transition with Material emphasized
+deceleration rather than restarting every child control animation.
+
 The Qt controller and in-game Click GUI share one authenticated, version-locked
 `FEATURE_STATE` snapshot, so changes made in either surface are reflected by
 the other and restored on the next attach. The Player ESP page exposes teammate
