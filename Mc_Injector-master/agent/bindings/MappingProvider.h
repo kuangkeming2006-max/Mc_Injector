@@ -91,8 +91,34 @@ struct MappingDictionary final {
     std::string renderManagerSignature;
     std::string timerName;
     std::string timerSignature;
+    // Optional Safewalk capability. These are deliberately feature classes:
+    // an unknown transformed client can still use every render-only feature
+    // even when its input mappings are unavailable.
+    std::string gameSettingsName;
+    std::string gameSettingsSignature;
+    std::string keyBindingName;
+    std::string keyBindingSignature;
+    // Optional movement/server capability. Keeping these outside the core
+    // profile lets rendering continue on transformed clients that do not
+    // expose the exact 1.8.9 gameplay symbols.
+    std::string playerControllerName;
+    std::string playerControllerSignature;
+    std::string serverDataName;
+    std::string serverDataSignature;
+    std::string itemBlockName;
+    std::string itemBlockSignature;
+    std::string enumFacingName;
+    std::string enumFacingSignature;
+    std::string vec3Name;
+    std::string vec3Signature;
     std::string chatComponentName;
     std::string chatComponentSignature;
+    std::string chatTextName;
+    std::string chatTextSignature;
+    // Optional rich local-chat parser. It lets warning messages attach a
+    // SUGGEST_COMMAND click event without sending anything to the server.
+    std::string chatSerializerName;
+    std::string chatSerializerSignature;
 
     std::string scoreboardName;
     std::string scoreboardSignature;
@@ -102,6 +128,14 @@ struct MappingDictionary final {
     std::string scoreSignature;
     std::string scorePlayerTeamName;
     std::string scorePlayerTeamSignature;
+    // ScorePlayerTeam::formatPlayerName accepts the abstract Team type, not
+    // ScorePlayerTeam itself.  Keeping the signature separate is essential in
+    // the obfuscated 1.8.9 namespace (auq vs aul).
+    std::string teamSignature;
+    std::string netHandlerName;
+    std::string netHandlerSignature;
+    std::string networkPlayerInfoName;
+    std::string networkPlayerInfoSignature;
     std::string itemStackName;
     std::string itemStackSignature;
     std::string itemName;
@@ -110,6 +144,21 @@ struct MappingDictionary final {
     std::string itemArmorSignature;
     std::string inventoryPlayerName;
     std::string inventoryPlayerSignature;
+    std::string enchantmentHelperName;
+    std::string enchantmentHelperSignature;
+    // Optional identity/skin capability.  UUIDs bridge a TAB-list display
+    // name (including Hypixel nicknames) to the corresponding spawned entity
+    // without relying on two potentially different strings.  Skin rendering
+    // reuses Minecraft's already-loaded OpenGL texture; it never performs a
+    // network request from the injected process.
+    std::string abstractClientPlayerName;
+    std::string abstractClientPlayerSignature;
+    std::string resourceLocationName;
+    std::string resourceLocationSignature;
+    std::string textureManagerName;
+    std::string textureManagerSignature;
+    std::string textureObjectName;
+    std::string textureObjectSignature;
 
     std::string getMinecraft;
     // Exactly one singleton accessor is required. Lunar's named runtime is
@@ -131,8 +180,14 @@ struct MappingDictionary final {
     std::string loadedEntitiesField;
     std::string playerEntitiesField;
     std::string getName;
+    // Optional Entity::isInvisible() capability.  Threat detection must not
+    // infer invisibility merely from missing armour because respawning players
+    // also have an empty armour slot for a short period.
+    std::string isInvisible;
     std::string getDisplayName;
     std::string getFormattedText;
+    std::string addChatMessage;
+    std::string parseChatJson;
     std::string getBlockState;
     std::string getBlock;
     std::string getBlockMetadata;
@@ -150,6 +205,27 @@ struct MappingDictionary final {
     std::string activeViewportField;
     std::string timerField;
     std::string renderPartialTicksField;
+    std::string gameSettingsField;
+    std::string keyBindSneakField;
+    std::array<std::string, 5U> movementKeyFields;
+    std::string getKeyCode;
+    std::string setKeyBindState;
+    std::string mouseSensitivityField;
+    std::string rotationYawField;
+    std::string rotationPitchField;
+    std::array<std::string, 3U> motionFields;
+    std::string onGroundField;
+    std::string jump;
+    std::string isAirBlock;
+    std::string getCurrentServerData;
+    std::string serverIpField;
+    std::string playerControllerField;
+    std::string currentItemField;
+    std::string mainInventoryField;
+    std::string getBlockFromItem;
+    std::string getIdFromBlock;
+    std::string getFacingByIndex;
+    std::string onPlayerRightClick;
     std::array<std::string, 6U> aabbFields;
 
     std::string getScoreboard;
@@ -158,11 +234,26 @@ struct MappingDictionary final {
     std::string getSortedScores;
     std::string getPlayerName;
     std::string formatPlayerName;
+    // Optional TAB-list capability.  It discovers the complete server roster
+    // before remote entities enter the client's tracking/rendering range.
+    std::string getNetHandler;
+    std::string getPlayerInfoMap;
+    std::string getGameProfile;
     std::string inventoryField;
     std::string armorInventoryField;
     std::string getItem;
     std::string hasColor;
     std::string getColor;
+    std::string getEnchantmentLevel;
+    std::string getEquipmentInSlot;
+    std::string getIdFromItem;
+    std::string stackSizeField;
+    std::string getItemDamage;
+    std::string getUniqueId;
+    std::string getLocationSkin;
+    std::string getTextureManager;
+    std::string getTexture;
+    std::string getGlTextureId;
 
     // Strict validation prevents a partially filled or malformed external
     // dictionary from ever reaching JNI GetMethodID/GetFieldID calls.

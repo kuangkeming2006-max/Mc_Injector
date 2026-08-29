@@ -29,7 +29,9 @@ public slots:
 
 signals:
     void statsReady(const QString &playerName, const QString &teamPrefix,
-                    int stars, double fkdr, int level);
+                    int stars, double fkdr, double wlr, double bblr,
+                    qint64 wins, qint64 finalKills, qint64 bedsBroken,
+                    int winStreak, int level);
     void statsFailed(const QString &playerName, const QString &reason);
 
 private:
@@ -40,6 +42,12 @@ private:
     struct CachedStats {
         int stars = 0;
         double fkdr = 0.0;
+        double wlr = 0.0;
+        double bblr = 0.0;
+        qint64 wins = 0;
+        qint64 finalKills = 0;
+        qint64 bedsBroken = 0;
+        int winStreak = 0;
         int level = 0;
         qint64 expiresAtMs = 0;
     };

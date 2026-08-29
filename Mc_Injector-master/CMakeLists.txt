@@ -30,6 +30,10 @@ qt_add_executable(MinecraftOverlayManager
     src/ApiKeyStore.cpp
     src/AppSettings.h
     src/AppSettings.cpp
+    src/HotkeyCaptureService.h
+    src/HotkeyCaptureService.cpp
+    src/BlacklistService.h
+    src/BlacklistService.cpp
     src/SkinProfileService.h
     src/SkinProfileService.cpp
     src/SkinCuboidGeometry.h

@@ -57,6 +57,7 @@ private:
     void queueHypixelQuery(const std::array<char, 17U>& playerId) noexcept;
     void queueMenuHotkeyChanged(unsigned virtualKey) noexcept;
     void queueGuiScaleChanged(int index) noexcept;
+    void queueBlacklistAction(const BlacklistAction& action) noexcept;
     void queueRendererReady() noexcept;
     static void frameEntry(void* context, HDC deviceContext) noexcept;
     void beforeSwapBuffers(HDC deviceContext);
@@ -88,8 +89,40 @@ private:
     std::atomic<bool> m_startSucceeded{false};
     std::atomic<bool> m_visible{false};
     std::atomic<bool> m_interactive{false};
-    std::atomic<std::uint16_t> m_featureBits{0x7FU};
+    std::atomic<std::uint32_t> m_featureBits{0x286FBC7FU};
     std::atomic<int> m_bedDefenseRadius{6};
+    std::atomic<int> m_bedThreatRadius{8};
+    std::atomic<int> m_bedDefenseHotkey{VK_LMENU};
+    std::atomic<int> m_bedDefensePanelOpacity{78};
+    std::atomic<int> m_hypixelPanelHotkey{VK_TAB};
+    std::atomic<int> m_hypixelPanelOpacity{76};
+    std::atomic<int> m_hypixelPanelScale{100};
+    std::atomic<int> m_hypixelPanelHeight{100};
+    std::atomic<int> m_hypixelPanelX{-1};
+    std::atomic<int> m_hypixelPanelY{-1};
+    std::atomic<bool> m_clickGuiLightTheme{false};
+    std::atomic<std::uint32_t> m_playerEspColor{0xFF3B30U};
+    std::atomic<std::uint32_t> m_bedEspColor{0xFF5C68U};
+    std::atomic<std::uint32_t> m_bedDefensePanelColor{0x191621U};
+    std::atomic<std::uint32_t> m_hypixelPanelColor{0x000000U};
+    std::atomic<std::uint32_t> m_hypixelRailColor{0x825DE8U};
+    std::atomic<int> m_hypixelRailOpacity{100};
+    std::atomic<int> m_safewalkReleaseDelayMs{120};
+    std::atomic<int> m_safewalkEdgeSensitivity{55};
+    std::atomic<int> m_safewalkMinimumPitch{-5};
+    std::atomic<int> m_safewalkHotkey{VK_F8};
+    std::atomic<int> m_flySpeedPercent{100};
+    std::atomic<int> m_aimSlowdownPercent{45};
+    std::atomic<int> m_aimSpeedPercent{35};
+    std::atomic<std::uint32_t> m_textGuiColor{0x7EE7FFU};
+    std::atomic<int> m_textGuiX{-1};
+    std::atomic<int> m_textGuiY{-1};
+    std::atomic<int> m_nametagPanelOpacity{82};
+    std::atomic<std::uint32_t> m_nametagPanelColor{0x101218U};
+    std::atomic<std::uint32_t> m_clickGuiAccentColor{0x825DE8U};
+    std::atomic<int> m_hypixelPanelFontIndex{1};
+    std::atomic<int> m_nametagRange{32};
+    std::atomic<int> m_nametagSizeIndex{1};
     std::atomic<bool> m_detachRequested{false};
     std::atomic<bool> m_shutdownRequested{false};
     std::atomic<bool> m_vmUnloading{false};
@@ -140,8 +173,40 @@ private:
     std::atomic<std::uint32_t> m_stateChangedRevision{0U};
     std::atomic<std::uint8_t> m_stateChangedBits{0U};
     std::atomic<std::uint32_t> m_featureChangedRevision{0U};
-    std::atomic<std::uint16_t> m_featureChangedBits{0x7FU};
+    std::atomic<std::uint32_t> m_featureChangedBits{0x286FBC7FU};
     std::atomic<int> m_featureChangedBedRadius{6};
+    std::atomic<int> m_featureChangedThreatRadius{8};
+    std::atomic<int> m_featureChangedBedHotkey{VK_LMENU};
+    std::atomic<int> m_featureChangedPanelOpacity{78};
+    std::atomic<int> m_featureChangedHypixelHotkey{VK_TAB};
+    std::atomic<int> m_featureChangedHypixelOpacity{76};
+    std::atomic<int> m_featureChangedHypixelScale{100};
+    std::atomic<int> m_featureChangedHypixelHeight{100};
+    std::atomic<int> m_featureChangedHypixelX{-1};
+    std::atomic<int> m_featureChangedHypixelY{-1};
+    std::atomic<bool> m_featureChangedClickGuiLightTheme{false};
+    std::atomic<std::uint32_t> m_featureChangedPlayerColor{0xFF3B30U};
+    std::atomic<std::uint32_t> m_featureChangedBedColor{0xFF5C68U};
+    std::atomic<std::uint32_t> m_featureChangedPanelColor{0x191621U};
+    std::atomic<std::uint32_t> m_featureChangedHypixelColor{0x000000U};
+    std::atomic<std::uint32_t> m_featureChangedHypixelRailColor{0x825DE8U};
+    std::atomic<int> m_featureChangedHypixelRailOpacity{100};
+    std::atomic<int> m_featureChangedNametagOpacity{82};
+    std::atomic<std::uint32_t> m_featureChangedNametagColor{0x101218U};
+    std::atomic<std::uint32_t> m_featureChangedAccentColor{0x825DE8U};
+    std::atomic<int> m_featureChangedHypixelFontIndex{1};
+    std::atomic<int> m_featureChangedNametagRange{32};
+    std::atomic<int> m_featureChangedNametagSizeIndex{1};
+    std::atomic<int> m_featureChangedSafewalkReleaseDelayMs{120};
+    std::atomic<int> m_featureChangedSafewalkEdgeSensitivity{55};
+    std::atomic<int> m_featureChangedSafewalkMinimumPitch{-5};
+    std::atomic<int> m_featureChangedSafewalkHotkey{VK_F8};
+    std::atomic<int> m_featureChangedFlySpeedPercent{100};
+    std::atomic<int> m_featureChangedAimSlowdownPercent{45};
+    std::atomic<int> m_featureChangedAimSpeedPercent{35};
+    std::atomic<std::uint32_t> m_featureChangedTextGuiColor{0x7EE7FFU};
+    std::atomic<int> m_featureChangedTextGuiX{-1};
+    std::atomic<int> m_featureChangedTextGuiY{-1};
     std::atomic<bool> m_rendererReadyQueued{false};
     std::atomic<unsigned> m_menuHotkey{VK_OEM_7};
     std::atomic<unsigned> m_bindChangedKey{VK_OEM_7};
@@ -156,10 +221,23 @@ private:
     HypixelOverlaySnapshot m_hypixelSnapshot{};
     SRWLOCK m_playerStatsLock = SRWLOCK_INIT;
     std::unordered_map<std::string, PlayerStatsEntry> m_playerStats;
+    SRWLOCK m_blacklistLock = SRWLOCK_INIT;
+    BlacklistOverlaySnapshot m_blacklistSnapshot{};
+    BlacklistOverlaySnapshot m_runtimeBlacklistSnapshot{};
+    std::atomic<std::uint32_t> m_blacklistRevision{0U};
+    bool m_blacklistSyncInProgress = false; // control-pipe thread owned
+    std::uint32_t m_renderBlacklistRevision = 0U;
+    std::uint32_t m_runtimeBlacklistRevision = 0U;
+    std::array<std::array<char, 50U>, 128U> m_blacklistChatWarnedKeys{};
+    std::uint32_t m_blacklistChatWarnedCount = 0U;
+    SRWLOCK m_blacklistActionLock = SRWLOCK_INIT;
+    BlacklistAction m_blacklistAction{};
+    std::atomic<std::uint32_t> m_blacklistActionRevision{0U};
     bool m_gameInputReleased = false; // render-thread owned
     bool m_renderThreadAttachedByAgent = false; // render-thread owned
     DWORD m_renderJvmThreadId = 0U; // render-thread owned
     std::uint64_t m_lastInputFocusReleaseTick = 0U; // render-thread owned
+    bool m_safewalkHotkeyWasDown = false; // render-thread owned
 };
 
 } // namespace mcoverlay

@@ -222,8 +222,26 @@ private:
     mapping.renderManagerSignature = "Lnet/minecraft/client/renderer/entity/RenderManager;";
     mapping.timerName = "net.minecraft.util.Timer";
     mapping.timerSignature = "Lnet/minecraft/util/Timer;";
+    mapping.gameSettingsName = "net.minecraft.client.settings.GameSettings";
+    mapping.gameSettingsSignature = "Lnet/minecraft/client/settings/GameSettings;";
+    mapping.keyBindingName = "net.minecraft.client.settings.KeyBinding";
+    mapping.keyBindingSignature = "Lnet/minecraft/client/settings/KeyBinding;";
+    mapping.playerControllerName = "net.minecraft.client.multiplayer.PlayerControllerMP";
+    mapping.playerControllerSignature = "Lnet/minecraft/client/multiplayer/PlayerControllerMP;";
+    mapping.serverDataName = "net.minecraft.client.multiplayer.ServerData";
+    mapping.serverDataSignature = "Lnet/minecraft/client/multiplayer/ServerData;";
+    mapping.itemBlockName = "net.minecraft.item.ItemBlock";
+    mapping.itemBlockSignature = "Lnet/minecraft/item/ItemBlock;";
+    mapping.enumFacingName = "net.minecraft.util.EnumFacing";
+    mapping.enumFacingSignature = "Lnet/minecraft/util/EnumFacing;";
+    mapping.vec3Name = "net.minecraft.util.Vec3";
+    mapping.vec3Signature = "Lnet/minecraft/util/Vec3;";
     mapping.chatComponentName = "net.minecraft.util.IChatComponent";
     mapping.chatComponentSignature = "Lnet/minecraft/util/IChatComponent;";
+    mapping.chatTextName = "net.minecraft.util.ChatComponentText";
+    mapping.chatTextSignature = "Lnet/minecraft/util/ChatComponentText;";
+    mapping.chatSerializerName = "net.minecraft.util.IChatComponent$Serializer";
+    mapping.chatSerializerSignature = "Lnet/minecraft/util/IChatComponent$Serializer;";
     mapping.getMinecraft = "func_71410_x";
     mapping.playerField = "field_71439_g";
     mapping.getHealth = "func_110143_aJ";
@@ -238,8 +256,11 @@ private:
     mapping.getLoadedEntities = "func_72910_y";
     mapping.playerEntitiesField = "field_73010_i";
     mapping.getName = "func_70005_c_";
+    mapping.isInvisible = "func_82150_aj";
     mapping.getDisplayName = "func_145748_c_";
     mapping.getFormattedText = "func_150254_d";
+    mapping.addChatMessage = "func_145747_a";
+    mapping.parseChatJson = "func_150699_a";
     mapping.getBlockState = "func_180495_p";
     mapping.getBlock = "func_177230_c";
     mapping.getBlockMetadata = "func_176201_c";
@@ -257,6 +278,29 @@ private:
     mapping.activeViewportField = "field_178814_a";
     mapping.timerField = "field_71428_T";
     mapping.renderPartialTicksField = "field_74281_c";
+    mapping.gameSettingsField = "field_71474_y";
+    mapping.keyBindSneakField = "field_74311_E";
+    mapping.movementKeyFields = {"field_74351_w", "field_74368_y",
+                                 "field_74370_x", "field_74366_z",
+                                 "field_74314_A"};
+    mapping.getKeyCode = "func_151463_i";
+    mapping.setKeyBindState = "func_74510_a";
+    mapping.mouseSensitivityField = "field_74341_c";
+    mapping.rotationYawField = "field_70177_z";
+    mapping.rotationPitchField = "field_70125_A";
+    mapping.motionFields = {"field_70159_w", "field_70181_x", "field_70179_y"};
+    mapping.onGroundField = "field_70122_E";
+    mapping.jump = "func_70664_aZ";
+    mapping.isAirBlock = "func_175623_d";
+    mapping.getCurrentServerData = "func_147104_D";
+    mapping.serverIpField = "field_78845_b";
+    mapping.playerControllerField = "field_71442_b";
+    mapping.currentItemField = "field_70461_c";
+    mapping.mainInventoryField = "field_70462_a";
+    mapping.getBlockFromItem = "func_179223_d";
+    mapping.getIdFromBlock = "func_149682_b";
+    mapping.getFacingByIndex = "func_82600_a";
+    mapping.onPlayerRightClick = "func_178890_a";
     mapping.aabbFields = {"field_72340_a", "field_72338_b", "field_72339_c",
                           "field_72336_d", "field_72337_e", "field_72334_f"};
 
@@ -268,6 +312,11 @@ private:
     mapping.scoreSignature = "Lnet/minecraft/scoreboard/Score;";
     mapping.scorePlayerTeamName = "net.minecraft.scoreboard.ScorePlayerTeam";
     mapping.scorePlayerTeamSignature = "Lnet/minecraft/scoreboard/ScorePlayerTeam;";
+    mapping.teamSignature = "Lnet/minecraft/scoreboard/Team;";
+    mapping.netHandlerName = "net.minecraft.client.network.NetHandlerPlayClient";
+    mapping.netHandlerSignature = "Lnet/minecraft/client/network/NetHandlerPlayClient;";
+    mapping.networkPlayerInfoName = "net.minecraft.client.network.NetworkPlayerInfo";
+    mapping.networkPlayerInfoSignature = "Lnet/minecraft/client/network/NetworkPlayerInfo;";
     mapping.itemStackName = "net.minecraft.item.ItemStack";
     mapping.itemStackSignature = "Lnet/minecraft/item/ItemStack;";
     mapping.itemName = "net.minecraft.item.Item";
@@ -276,6 +325,16 @@ private:
     mapping.itemArmorSignature = "Lnet/minecraft/item/ItemArmor;";
     mapping.inventoryPlayerName = "net.minecraft.entity.player.InventoryPlayer";
     mapping.inventoryPlayerSignature = "Lnet/minecraft/entity/player/InventoryPlayer;";
+    mapping.enchantmentHelperName = "net.minecraft.enchantment.EnchantmentHelper";
+    mapping.enchantmentHelperSignature = "Lnet/minecraft/enchantment/EnchantmentHelper;";
+    mapping.abstractClientPlayerName = "net.minecraft.client.entity.AbstractClientPlayer";
+    mapping.abstractClientPlayerSignature = "Lnet/minecraft/client/entity/AbstractClientPlayer;";
+    mapping.resourceLocationName = "net.minecraft.util.ResourceLocation";
+    mapping.resourceLocationSignature = "Lnet/minecraft/util/ResourceLocation;";
+    mapping.textureManagerName = "net.minecraft.client.renderer.texture.TextureManager";
+    mapping.textureManagerSignature = "Lnet/minecraft/client/renderer/texture/TextureManager;";
+    mapping.textureObjectName = "net.minecraft.client.renderer.texture.ITextureObject";
+    mapping.textureObjectSignature = "Lnet/minecraft/client/renderer/texture/ITextureObject;";
 
     mapping.getScoreboard = "func_96441_U";
     mapping.getObjectiveInDisplaySlot = "func_96539_a";
@@ -283,11 +342,24 @@ private:
     mapping.getSortedScores = "func_96534_i";
     mapping.getPlayerName = "func_96653_e";
     mapping.formatPlayerName = "func_96667_a";
+    mapping.getNetHandler = "func_147114_u";
+    mapping.getPlayerInfoMap = "func_175106_d";
+    mapping.getGameProfile = "func_178845_a";
     mapping.inventoryField = "field_71071_by";
     mapping.armorInventoryField = "field_70460_b";
     mapping.getItem = "func_77973_b";
     mapping.hasColor = "func_82816_b_";
     mapping.getColor = "func_82814_b";
+    mapping.getEnchantmentLevel = "func_77506_a";
+    mapping.getEquipmentInSlot = "func_71124_b";
+    mapping.getIdFromItem = "func_150891_b";
+    mapping.stackSizeField = "field_77994_a";
+    mapping.getItemDamage = "func_77952_i";
+    mapping.getUniqueId = "func_110124_au";
+    mapping.getLocationSkin = "func_110306_p";
+    mapping.getTextureManager = "func_110434_K";
+    mapping.getTexture = "func_110581_b";
+    mapping.getGlTextureId = "func_110552_b";
 
     return mapping;
 }
@@ -333,8 +405,26 @@ private:
     mapping.renderManagerSignature = "Lbiu;";
     mapping.timerName = "avl";
     mapping.timerSignature = "Lavl;";
+    mapping.gameSettingsName = "avh";
+    mapping.gameSettingsSignature = "Lavh;";
+    mapping.keyBindingName = "avb";
+    mapping.keyBindingSignature = "Lavb;";
+    mapping.playerControllerName = "bda";
+    mapping.playerControllerSignature = "Lbda;";
+    mapping.serverDataName = "bde";
+    mapping.serverDataSignature = "Lbde;";
+    mapping.itemBlockName = "yo";
+    mapping.itemBlockSignature = "Lyo;";
+    mapping.enumFacingName = "cq";
+    mapping.enumFacingSignature = "Lcq;";
+    mapping.vec3Name = "aui";
+    mapping.vec3Signature = "Laui;";
     mapping.chatComponentName = "eu";
     mapping.chatComponentSignature = "Leu;";
+    mapping.chatTextName = "fa";
+    mapping.chatTextSignature = "Lfa;";
+    mapping.chatSerializerName = "eu$a";
+    mapping.chatSerializerSignature = "Leu$a;";
     mapping.getMinecraft = "A";
     mapping.playerField = "h";
     mapping.getHealth = "bn";
@@ -349,8 +439,11 @@ private:
     mapping.getLoadedEntities = "E";
     mapping.playerEntitiesField = "j";
     mapping.getName = "e_";
+    mapping.isInvisible = "ax";
     mapping.getDisplayName = "f_";
     mapping.getFormattedText = "c";
+    mapping.addChatMessage = "a";
+    mapping.parseChatJson = "a";
     mapping.getBlockState = "p";
     mapping.getBlock = "c";
     mapping.getBlockMetadata = "c";
@@ -368,6 +461,27 @@ private:
     mapping.activeViewportField = "a";
     mapping.timerField = "Y";
     mapping.renderPartialTicksField = "c";
+    mapping.gameSettingsField = "t";
+    mapping.keyBindSneakField = "ad";
+    mapping.movementKeyFields = {"Y", "aa", "Z", "ab", "ac"};
+    mapping.getKeyCode = "i";
+    mapping.setKeyBindState = "a";
+    mapping.mouseSensitivityField = "a";
+    mapping.rotationYawField = "y";
+    mapping.rotationPitchField = "z";
+    mapping.motionFields = {"v", "w", "x"};
+    mapping.onGroundField = "C";
+    mapping.jump = "bF";
+    mapping.isAirBlock = "d";
+    mapping.getCurrentServerData = "D";
+    mapping.serverIpField = "b";
+    mapping.playerControllerField = "c";
+    mapping.currentItemField = "c";
+    mapping.mainInventoryField = "a";
+    mapping.getBlockFromItem = "d";
+    mapping.getIdFromBlock = "a";
+    mapping.getFacingByIndex = "a";
+    mapping.onPlayerRightClick = "a";
     mapping.aabbFields = {"a", "b", "c", "d", "e", "f"};
 
     mapping.scoreboardName = "auo";
@@ -376,16 +490,59 @@ private:
     mapping.scoreObjectiveSignature = "Lauk;";
     mapping.scoreName = "aum";
     mapping.scoreSignature = "Laum;";
-    mapping.scorePlayerTeamName = "bfh";
-    mapping.scorePlayerTeamSignature = "Lbfh;";
+    mapping.scorePlayerTeamName = "aul";
+    mapping.scorePlayerTeamSignature = "Laul;";
+    mapping.teamSignature = "Lauq;";
+    mapping.netHandlerName = "bcy";
+    mapping.netHandlerSignature = "Lbcy;";
+    mapping.networkPlayerInfoName = "bdc";
+    mapping.networkPlayerInfoSignature = "Lbdc;";
     mapping.itemStackName = "zx";
     mapping.itemStackSignature = "Lzx;";
     mapping.itemName = "zw";
     mapping.itemSignature = "Lzw;";
-    mapping.itemArmorName = "yq";
-    mapping.itemArmorSignature = "Lyq;";
-    mapping.inventoryPlayerName = "yx";
-    mapping.inventoryPlayerSignature = "Lyx;";
+    mapping.itemArmorName = "yj";
+    mapping.itemArmorSignature = "Lyj;";
+    mapping.inventoryPlayerName = "wm";
+    mapping.inventoryPlayerSignature = "Lwm;";
+    mapping.enchantmentHelperName = "ack";
+    mapping.enchantmentHelperSignature = "Lack;";
+    mapping.abstractClientPlayerName = "bet";
+    mapping.abstractClientPlayerSignature = "Lbet;";
+    mapping.resourceLocationName = "jy";
+    mapping.resourceLocationSignature = "Ljy;";
+    mapping.textureManagerName = "bmj";
+    mapping.textureManagerSignature = "Lbmj;";
+    mapping.textureObjectName = "bmk";
+    mapping.textureObjectSignature = "Lbmk;";
+
+    // Exact 1.8.9 joined.srg symbols.  These used to be left blank, which
+    // disabled Sidebar/TAB/armor capabilities while the core overlay remained
+    // operational and made the failure look like an empty scoreboard.
+    mapping.getScoreboard = "Z";
+    mapping.getObjectiveInDisplaySlot = "a";
+    mapping.getPlayersTeam = "h";
+    mapping.getSortedScores = "i";
+    mapping.getPlayerName = "e";
+    mapping.formatPlayerName = "a";
+    mapping.getNetHandler = "u";
+    mapping.getPlayerInfoMap = "d";
+    mapping.getGameProfile = "a";
+    mapping.inventoryField = "bi";
+    mapping.armorInventoryField = "b";
+    mapping.getItem = "b";
+    mapping.hasColor = "d_";
+    mapping.getColor = "b";
+    mapping.getEnchantmentLevel = "a";
+    mapping.getEquipmentInSlot = "p";
+    mapping.getIdFromItem = "b";
+    mapping.stackSizeField = "b";
+    mapping.getItemDamage = "h";
+    mapping.getUniqueId = "aK";
+    mapping.getLocationSkin = "i";
+    mapping.getTextureManager = "P";
+    mapping.getTexture = "b";
+    mapping.getGlTextureId = "b";
 
     return mapping;
 }
@@ -449,8 +606,13 @@ private:
     mapping.loadedEntitiesField = "loadedEntityList";
     mapping.playerEntitiesField = "playerEntities";
     mapping.getName = "getName";
+    mapping.isInvisible = "isInvisible";
     mapping.getDisplayName = "getDisplayName";
     mapping.getFormattedText = "getFormattedText";
+    mapping.addChatMessage = "addChatComponentMessage";
+    mapping.chatSerializerName = "net.minecraft.util.IChatComponent$Serializer";
+    mapping.chatSerializerSignature = "Lnet/minecraft/util/IChatComponent$Serializer;";
+    mapping.parseChatJson = "jsonToComponent";
     mapping.getBlockState = "getBlockState";
     mapping.getBlock = "getBlock";
     mapping.getBlockMetadata = "getMetaFromState";
@@ -468,6 +630,29 @@ private:
     mapping.activeViewportField = "VIEWPORT";
     mapping.timerField = "timer";
     mapping.renderPartialTicksField = "renderPartialTicks";
+    mapping.gameSettingsField = "gameSettings";
+    mapping.keyBindSneakField = "keyBindSneak";
+    mapping.movementKeyFields = {"keyBindForward", "keyBindBack",
+                                 "keyBindLeft", "keyBindRight",
+                                 "keyBindJump"};
+    mapping.getKeyCode = "getKeyCode";
+    mapping.setKeyBindState = "setKeyBindState";
+    mapping.mouseSensitivityField = "mouseSensitivity";
+    mapping.rotationYawField = "rotationYaw";
+    mapping.rotationPitchField = "rotationPitch";
+    mapping.motionFields = {"motionX", "motionY", "motionZ"};
+    mapping.onGroundField = "onGround";
+    mapping.jump = "jump";
+    mapping.isAirBlock = "isAirBlock";
+    mapping.getCurrentServerData = "getCurrentServerData";
+    mapping.serverIpField = "serverIP";
+    mapping.playerControllerField = "playerController";
+    mapping.currentItemField = "currentItem";
+    mapping.mainInventoryField = "mainInventory";
+    mapping.getBlockFromItem = "getBlock";
+    mapping.getIdFromBlock = "getIdFromBlock";
+    mapping.getFacingByIndex = "getFront";
+    mapping.onPlayerRightClick = "onPlayerRightClick";
     mapping.aabbFields = {"minX", "minY", "minZ", "maxX", "maxY", "maxZ"};
 
     mapping.getScoreboard = "getScoreboard";
@@ -476,11 +661,24 @@ private:
     mapping.getSortedScores = "getSortedScores";
     mapping.getPlayerName = "getPlayerName";
     mapping.formatPlayerName = "formatPlayerName";
+    mapping.getNetHandler = "getNetHandler";
+    mapping.getPlayerInfoMap = "getPlayerInfoMap";
+    mapping.getGameProfile = "getGameProfile";
     mapping.inventoryField = "inventory";
     mapping.armorInventoryField = "armorInventory";
     mapping.getItem = "getItem";
     mapping.hasColor = "hasColor";
     mapping.getColor = "getColor";
+    mapping.getEnchantmentLevel = "getEnchantmentLevel";
+    mapping.getEquipmentInSlot = "getEquipmentInSlot";
+    mapping.getIdFromItem = "getIdFromItem";
+    mapping.stackSizeField = "stackSize";
+    mapping.getItemDamage = "getItemDamage";
+    mapping.getUniqueId = "getUniqueID";
+    mapping.getLocationSkin = "getLocationSkin";
+    mapping.getTextureManager = "getTextureManager";
+    mapping.getTexture = "getTexture";
+    mapping.getGlTextureId = "getGlTextureId";
 
     return mapping;
 }
@@ -583,11 +781,27 @@ bool MappingDictionary::validate(std::string* const error) const noexcept
         }
     }
 
-    const std::array<std::pair<std::string_view, std::string_view>, 8U> featureClasses{{
+    const std::array<std::pair<std::string_view, std::string_view>, 24U> featureClasses{{
         {scoreboardName, scoreboardSignature}, {scoreObjectiveName, scoreObjectiveSignature},
         {scoreName, scoreSignature}, {scorePlayerTeamName, scorePlayerTeamSignature},
+        {netHandlerName, netHandlerSignature},
+        {networkPlayerInfoName, networkPlayerInfoSignature},
         {itemStackName, itemStackSignature}, {itemName, itemSignature},
-        {itemArmorName, itemArmorSignature}, {inventoryPlayerName, inventoryPlayerSignature}}};
+        {itemArmorName, itemArmorSignature}, {inventoryPlayerName, inventoryPlayerSignature},
+        {enchantmentHelperName, enchantmentHelperSignature},
+        {chatTextName, chatTextSignature},
+        {chatSerializerName, chatSerializerSignature},
+        {abstractClientPlayerName, abstractClientPlayerSignature},
+        {resourceLocationName, resourceLocationSignature},
+        {textureManagerName, textureManagerSignature},
+        {textureObjectName, textureObjectSignature},
+        {gameSettingsName, gameSettingsSignature},
+        {keyBindingName, keyBindingSignature},
+        {playerControllerName, playerControllerSignature},
+        {serverDataName, serverDataSignature},
+        {itemBlockName, itemBlockSignature},
+        {enumFacingName, enumFacingSignature},
+        {vec3Name, vec3Signature}}};
     for (const auto& [binaryName, signature] : featureClasses) {
         // A feature class may be omitted by an external/core-only mapping pack,
         // but a partially specified pair is still malformed.
@@ -602,6 +816,11 @@ bool MappingDictionary::validate(std::string* const error) const noexcept
         chunkProviderInterfaceSignature.back() != ';') {
         return reject("invalid chunk-provider interface JNI signature");
     }
+    if (!teamSignature.empty() &&
+        (teamSignature.size() < 3U || teamSignature.front() != 'L' ||
+         teamSignature.back() != ';')) {
+        return reject("invalid Team JNI signature");
+    }
 
     if ((getMinecraft.empty() && minecraftInstanceField.empty()) ||
         (!getMinecraft.empty() && !minecraftInstanceField.empty())) {
@@ -611,10 +830,11 @@ bool MappingDictionary::validate(std::string* const error) const noexcept
         (!getLoadedEntities.empty() && !loadedEntitiesField.empty())) {
         return reject("mapping must define exactly one loaded-entity accessor");
     }
-    const std::array<std::string_view, 41U> members{{
+    const std::array<std::string_view, 76U> members{{
         playerField, getHealth, getMaxHealth, getEntityId,
         getBounds, isMainThread, isSingleplayer, worldField, getLoadedEntities,
-        playerEntitiesField, getName, getDisplayName, getFormattedText,
+        playerEntitiesField, getName, isInvisible, getDisplayName, getFormattedText,
+        addChatMessage, parseChatJson,
         getBlockState, getBlock, getBlockMetadata, setIngameFocus,
         setIngameNotInFocus, getChunkProvider, chunkListingField,
         getStorageArrays, getStorageData, getRenderManager,
@@ -622,8 +842,17 @@ bool MappingDictionary::validate(std::string* const error) const noexcept
         timerField, renderPartialTicksField, minecraftInstanceField,
         loadedEntitiesField, getScoreboard, getObjectiveInDisplaySlot,
         getPlayersTeam, getSortedScores, getPlayerName, formatPlayerName,
+        getNetHandler, getPlayerInfoMap, getGameProfile,
         inventoryField, armorInventoryField,
-        getItem, hasColor, getColor}};
+        getItem, hasColor, getColor, getEnchantmentLevel,
+        getEquipmentInSlot, getIdFromItem, stackSizeField, getItemDamage,
+        getUniqueId, getLocationSkin, getTextureManager, getTexture,
+        getGlTextureId, gameSettingsField, keyBindSneakField, getKeyCode,
+        setKeyBindState, mouseSensitivityField, rotationYawField,
+        rotationPitchField, onGroundField, jump, isAirBlock,
+        getCurrentServerData, serverIpField, playerControllerField,
+        currentItemField, mainInventoryField, getBlockFromItem,
+        getIdFromBlock, getFacingByIndex, onPlayerRightClick}};
     for (const std::string_view member : members) {
         if (!member.empty() && !validMemberName(member))
             return reject("invalid method or field name");
@@ -639,6 +868,14 @@ bool MappingDictionary::validate(std::string* const error) const noexcept
     }
     for (const std::string& member : renderPositionFields) {
         if (!validMemberName(member)) return reject("invalid render-position field name");
+    }
+    for (const std::string& member : movementKeyFields) {
+        if (!member.empty() && !validMemberName(member))
+            return reject("invalid movement-key field name");
+    }
+    for (const std::string& member : motionFields) {
+        if (!member.empty() && !validMemberName(member))
+            return reject("invalid motion field name");
     }
     for (const std::string& member : aabbFields) {
         if (!validMemberName(member)) return reject("invalid AABB field name");

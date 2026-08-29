@@ -71,9 +71,9 @@ bool parseFlag(std::string_view token, bool& result) noexcept
     return true;
 }
 
-std::uint16_t packFeatures(const FeatureSettings& settings) noexcept
+std::uint32_t packFeatures(const FeatureSettings& settings) noexcept
 {
-    return static_cast<std::uint16_t>((settings.espEnabled ? 0x01U : 0U) |
+    return static_cast<std::uint32_t>((settings.espEnabled ? 0x01U : 0U) |
         (settings.entityEspEnabled ? 0x02U : 0U) |
         (settings.bedEspEnabled ? 0x04U : 0U) |
         (settings.labelsEnabled ? 0x08U : 0U) |
@@ -81,10 +81,66 @@ std::uint16_t packFeatures(const FeatureSettings& settings) noexcept
         (settings.bedThreatAlertsEnabled ? 0x20U : 0U) |
         (settings.bedDefensePanelEnabled ? 0x40U : 0U) |
         (settings.entityEspPlayersOnly ? 0x80U : 0U) |
-        (settings.bedAutoRefreshEnabled ? 0x100U : 0U));
+        (settings.bedAutoRefreshEnabled ? 0x100U : 0U) |
+        (settings.bedEspFilled ? 0x200U : 0U) |
+        (settings.debugChatEnabled ? 0x400U : 0U) |
+        (settings.showOwnBedDefenseInfo ? 0x800U : 0U) |
+        (settings.showTeammateBoxes ? 0x1000U : 0U) |
+        (settings.bedDefenseHoldToShow ? 0x2000U : 0U) |
+        (settings.bedDefensePerspectiveScale ? 0x4000U : 0U) |
+        (settings.hypixelPanelHoldToShow ? 0x8000U : 0U) |
+        (settings.nametagEnabled ? 0x10000U : 0U) |
+        (settings.nametagSidePlacement ? 0x20000U : 0U) |
+        (settings.enemyItemIndicatorsEnabled ? 0x40000U : 0U) |
+        (settings.showTeammateNametags ? 0x80000U : 0U) |
+        (settings.nametagNearbyEnemiesOnly ? 0x100000U : 0U) |
+        (settings.nametagTeamPulse ? 0x200000U : 0U) |
+        (settings.showTeammateArrows ? 0x400000U : 0U) |
+        (settings.safewalkEnabled ? 0x800000U : 0U) |
+        (settings.scaffoldEnabled ? 0x1000000U : 0U) |
+        (settings.flyEnabled ? 0x2000000U : 0U) |
+        (settings.bhopEnabled ? 0x4000000U : 0U) |
+        (settings.bhopAutoJump ? 0x8000000U : 0U) |
+        (settings.aimAssistEnabled ? 0x10000000U : 0U) |
+        (settings.aimSlowdownMode ? 0x20000000U : 0U) |
+        (settings.textGuiEnabled ? 0x40000000U : 0U) |
+        (settings.allowHypixelMovement ? 0x80000000U : 0U));
 }
 
-FeatureSettings unpackFeatures(const std::uint16_t bits, const int radius = 6) noexcept
+FeatureSettings unpackFeatures(const std::uint32_t bits,
+                               const int defenseRadius = 6,
+                               const int threatRadius = 8,
+                               const int bedHotkey = VK_LMENU,
+                                const int panelOpacity = 78,
+                                const int hypixelHotkey = VK_TAB,
+                                const int hypixelOpacity = 76,
+                                const int hypixelScale = 100,
+                                const int hypixelX = -1,
+                                const int hypixelY = -1,
+                                const bool clickGuiLightTheme = false,
+                                const std::uint32_t playerColor = 0xFF3B30U,
+                                const std::uint32_t bedColor = 0xFF5C68U,
+                                const std::uint32_t panelColor = 0x191621U,
+                                const std::uint32_t hypixelColor = 0x000000U,
+                                const int hypixelHeight = 100,
+                                const int nametagOpacity = 82,
+                                const std::uint32_t nametagColor = 0x101218U,
+                                const std::uint32_t accentColor = 0x825DE8U,
+                                const int hypixelFontIndex = 1,
+                                const int nametagRange = 32,
+                                const int nametagSizeIndex = 1,
+                                const std::uint32_t hypixelRailColor = 0x825DE8U,
+                                const int hypixelRailOpacity = 100,
+                                const int safewalkReleaseDelayMs = 120,
+                                const int safewalkEdgeSensitivity = 55,
+                                const int safewalkMinimumPitch = -5,
+                                const int safewalkHotkey = VK_F8,
+                                const int flySpeedPercent = 100,
+                                const int aimSlowdownPercent = 45,
+                                const int aimSpeedPercent = 35,
+                                const std::uint32_t textGuiColor = 0x7EE7FFU,
+                                const int textGuiX = -1,
+                                const int textGuiY = -1) noexcept
 {
     FeatureSettings s;
     s.espEnabled = (bits & 0x01U) != 0U;
@@ -96,7 +152,62 @@ FeatureSettings unpackFeatures(const std::uint16_t bits, const int radius = 6) n
     s.bedDefensePanelEnabled = (bits & 0x40U) != 0U;
     s.entityEspPlayersOnly = (bits & 0x80U) != 0U;
     s.bedAutoRefreshEnabled = (bits & 0x100U) != 0U;
-    s.bedDefenseRadius = std::clamp(radius, 3, 10);
+    s.bedEspFilled = (bits & 0x200U) != 0U;
+    s.debugChatEnabled = (bits & 0x400U) != 0U;
+    s.showOwnBedDefenseInfo = (bits & 0x800U) != 0U;
+    s.showTeammateBoxes = (bits & 0x1000U) != 0U;
+    s.bedDefenseHoldToShow = (bits & 0x2000U) != 0U;
+    s.bedDefensePerspectiveScale = (bits & 0x4000U) != 0U;
+    s.hypixelPanelHoldToShow = (bits & 0x8000U) != 0U;
+    s.nametagEnabled = (bits & 0x10000U) != 0U;
+    s.nametagSidePlacement = (bits & 0x20000U) != 0U;
+    s.enemyItemIndicatorsEnabled = (bits & 0x40000U) != 0U;
+    s.showTeammateNametags = (bits & 0x80000U) != 0U;
+    s.nametagNearbyEnemiesOnly = (bits & 0x100000U) != 0U;
+    s.nametagTeamPulse = (bits & 0x200000U) != 0U;
+    s.showTeammateArrows = (bits & 0x400000U) != 0U;
+    s.safewalkEnabled = (bits & 0x800000U) != 0U;
+    s.scaffoldEnabled = (bits & 0x1000000U) != 0U;
+    s.flyEnabled = (bits & 0x2000000U) != 0U;
+    s.bhopEnabled = (bits & 0x4000000U) != 0U;
+    s.bhopAutoJump = (bits & 0x8000000U) != 0U;
+    s.aimAssistEnabled = (bits & 0x10000000U) != 0U;
+    s.aimSlowdownMode = (bits & 0x20000000U) != 0U;
+    s.textGuiEnabled = (bits & 0x40000000U) != 0U;
+    s.allowHypixelMovement = (bits & 0x80000000U) != 0U;
+    s.bedDefenseRadius = std::clamp(defenseRadius, 3, 10);
+    s.bedThreatRadius = std::clamp(threatRadius, 3, 32);
+    s.bedDefenseHotkey = std::clamp(bedHotkey, 8, 254);
+    s.bedDefensePanelOpacity = std::clamp(panelOpacity, 0, 100);
+    s.hypixelPanelHotkey = std::clamp(hypixelHotkey, 8, 254);
+    s.hypixelPanelOpacity = std::clamp(hypixelOpacity, 0, 100);
+    s.hypixelPanelScale = std::clamp(hypixelScale, 70, 160);
+    s.hypixelPanelHeight = std::clamp(hypixelHeight, 60, 400);
+    s.hypixelPanelX = std::clamp(hypixelX, -1, 1000);
+    s.hypixelPanelY = std::clamp(hypixelY, -1, 1000);
+    s.clickGuiLightTheme = clickGuiLightTheme;
+    s.playerEspColor = playerColor & 0xFFFFFFU;
+    s.bedEspColor = bedColor & 0xFFFFFFU;
+    s.bedDefensePanelColor = panelColor & 0xFFFFFFU;
+    s.hypixelPanelColor = hypixelColor & 0xFFFFFFU;
+    s.nametagPanelOpacity = std::clamp(nametagOpacity, 10, 100);
+    s.nametagPanelColor = nametagColor & 0xFFFFFFU;
+    s.clickGuiAccentColor = accentColor & 0xFFFFFFU;
+    s.hypixelPanelFontIndex = std::clamp(hypixelFontIndex, 0, 3);
+    s.nametagRange = std::clamp(nametagRange, 4, 128);
+    s.nametagSizeIndex = std::clamp(nametagSizeIndex, 0, 3);
+    s.hypixelRailColor = hypixelRailColor & 0xFFFFFFU;
+    s.hypixelRailOpacity = std::clamp(hypixelRailOpacity, 0, 100);
+    s.safewalkReleaseDelayMs = std::clamp(safewalkReleaseDelayMs, 0, 750);
+    s.safewalkEdgeSensitivity = std::clamp(safewalkEdgeSensitivity, 0, 95);
+    s.safewalkMinimumPitch = std::clamp(safewalkMinimumPitch, -90, 90);
+    s.safewalkHotkey = std::clamp(safewalkHotkey, 8, 254);
+    s.flySpeedPercent = std::clamp(flySpeedPercent, 10, 500);
+    s.aimSlowdownPercent = std::clamp(aimSlowdownPercent, 5, 95);
+    s.aimSpeedPercent = std::clamp(aimSpeedPercent, 1, 100);
+    s.textGuiColor = textGuiColor & 0xFFFFFFU;
+    s.textGuiX = std::clamp(textGuiX, -1, 1000);
+    s.textGuiY = std::clamp(textGuiY, -1, 1000);
     return s;
 }
 
@@ -514,6 +625,7 @@ void AgentRuntime::telemetryMain() noexcept
     std::uint32_t sentGuiScaleChangedRevision = 0U;
     std::uint64_t sentHypixelQueryRevision = 0U;
     std::uint64_t sentPlayerRosterGeneration = 0U;
+    std::uint32_t sentBlacklistActionRevision = 0U;
     while (m_stopEvent != nullptr && m_telemetryEvent != nullptr) {
         const DWORD wait = ::WaitForMultipleObjects(2U, events, FALSE, 250U);
         if (wait == WAIT_OBJECT_0 || wait == WAIT_FAILED) {
@@ -553,8 +665,41 @@ void AgentRuntime::telemetryMain() noexcept
         if (featureRevision != sentFeatureChangedRevision) {
             const FeatureSettings settings = unpackFeatures(
                 m_featureChangedBits.load(std::memory_order_acquire),
-                m_featureChangedBedRadius.load(std::memory_order_acquire));
-            FixedLine<96U> line;
+                m_featureChangedBedRadius.load(std::memory_order_acquire),
+                m_featureChangedThreatRadius.load(std::memory_order_acquire),
+                m_featureChangedBedHotkey.load(std::memory_order_acquire),
+                m_featureChangedPanelOpacity.load(std::memory_order_acquire),
+                m_featureChangedHypixelHotkey.load(std::memory_order_acquire),
+                m_featureChangedHypixelOpacity.load(std::memory_order_acquire),
+                m_featureChangedHypixelScale.load(std::memory_order_acquire),
+                m_featureChangedHypixelX.load(std::memory_order_acquire),
+                m_featureChangedHypixelY.load(std::memory_order_acquire),
+                m_featureChangedClickGuiLightTheme.load(std::memory_order_acquire),
+                m_featureChangedPlayerColor.load(std::memory_order_acquire),
+                m_featureChangedBedColor.load(std::memory_order_acquire),
+                m_featureChangedPanelColor.load(std::memory_order_acquire),
+                m_featureChangedHypixelColor.load(std::memory_order_acquire),
+                m_featureChangedHypixelHeight.load(std::memory_order_acquire),
+                m_featureChangedNametagOpacity.load(std::memory_order_acquire),
+                m_featureChangedNametagColor.load(std::memory_order_acquire),
+                m_featureChangedAccentColor.load(std::memory_order_acquire),
+                m_featureChangedHypixelFontIndex.load(std::memory_order_acquire),
+                m_featureChangedNametagRange.load(std::memory_order_acquire),
+                m_featureChangedNametagSizeIndex.load(std::memory_order_acquire),
+                m_featureChangedHypixelRailColor.load(std::memory_order_acquire),
+                m_featureChangedHypixelRailOpacity.load(std::memory_order_acquire),
+                m_featureChangedSafewalkReleaseDelayMs.load(
+                    std::memory_order_acquire),
+                m_featureChangedSafewalkEdgeSensitivity.load(std::memory_order_acquire),
+                m_featureChangedSafewalkMinimumPitch.load(std::memory_order_acquire),
+                m_featureChangedSafewalkHotkey.load(std::memory_order_acquire),
+                m_featureChangedFlySpeedPercent.load(std::memory_order_acquire),
+                m_featureChangedAimSlowdownPercent.load(std::memory_order_acquire),
+                m_featureChangedAimSpeedPercent.load(std::memory_order_acquire),
+                m_featureChangedTextGuiColor.load(std::memory_order_acquire),
+                m_featureChangedTextGuiX.load(std::memory_order_acquire),
+                m_featureChangedTextGuiY.load(std::memory_order_acquire));
+            FixedLine<720U> line;
             if (line.append("FEATURE_STATE_CHANGED ") &&
                 line.appendInteger(settings.espEnabled ? 1 : 0) && line.append(' ') &&
                 line.appendInteger(settings.entityEspEnabled ? 1 : 0) && line.append(' ') &&
@@ -563,7 +708,64 @@ void AgentRuntime::telemetryMain() noexcept
                 line.appendInteger(settings.hypixelPanelEnabled ? 1 : 0) && line.append(' ') &&
                 line.appendInteger(settings.bedThreatAlertsEnabled ? 1 : 0) && line.append(' ') &&
                 line.appendInteger(settings.bedDefensePanelEnabled ? 1 : 0) && line.append(' ') &&
-                line.appendInteger(settings.bedDefenseRadius) &&
+                line.appendInteger(settings.entityEspPlayersOnly ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.bedAutoRefreshEnabled ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.bedEspFilled ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.debugChatEnabled ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.showOwnBedDefenseInfo ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.showTeammateBoxes ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.bedDefenseHoldToShow ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.bedDefensePerspectiveScale ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.hypixelPanelHoldToShow ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.nametagEnabled ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.nametagSidePlacement ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.enemyItemIndicatorsEnabled ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.showTeammateNametags ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.nametagNearbyEnemiesOnly ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.nametagTeamPulse ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.showTeammateArrows ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.safewalkEnabled ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.scaffoldEnabled ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.flyEnabled ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.bhopEnabled ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.bhopAutoJump ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.aimAssistEnabled ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.aimSlowdownMode ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.textGuiEnabled ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.allowHypixelMovement ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.bedDefenseRadius) && line.append(' ') &&
+                line.appendInteger(settings.bedThreatRadius) && line.append(' ') &&
+                line.appendInteger(settings.bedDefenseHotkey) && line.append(' ') &&
+                line.appendInteger(settings.bedDefensePanelOpacity) && line.append(' ') &&
+                line.appendInteger(settings.hypixelPanelHotkey) && line.append(' ') &&
+                line.appendInteger(settings.hypixelPanelOpacity) && line.append(' ') &&
+                line.appendInteger(settings.hypixelPanelScale) && line.append(' ') &&
+                line.appendInteger(settings.hypixelPanelX) && line.append(' ') &&
+                line.appendInteger(settings.hypixelPanelY) && line.append(' ') &&
+                line.appendInteger(settings.clickGuiLightTheme ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.playerEspColor) && line.append(' ') &&
+                line.appendInteger(settings.bedEspColor) && line.append(' ') &&
+                line.appendInteger(settings.bedDefensePanelColor) && line.append(' ') &&
+                line.appendInteger(settings.hypixelPanelColor) && line.append(' ') &&
+                line.appendInteger(settings.hypixelPanelHeight) && line.append(' ') &&
+                line.appendInteger(settings.nametagPanelOpacity) && line.append(' ') &&
+                line.appendInteger(settings.nametagPanelColor) && line.append(' ') &&
+                line.appendInteger(settings.clickGuiAccentColor) && line.append(' ') &&
+                line.appendInteger(settings.hypixelPanelFontIndex) && line.append(' ') &&
+                line.appendInteger(settings.nametagRange) && line.append(' ') &&
+                line.appendInteger(settings.nametagSizeIndex) && line.append(' ') &&
+                line.appendInteger(settings.hypixelRailColor) && line.append(' ') &&
+                line.appendInteger(settings.hypixelRailOpacity) && line.append(' ') &&
+                line.appendInteger(settings.safewalkReleaseDelayMs) && line.append(' ') &&
+                line.appendInteger(settings.safewalkEdgeSensitivity) && line.append(' ') &&
+                line.appendInteger(settings.safewalkMinimumPitch) && line.append(' ') &&
+                line.appendInteger(settings.safewalkHotkey) && line.append(' ') &&
+                line.appendInteger(settings.flySpeedPercent) && line.append(' ') &&
+                line.appendInteger(settings.aimSlowdownPercent) && line.append(' ') &&
+                line.appendInteger(settings.aimSpeedPercent) && line.append(' ') &&
+                line.appendInteger(settings.textGuiColor) && line.append(' ') &&
+                line.appendInteger(settings.textGuiX) && line.append(' ') &&
+                line.appendInteger(settings.textGuiY) &&
                 m_ipc->sendLine(line.view())) {
                 sentFeatureChangedRevision = featureRevision;
             }
@@ -589,6 +791,56 @@ void AgentRuntime::telemetryMain() noexcept
                 m_ipc->sendLine(line.view())) {
                 sentGuiScaleChangedRevision = guiScaleRevision;
             }
+        }
+
+        const std::uint32_t blacklistActionRevision =
+            m_blacklistActionRevision.load(std::memory_order_acquire);
+        if (blacklistActionRevision != sentBlacklistActionRevision) {
+            BlacklistAction action{};
+            ::AcquireSRWLockShared(&m_blacklistActionLock);
+            action = m_blacklistAction;
+            ::ReleaseSRWLockShared(&m_blacklistActionLock);
+            FixedLine<1024U> actionLine;
+            bool formatted = false;
+            switch (action.type) {
+            case BlacklistAction::Type::Add:
+                formatted = actionLine.append("BLACKLIST_ADD ") &&
+                    appendPercentEncoded(actionLine, action.name.data()) && actionLine.append(' ') &&
+                    appendPercentEncoded(actionLine, action.uuid.data()) && actionLine.append(' ') &&
+                    appendPercentEncoded(actionLine, action.reason.data()) && actionLine.append(' ') &&
+                    actionLine.appendInteger(action.idOnlyNick ? 1 : 0) && actionLine.append(' ') &&
+                    actionLine.appendInteger(action.warnOnEncounter ? 1 : 0);
+                break;
+            case BlacklistAction::Type::Remove:
+                formatted = actionLine.append("BLACKLIST_REMOVE ") &&
+                    appendPercentEncoded(actionLine, action.key.data());
+                break;
+            case BlacklistAction::Type::Warning:
+                formatted = actionLine.append("BLACKLIST_WARNING ") &&
+                    appendPercentEncoded(actionLine, action.key.data()) && actionLine.append(' ') &&
+                    actionLine.appendInteger(action.warnOnEncounter ? 1 : 0);
+                break;
+            case BlacklistAction::Type::Layout:
+                formatted = actionLine.append("BLACKLIST_LAYOUT ") &&
+                    actionLine.appendInteger(action.x) && actionLine.append(' ') &&
+                    actionLine.appendInteger(action.y) && actionLine.append(' ') &&
+                    actionLine.appendInteger(action.width) && actionLine.append(' ') &&
+                    actionLine.appendInteger(action.height);
+                break;
+            case BlacklistAction::Type::Settings:
+                formatted = actionLine.append("BLACKLIST_SETTINGS_CHANGED ") &&
+                    actionLine.appendInteger(action.panelEnabled ? 1 : 0) && actionLine.append(' ') &&
+                    actionLine.appendInteger(action.matchAlertsEnabled ? 1 : 0) && actionLine.append(' ') &&
+                    actionLine.appendInteger(action.allowIdOnlyNicks ? 1 : 0) && actionLine.append(' ') &&
+                    actionLine.appendInteger(action.showWithClickGui ? 1 : 0) && actionLine.append(' ') &&
+                    actionLine.appendInteger(action.collapsed ? 1 : 0) && actionLine.append(' ') &&
+                    actionLine.appendInteger(action.panelOpacity) && actionLine.append(' ') &&
+                    actionLine.appendInteger(action.panelColor);
+                break;
+            case BlacklistAction::Type::None: break;
+            }
+            if (formatted && m_ipc->sendLine(actionLine.view()))
+                sentBlacklistActionRevision = blacklistActionRevision;
         }
 
         GameStateMessage gameState{};
@@ -635,17 +887,28 @@ void AgentRuntime::telemetryMain() noexcept
             }
             for (std::uint32_t index = 0U; allSent && matchActive &&
                  index < playerCount; ++index) {
+                const char teamColor = players[index].teamColor;
+                if (!((teamColor >= '0' && teamColor <= '9') ||
+                      (teamColor >= 'a' && teamColor <= 'f'))) {
+                    continue;
+                }
                 const char teamPrefix[4]{
                     static_cast<char>(0xC2), static_cast<char>(0xA7),
-                    players[index].teamColor, '\0'};
-                FixedLine<96U> line;
+                    teamColor, '\0'};
+                FixedLine<160U> line;
                 if (!line.append("PLAYER_FOUND ") ||
                     !appendPercentEncoded(line, players[index].name.data()) ||
                     !line.append(' ') || !appendPercentEncoded(line, teamPrefix) ||
+                    !line.append(' ') ||
+                    !appendPercentEncoded(line, players[index].uuid.data()) ||
                     !m_ipc->sendLine(line.view())) {
                     allSent = false;
                     break;
                 }
+            }
+            if (allSent && matchActive && playerCount > 0U) {
+                m_bindings->enqueueDebugChatLine(
+                    "stats_query=dispatched players=" + std::to_string(playerCount));
             }
             if (!matchActive) {
                 ::AcquireSRWLockExclusive(&m_playerStatsLock);
@@ -730,13 +993,153 @@ void AgentRuntime::queueStateChanged(const bool visible, const bool interactive)
 
 void AgentRuntime::queueFeatureChanged(const FeatureSettings& settings) noexcept
 {
-    const std::uint16_t bits = packFeatures(settings);
+    const std::uint32_t bits = packFeatures(settings);
     m_featureBits.store(bits, std::memory_order_release);
     m_bedDefenseRadius.store(std::clamp(settings.bedDefenseRadius, 3, 10),
                              std::memory_order_release);
+    m_bedThreatRadius.store(std::clamp(settings.bedThreatRadius, 3, 32),
+                            std::memory_order_release);
+    m_bedDefenseHotkey.store(std::clamp(settings.bedDefenseHotkey, 8, 254),
+                             std::memory_order_release);
+    m_bedDefensePanelOpacity.store(std::clamp(settings.bedDefensePanelOpacity, 0, 100),
+                                   std::memory_order_release);
+    m_hypixelPanelHotkey.store(std::clamp(settings.hypixelPanelHotkey, 8, 254),
+                               std::memory_order_release);
+    m_hypixelPanelOpacity.store(std::clamp(settings.hypixelPanelOpacity, 0, 100),
+                                std::memory_order_release);
+    m_hypixelPanelScale.store(std::clamp(settings.hypixelPanelScale, 70, 160),
+                              std::memory_order_release);
+    m_hypixelPanelHeight.store(std::clamp(settings.hypixelPanelHeight, 60, 400),
+                               std::memory_order_release);
+    m_hypixelPanelX.store(std::clamp(settings.hypixelPanelX, -1, 1000),
+                          std::memory_order_release);
+    m_hypixelPanelY.store(std::clamp(settings.hypixelPanelY, -1, 1000),
+                          std::memory_order_release);
+    m_clickGuiLightTheme.store(settings.clickGuiLightTheme,
+                               std::memory_order_release);
+    m_playerEspColor.store(settings.playerEspColor & 0xFFFFFFU,
+                           std::memory_order_release);
+    m_bedEspColor.store(settings.bedEspColor & 0xFFFFFFU,
+                        std::memory_order_release);
+    m_bedDefensePanelColor.store(settings.bedDefensePanelColor & 0xFFFFFFU,
+                                 std::memory_order_release);
+    m_hypixelPanelColor.store(settings.hypixelPanelColor & 0xFFFFFFU,
+                              std::memory_order_release);
+    m_nametagPanelOpacity.store(std::clamp(settings.nametagPanelOpacity, 10, 100),
+                                std::memory_order_release);
+    m_nametagPanelColor.store(settings.nametagPanelColor & 0xFFFFFFU,
+                              std::memory_order_release);
+    m_clickGuiAccentColor.store(settings.clickGuiAccentColor & 0xFFFFFFU,
+                                std::memory_order_release);
+    m_hypixelRailColor.store(settings.hypixelRailColor & 0xFFFFFFU,
+                             std::memory_order_release);
+    m_hypixelRailOpacity.store(std::clamp(settings.hypixelRailOpacity, 0, 100),
+                               std::memory_order_release);
+    m_hypixelPanelFontIndex.store(std::clamp(settings.hypixelPanelFontIndex, 0, 3),
+                                  std::memory_order_release);
+    m_nametagRange.store(std::clamp(settings.nametagRange, 4, 128),
+                         std::memory_order_release);
+    m_nametagSizeIndex.store(std::clamp(settings.nametagSizeIndex, 0, 3),
+                             std::memory_order_release);
+    m_safewalkReleaseDelayMs.store(
+        std::clamp(settings.safewalkReleaseDelayMs, 0, 750),
+        std::memory_order_release);
+    m_safewalkEdgeSensitivity.store(
+        std::clamp(settings.safewalkEdgeSensitivity, 0, 95),
+        std::memory_order_release);
+    m_safewalkMinimumPitch.store(
+        std::clamp(settings.safewalkMinimumPitch, -90, 90),
+        std::memory_order_release);
+    m_safewalkHotkey.store(std::clamp(settings.safewalkHotkey, 8, 254),
+                            std::memory_order_release);
+    m_flySpeedPercent.store(std::clamp(settings.flySpeedPercent, 10, 500),
+                            std::memory_order_release);
+    m_aimSlowdownPercent.store(std::clamp(settings.aimSlowdownPercent, 5, 95),
+                               std::memory_order_release);
+    m_aimSpeedPercent.store(std::clamp(settings.aimSpeedPercent, 1, 100),
+                            std::memory_order_release);
+    m_textGuiColor.store(settings.textGuiColor & 0xFFFFFFU,
+                         std::memory_order_release);
+    m_textGuiX.store(std::clamp(settings.textGuiX, -1, 1000),
+                     std::memory_order_release);
+    m_textGuiY.store(std::clamp(settings.textGuiY, -1, 1000),
+                     std::memory_order_release);
     m_featureChangedBits.store(bits, std::memory_order_relaxed);
     m_featureChangedBedRadius.store(std::clamp(settings.bedDefenseRadius, 3, 10),
                                     std::memory_order_relaxed);
+    m_featureChangedThreatRadius.store(std::clamp(settings.bedThreatRadius, 3, 32),
+                                       std::memory_order_relaxed);
+    m_featureChangedBedHotkey.store(std::clamp(settings.bedDefenseHotkey, 8, 254),
+                                    std::memory_order_relaxed);
+    m_featureChangedPanelOpacity.store(
+        std::clamp(settings.bedDefensePanelOpacity, 0, 100),
+        std::memory_order_relaxed);
+    m_featureChangedHypixelHotkey.store(
+        std::clamp(settings.hypixelPanelHotkey, 8, 254), std::memory_order_relaxed);
+    m_featureChangedHypixelOpacity.store(
+        std::clamp(settings.hypixelPanelOpacity, 0, 100), std::memory_order_relaxed);
+    m_featureChangedHypixelScale.store(
+        std::clamp(settings.hypixelPanelScale, 70, 160), std::memory_order_relaxed);
+    m_featureChangedHypixelHeight.store(
+        std::clamp(settings.hypixelPanelHeight, 60, 400), std::memory_order_relaxed);
+    m_featureChangedHypixelX.store(
+        std::clamp(settings.hypixelPanelX, -1, 1000), std::memory_order_relaxed);
+    m_featureChangedHypixelY.store(
+        std::clamp(settings.hypixelPanelY, -1, 1000), std::memory_order_relaxed);
+    m_featureChangedClickGuiLightTheme.store(settings.clickGuiLightTheme,
+                                              std::memory_order_relaxed);
+    m_featureChangedPlayerColor.store(settings.playerEspColor & 0xFFFFFFU,
+                                      std::memory_order_relaxed);
+    m_featureChangedBedColor.store(settings.bedEspColor & 0xFFFFFFU,
+                                   std::memory_order_relaxed);
+    m_featureChangedPanelColor.store(settings.bedDefensePanelColor & 0xFFFFFFU,
+                                     std::memory_order_relaxed);
+    m_featureChangedHypixelColor.store(settings.hypixelPanelColor & 0xFFFFFFU,
+                                       std::memory_order_relaxed);
+    m_featureChangedNametagOpacity.store(
+        std::clamp(settings.nametagPanelOpacity, 10, 100), std::memory_order_relaxed);
+    m_featureChangedNametagColor.store(settings.nametagPanelColor & 0xFFFFFFU,
+                                       std::memory_order_relaxed);
+    m_featureChangedAccentColor.store(settings.clickGuiAccentColor & 0xFFFFFFU,
+                                      std::memory_order_relaxed);
+    m_featureChangedHypixelRailColor.store(settings.hypixelRailColor & 0xFFFFFFU,
+                                           std::memory_order_relaxed);
+    m_featureChangedHypixelRailOpacity.store(
+        std::clamp(settings.hypixelRailOpacity, 0, 100),
+        std::memory_order_relaxed);
+    m_featureChangedHypixelFontIndex.store(
+        std::clamp(settings.hypixelPanelFontIndex, 0, 3), std::memory_order_relaxed);
+    m_featureChangedNametagRange.store(
+        std::clamp(settings.nametagRange, 4, 128), std::memory_order_relaxed);
+    m_featureChangedNametagSizeIndex.store(
+        std::clamp(settings.nametagSizeIndex, 0, 3), std::memory_order_relaxed);
+    m_featureChangedSafewalkReleaseDelayMs.store(
+        std::clamp(settings.safewalkReleaseDelayMs, 0, 750),
+        std::memory_order_relaxed);
+    m_featureChangedSafewalkEdgeSensitivity.store(
+        std::clamp(settings.safewalkEdgeSensitivity, 0, 95),
+        std::memory_order_relaxed);
+    m_featureChangedSafewalkMinimumPitch.store(
+        std::clamp(settings.safewalkMinimumPitch, -90, 90),
+        std::memory_order_relaxed);
+    m_featureChangedSafewalkHotkey.store(
+        std::clamp(settings.safewalkHotkey, 8, 254),
+        std::memory_order_relaxed);
+    m_featureChangedFlySpeedPercent.store(
+        std::clamp(settings.flySpeedPercent, 10, 500),
+        std::memory_order_relaxed);
+    m_featureChangedAimSlowdownPercent.store(
+        std::clamp(settings.aimSlowdownPercent, 5, 95),
+        std::memory_order_relaxed);
+    m_featureChangedAimSpeedPercent.store(
+        std::clamp(settings.aimSpeedPercent, 1, 100),
+        std::memory_order_relaxed);
+    m_featureChangedTextGuiColor.store(settings.textGuiColor & 0xFFFFFFU,
+                                       std::memory_order_relaxed);
+    m_featureChangedTextGuiX.store(std::clamp(settings.textGuiX, -1, 1000),
+                                   std::memory_order_relaxed);
+    m_featureChangedTextGuiY.store(std::clamp(settings.textGuiY, -1, 1000),
+                                   std::memory_order_relaxed);
     m_featureChangedRevision.fetch_add(1U, std::memory_order_release);
     if (m_telemetryEvent != nullptr) ::SetEvent(m_telemetryEvent);
 }
@@ -767,6 +1170,15 @@ void AgentRuntime::queueGuiScaleChanged(const int index) noexcept
     m_guiScaleIndex.store(bounded, std::memory_order_release);
     m_guiScaleChangedIndex.store(bounded, std::memory_order_relaxed);
     m_guiScaleChangedRevision.fetch_add(1U, std::memory_order_release);
+    if (m_telemetryEvent != nullptr) ::SetEvent(m_telemetryEvent);
+}
+
+void AgentRuntime::queueBlacklistAction(const BlacklistAction& action) noexcept
+{
+    ::AcquireSRWLockExclusive(&m_blacklistActionLock);
+    m_blacklistAction = action;
+    ::ReleaseSRWLockExclusive(&m_blacklistActionLock);
+    m_blacklistActionRevision.fetch_add(1U, std::memory_order_release);
     if (m_telemetryEvent != nullptr) ::SetEvent(m_telemetryEvent);
 }
 
@@ -824,25 +1236,103 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
         return true;
     }
     if (command == "FEATURE_STATE") {
-        std::array<std::string, 7U> tokens{};
+        std::array<std::string, 32U> tokens{};
         std::string trailing;
         FeatureSettings settings{};
-        bool values[7]{};
-        int radius = 0;
-        if (!(stream >> tokens[0] >> tokens[1] >> tokens[2] >> tokens[3] >> tokens[4]
-              >> tokens[5] >> tokens[6] >> radius) ||
+        std::array<bool, 32U> values{};
+        int defenseRadius = 0;
+        int threatRadius = 0;
+        int bedHotkey = 0;
+        int panelOpacity = 0;
+        int hypixelHotkey = 0;
+        int hypixelOpacity = 0;
+        int hypixelScale = 0;
+        int hypixelX = 0;
+        int hypixelY = 0;
+        int clickGuiTheme = 0;
+        std::uint32_t playerColor = 0U;
+        std::uint32_t bedColor = 0U;
+        std::uint32_t panelColor = 0U;
+        std::uint32_t hypixelColor = 0U;
+        int hypixelHeight = 0;
+        int nametagOpacity = 0;
+        std::uint32_t nametagColor = 0U;
+        std::uint32_t accentColor = 0U;
+        int hypixelFontIndex = 0;
+        int nametagRange = 0;
+        int nametagSizeIndex = 0;
+        std::uint32_t hypixelRailColor = 0U;
+        int hypixelRailOpacity = 0;
+        int safewalkReleaseDelayMs = 0;
+        int safewalkEdgeSensitivity = 0;
+        int safewalkMinimumPitch = 0;
+        int safewalkHotkey = 0;
+        int flySpeedPercent = 0;
+        int aimSlowdownPercent = 0;
+        int aimSpeedPercent = 0;
+        std::uint32_t textGuiColor = 0U;
+        int textGuiX = 0;
+        int textGuiY = 0;
+        bool featureTokensRead = true;
+        for (std::string& token : tokens) {
+            if (!(stream >> token)) {
+                featureTokensRead = false;
+                break;
+            }
+        }
+        if (!featureTokensRead || !(stream
+               >> defenseRadius >> threatRadius >> bedHotkey >> panelOpacity
+               >> hypixelHotkey >> hypixelOpacity
+               >> hypixelScale >> hypixelX >> hypixelY >> clickGuiTheme
+               >> playerColor >> bedColor >> panelColor >> hypixelColor
+               >> hypixelHeight >> nametagOpacity >> nametagColor >> accentColor
+               >> hypixelFontIndex >> nametagRange >> nametagSizeIndex
+               >> hypixelRailColor >> hypixelRailOpacity
+               >> safewalkReleaseDelayMs >> safewalkEdgeSensitivity
+               >> safewalkMinimumPitch >> safewalkHotkey >> flySpeedPercent
+               >> aimSlowdownPercent >> aimSpeedPercent >> textGuiColor
+               >> textGuiX >> textGuiY) ||
             (stream >> trailing)) {
-            (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE expected-seven-flags-and-radius");
+            (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE expected-thirty-two-flags-and-layout");
             return true;
         }
+
         for (std::size_t index = 0U; index < tokens.size(); ++index) {
             if (!parseFlag(tokens[index], values[index])) {
-                (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE expected-seven-flags-and-radius");
+                (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE expected-thirty-two-flags-and-layout");
                 return true;
             }
         }
-        if (radius < 3 || radius > 10) {
-            (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE radius-must-be-3-10");
+        if (defenseRadius < 3 || defenseRadius > 10 ||
+            threatRadius < 3 || threatRadius > 32 ||
+            bedHotkey < 8 || bedHotkey > 254 ||
+            panelOpacity < 0 || panelOpacity > 100 ||
+            hypixelHotkey < 8 || hypixelHotkey > 254 ||
+            hypixelOpacity < 0 || hypixelOpacity > 100 ||
+            hypixelScale < 70 || hypixelScale > 160 ||
+            hypixelHeight < 60 || hypixelHeight > 400 ||
+            hypixelX < -1 || hypixelX > 1000 ||
+            hypixelY < -1 || hypixelY > 1000 ||
+            clickGuiTheme < 0 || clickGuiTheme > 1 ||
+            playerColor > 0xFFFFFFU || bedColor > 0xFFFFFFU ||
+            panelColor > 0xFFFFFFU || hypixelColor > 0xFFFFFFU ||
+            nametagOpacity < 10 || nametagOpacity > 100 ||
+            nametagColor > 0xFFFFFFU || accentColor > 0xFFFFFFU ||
+            hypixelRailColor > 0xFFFFFFU ||
+            hypixelRailOpacity < 0 || hypixelRailOpacity > 100 ||
+            safewalkReleaseDelayMs < 0 || safewalkReleaseDelayMs > 750 ||
+            safewalkEdgeSensitivity < 0 || safewalkEdgeSensitivity > 95 ||
+            safewalkMinimumPitch < -90 || safewalkMinimumPitch > 90 ||
+            safewalkHotkey < 8 || safewalkHotkey > 254 ||
+            flySpeedPercent < 10 || flySpeedPercent > 500 ||
+            aimSlowdownPercent < 5 || aimSlowdownPercent > 95 ||
+            aimSpeedPercent < 1 || aimSpeedPercent > 100 ||
+            textGuiColor > 0xFFFFFFU || textGuiX < -1 || textGuiX > 1000 ||
+            textGuiY < -1 || textGuiY > 1000 ||
+            hypixelFontIndex < 0 || hypixelFontIndex > 3 ||
+            nametagRange < 4 || nametagRange > 128 ||
+            nametagSizeIndex < 0 || nametagSizeIndex > 3) {
+            (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE invalid-radius-bind-opacity-or-color");
             return true;
         }
         settings.espEnabled = values[0];
@@ -852,9 +1342,102 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
         settings.hypixelPanelEnabled = values[4];
         settings.bedThreatAlertsEnabled = values[5];
         settings.bedDefensePanelEnabled = values[6];
-        settings.bedDefenseRadius = radius;
+        settings.entityEspPlayersOnly = values[7];
+        settings.bedAutoRefreshEnabled = values[8];
+        settings.bedEspFilled = values[9];
+        settings.debugChatEnabled = values[10];
+        settings.showOwnBedDefenseInfo = values[11];
+        settings.showTeammateBoxes = values[12];
+        settings.bedDefenseHoldToShow = values[13];
+        settings.bedDefensePerspectiveScale = values[14];
+        settings.hypixelPanelHoldToShow = values[15];
+        settings.nametagEnabled = values[16];
+        settings.nametagSidePlacement = values[17];
+        settings.enemyItemIndicatorsEnabled = values[18];
+        settings.showTeammateNametags = values[19];
+        settings.nametagNearbyEnemiesOnly = values[20];
+        settings.nametagTeamPulse = values[21];
+        settings.showTeammateArrows = values[22];
+        settings.safewalkEnabled = values[23];
+        settings.scaffoldEnabled = values[24];
+        settings.flyEnabled = values[25];
+        settings.bhopEnabled = values[26];
+        settings.bhopAutoJump = values[27];
+        settings.aimAssistEnabled = values[28];
+        settings.aimSlowdownMode = values[29];
+        settings.textGuiEnabled = values[30];
+        settings.allowHypixelMovement = values[31];
+        settings.bedDefenseRadius = defenseRadius;
+        settings.bedThreatRadius = threatRadius;
+        settings.bedDefenseHotkey = bedHotkey;
+        settings.bedDefensePanelOpacity = panelOpacity;
+        settings.hypixelPanelHotkey = hypixelHotkey;
+        settings.hypixelPanelOpacity = hypixelOpacity;
+        settings.hypixelPanelScale = hypixelScale;
+        settings.hypixelPanelHeight = hypixelHeight;
+        settings.hypixelPanelX = hypixelX;
+        settings.hypixelPanelY = hypixelY;
+        settings.clickGuiLightTheme = clickGuiTheme != 0;
+        settings.playerEspColor = playerColor;
+        settings.bedEspColor = bedColor;
+        settings.bedDefensePanelColor = panelColor;
+        settings.hypixelPanelColor = hypixelColor;
+        settings.nametagPanelOpacity = nametagOpacity;
+        settings.nametagPanelColor = nametagColor;
+        settings.clickGuiAccentColor = accentColor;
+        settings.hypixelPanelFontIndex = hypixelFontIndex;
+        settings.nametagRange = nametagRange;
+        settings.nametagSizeIndex = nametagSizeIndex;
+        settings.hypixelRailColor = hypixelRailColor;
+        settings.hypixelRailOpacity = hypixelRailOpacity;
+        settings.safewalkReleaseDelayMs = safewalkReleaseDelayMs;
+        settings.safewalkEdgeSensitivity = safewalkEdgeSensitivity;
+        settings.safewalkMinimumPitch = safewalkMinimumPitch;
+        settings.safewalkHotkey = safewalkHotkey;
+        settings.flySpeedPercent = flySpeedPercent;
+        settings.aimSlowdownPercent = aimSlowdownPercent;
+        settings.aimSpeedPercent = aimSpeedPercent;
+        settings.textGuiColor = textGuiColor;
+        settings.textGuiX = textGuiX;
+        settings.textGuiY = textGuiY;
         m_featureBits.store(packFeatures(settings), std::memory_order_release);
-        m_bedDefenseRadius.store(radius, std::memory_order_release);
+        m_bedDefenseRadius.store(defenseRadius, std::memory_order_release);
+        m_bedThreatRadius.store(threatRadius, std::memory_order_release);
+        m_bedDefenseHotkey.store(bedHotkey, std::memory_order_release);
+        m_bedDefensePanelOpacity.store(panelOpacity, std::memory_order_release);
+        m_hypixelPanelHotkey.store(hypixelHotkey, std::memory_order_release);
+        m_hypixelPanelOpacity.store(hypixelOpacity, std::memory_order_release);
+        m_hypixelPanelScale.store(hypixelScale, std::memory_order_release);
+        m_hypixelPanelHeight.store(hypixelHeight, std::memory_order_release);
+        m_hypixelPanelX.store(hypixelX, std::memory_order_release);
+        m_hypixelPanelY.store(hypixelY, std::memory_order_release);
+        m_clickGuiLightTheme.store(clickGuiTheme != 0, std::memory_order_release);
+        m_playerEspColor.store(playerColor, std::memory_order_release);
+        m_bedEspColor.store(bedColor, std::memory_order_release);
+        m_bedDefensePanelColor.store(panelColor, std::memory_order_release);
+        m_hypixelPanelColor.store(hypixelColor, std::memory_order_release);
+        m_nametagPanelOpacity.store(nametagOpacity, std::memory_order_release);
+        m_nametagPanelColor.store(nametagColor, std::memory_order_release);
+        m_clickGuiAccentColor.store(accentColor, std::memory_order_release);
+        m_hypixelRailColor.store(hypixelRailColor, std::memory_order_release);
+        m_hypixelRailOpacity.store(hypixelRailOpacity, std::memory_order_release);
+        m_hypixelPanelFontIndex.store(hypixelFontIndex, std::memory_order_release);
+        m_nametagRange.store(nametagRange, std::memory_order_release);
+        m_nametagSizeIndex.store(nametagSizeIndex, std::memory_order_release);
+        m_safewalkReleaseDelayMs.store(safewalkReleaseDelayMs,
+                                       std::memory_order_release);
+        m_safewalkEdgeSensitivity.store(safewalkEdgeSensitivity,
+                                         std::memory_order_release);
+        m_safewalkMinimumPitch.store(safewalkMinimumPitch,
+                                     std::memory_order_release);
+        m_safewalkHotkey.store(safewalkHotkey, std::memory_order_release);
+        m_flySpeedPercent.store(flySpeedPercent, std::memory_order_release);
+        m_aimSlowdownPercent.store(aimSlowdownPercent,
+                                   std::memory_order_release);
+        m_aimSpeedPercent.store(aimSpeedPercent, std::memory_order_release);
+        m_textGuiColor.store(textGuiColor, std::memory_order_release);
+        m_textGuiX.store(textGuiX, std::memory_order_release);
+        m_textGuiY.store(textGuiY, std::memory_order_release);
         (void)m_ipc->sendLine("FEATURE_STATE_APPLIED");
         return true;
     }
@@ -892,15 +1475,154 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
         (void)m_ipc->sendLine("BED_RESCAN_ACCEPTED");
         return true;
     }
+    if (command == "BLACKLIST_RESET") {
+        std::string trailing;
+        if (stream >> trailing) return true;
+        ::AcquireSRWLockExclusive(&m_blacklistLock);
+        m_blacklistSnapshot = {};
+        ::ReleaseSRWLockExclusive(&m_blacklistLock);
+        m_blacklistSyncInProgress = true;
+        return true;
+    }
+    if (command == "BLACKLIST_SETTINGS") {
+        std::string enabledToken, alertsToken, idOnlyToken, showToken,
+                    collapsedToken, trailing;
+        int opacity = 0, x = -1, y = -1, width = 100, height = 100;
+        std::uint32_t color = 0U;
+        bool enabled = false, alerts = false, allowIdOnly = false;
+        bool showWithClickGui = false, collapsed = false;
+        if (!(stream >> enabledToken >> alertsToken >> idOnlyToken >> showToken
+                     >> collapsedToken >> opacity >> color
+                     >> x >> y >> width >> height) || (stream >> trailing) ||
+            !parseFlag(enabledToken, enabled) || !parseFlag(alertsToken, alerts) ||
+            !parseFlag(idOnlyToken, allowIdOnly) ||
+            !parseFlag(showToken, showWithClickGui) ||
+            !parseFlag(collapsedToken, collapsed) || opacity < 0 || opacity > 100 ||
+            color > 0xFFFFFFU || x < -1 || x > 1000 || y < -1 || y > 1000 ||
+            width < 60 || width > 180 || height < 60 || height > 300) return true;
+        ::AcquireSRWLockExclusive(&m_blacklistLock);
+        m_blacklistSnapshot.panelEnabled = enabled;
+        m_blacklistSnapshot.matchAlertsEnabled = alerts;
+        m_blacklistSnapshot.allowIdOnlyNicks = allowIdOnly;
+        m_blacklistSnapshot.showWithClickGui = showWithClickGui;
+        m_blacklistSnapshot.collapsed = collapsed;
+        m_blacklistSnapshot.panelOpacity = opacity;
+        m_blacklistSnapshot.panelColor = color;
+        m_blacklistSnapshot.panelX = x;
+        m_blacklistSnapshot.panelY = y;
+        m_blacklistSnapshot.panelWidth = width;
+        m_blacklistSnapshot.panelHeight = height;
+        ::ReleaseSRWLockExclusive(&m_blacklistLock);
+        if (!m_blacklistSyncInProgress)
+            m_blacklistRevision.fetch_add(1U, std::memory_order_release);
+        return true;
+    }
+    if (command == "BLACKLIST_PRESET") {
+        std::string valueToken, trailing;
+        std::array<char, 81U> value{};
+        if (!(stream >> valueToken) || (stream >> trailing) ||
+            !percentDecode(valueToken, value) || value[0U] == '\0') return true;
+        ::AcquireSRWLockExclusive(&m_blacklistLock);
+        if (m_blacklistSnapshot.presetCount < m_blacklistSnapshot.presets.size())
+            m_blacklistSnapshot.presets[m_blacklistSnapshot.presetCount++] = value;
+        ::ReleaseSRWLockExclusive(&m_blacklistLock);
+        if (!m_blacklistSyncInProgress)
+            m_blacklistRevision.fetch_add(1U, std::memory_order_release);
+        return true;
+    }
+    if (command == "BLACKLIST_ENTRY") {
+        std::string keyToken, uuidToken, nameToken, reasonToken, nickToken,
+                    idOnlyToken, warningToken, faceToken, trailing;
+        std::int64_t addedAt = 0;
+        BlacklistEntry entry{};
+        bool nick = false, idOnly = false, warning = false;
+        if (!(stream >> keyToken >> uuidToken >> nameToken >> reasonToken >> addedAt
+                     >> nickToken >> idOnlyToken >> warningToken >> faceToken) ||
+            (stream >> trailing) || !parseFlag(nickToken, nick) ||
+            !parseFlag(idOnlyToken, idOnly) || !parseFlag(warningToken, warning) ||
+            !percentDecode(keyToken, entry.key) ||
+            !percentDecode(uuidToken, entry.uuid) ||
+            !percentDecode(nameToken, entry.name) ||
+            !percentDecode(reasonToken, entry.reason) ||
+            !percentDecode(faceToken, entry.facePath) || entry.key[0U] == '\0' ||
+            entry.name[0U] == '\0') return true;
+        entry.addedAt = addedAt;
+        entry.nick = nick;
+        entry.idOnly = idOnly;
+        entry.warnOnEncounter = warning;
+        ::AcquireSRWLockExclusive(&m_blacklistLock);
+        std::uint32_t index = m_blacklistSnapshot.count;
+        for (std::uint32_t candidate = 0U;
+             candidate < m_blacklistSnapshot.count; ++candidate) {
+            if (::_stricmp(m_blacklistSnapshot.entries[candidate].key.data(),
+                           entry.key.data()) == 0) {
+                index = candidate;
+                break;
+            }
+        }
+        if (index < m_blacklistSnapshot.entries.size()) {
+            m_blacklistSnapshot.entries[index] = entry;
+            if (index == m_blacklistSnapshot.count) ++m_blacklistSnapshot.count;
+        }
+        ::ReleaseSRWLockExclusive(&m_blacklistLock);
+        if (!m_blacklistSyncInProgress)
+            m_blacklistRevision.fetch_add(1U, std::memory_order_release);
+        return true;
+    }
+    if (command == "BLACKLIST_REMOVE" || command == "BLACKLIST_WARNING") {
+        std::string keyToken, valueToken, trailing;
+        std::array<char, 50U> key{};
+        const bool warningCommand = command == "BLACKLIST_WARNING";
+        bool warning = false;
+        if (!(stream >> keyToken) || !percentDecode(keyToken, key) ||
+            (warningCommand && (!(stream >> valueToken) ||
+                                !parseFlag(valueToken, warning))) ||
+            (stream >> trailing)) return true;
+        ::AcquireSRWLockExclusive(&m_blacklistLock);
+        for (std::uint32_t index = 0U; index < m_blacklistSnapshot.count; ++index) {
+            if (::_stricmp(m_blacklistSnapshot.entries[index].key.data(), key.data()) != 0)
+                continue;
+            if (warningCommand) {
+                m_blacklistSnapshot.entries[index].warnOnEncounter = warning;
+            } else {
+                for (std::uint32_t move = index + 1U;
+                     move < m_blacklistSnapshot.count; ++move) {
+                    m_blacklistSnapshot.entries[move - 1U] =
+                        m_blacklistSnapshot.entries[move];
+                }
+                --m_blacklistSnapshot.count;
+                m_blacklistSnapshot.entries[m_blacklistSnapshot.count] = {};
+            }
+            break;
+        }
+        ::ReleaseSRWLockExclusive(&m_blacklistLock);
+        m_blacklistRevision.fetch_add(1U, std::memory_order_release);
+        return true;
+    }
+    if (command == "BLACKLIST_SYNC_END") {
+        std::string trailing;
+        if (!(stream >> trailing)) {
+            m_blacklistSyncInProgress = false;
+            m_blacklistRevision.fetch_add(1U, std::memory_order_release);
+        }
+        return true;
+    }
     if (command == "STATS") {
         std::string playerToken;
         std::string teamToken;
         std::string trailing;
         PlayerStatsEntry entry{};
-        if (!(stream >> playerToken >> teamToken >> entry.stars >> entry.fkdr >> entry.level) ||
+        if (!(stream >> playerToken >> teamToken >> entry.stars >> entry.fkdr >>
+              entry.wlr >> entry.bblr >> entry.wins >> entry.finalKills >>
+              entry.bedsBroken >> entry.winStreak >> entry.level) ||
             (stream >> trailing) || !std::isfinite(entry.fkdr) ||
+            !std::isfinite(entry.wlr) || !std::isfinite(entry.bblr) ||
             entry.stars < 0 || entry.stars > 100000 || entry.fkdr < 0.0 ||
-            entry.fkdr > 1000000.0 || entry.level < 0 || entry.level > 100000 ||
+            entry.fkdr > 1000000.0 || entry.wlr < 0.0 || entry.wlr > 1000000.0 ||
+            entry.bblr < 0.0 || entry.bblr > 1000000.0 || entry.wins < 0 ||
+            entry.finalKills < 0 || entry.bedsBroken < 0 ||
+            entry.winStreak < 0 || entry.winStreak > 1000000 ||
+            entry.level < 0 || entry.level > 100000 ||
             !percentDecode(playerToken, entry.name) ||
             !percentDecode(teamToken, entry.teamPrefix)) {
             (void)m_ipc->sendLine("ERROR BAD_STATS invalid-payload");
@@ -928,6 +1650,48 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
         }
         m_playerStats[std::string(playerName)] = entry;
         ::ReleaseSRWLockExclusive(&m_playerStatsLock);
+        m_bindings->enqueueDebugChatLine(
+            "stats_ready player=" + std::string(playerName) +
+            " stars=" + std::to_string(entry.stars) +
+            " fkdr=" + std::to_string(entry.fkdr) +
+            " wlr=" + std::to_string(entry.wlr) +
+            " beds=" + std::to_string(entry.bedsBroken) +
+            " level=" + std::to_string(entry.level));
+        return true;
+    }
+    if (command == "STATS_ERROR") {
+        std::string playerToken;
+        std::string reasonToken;
+        std::string trailing;
+        PlayerStatsEntry entry{};
+        if (!(stream >> playerToken >> reasonToken) || (stream >> trailing) ||
+            !percentDecode(playerToken, entry.name) ||
+            !percentDecode(reasonToken, entry.status)) {
+            (void)m_ipc->sendLine("ERROR BAD_STATS_ERROR invalid-payload");
+            return true;
+        }
+        const std::string_view playerName(entry.name.data());
+        const bool validName = !playerName.empty() && playerName.size() <= 16U &&
+            std::all_of(playerName.begin(), playerName.end(), [](const char character) noexcept {
+                return (character >= 'A' && character <= 'Z') ||
+                       (character >= 'a' && character <= 'z') ||
+                       (character >= '0' && character <= '9') || character == '_';
+            });
+        if (!validName || entry.status[0U] == '\0') {
+            (void)m_ipc->sendLine("ERROR BAD_STATS_ERROR invalid-player-or-reason");
+            return true;
+        }
+        entry.failed = true;
+        ::AcquireSRWLockExclusive(&m_playerStatsLock);
+        if (!m_playerStats.contains(std::string(playerName)) &&
+            m_playerStats.size() >= 256U) {
+            m_playerStats.erase(m_playerStats.begin());
+        }
+        m_playerStats[std::string(playerName)] = entry;
+        ::ReleaseSRWLockExclusive(&m_playerStatsLock);
+        m_bindings->enqueueDebugChatLine(
+            "stats_error player=" + std::string(playerName) +
+            " reason=" + std::string(entry.status.data()));
         return true;
     }
     if (command == "HYPIXEL_RESULT") {
@@ -1115,6 +1879,41 @@ void AgentRuntime::beforeSwapBuffers(HDC const deviceContext)
 
     const std::uint64_t tickMilliseconds =
         static_cast<std::uint64_t>(::GetTickCount64());
+    FeatureSettings activeFeatures = unpackFeatures(
+        m_featureBits.load(std::memory_order_acquire),
+        m_bedDefenseRadius.load(std::memory_order_acquire),
+        m_bedThreatRadius.load(std::memory_order_acquire),
+        m_bedDefenseHotkey.load(std::memory_order_acquire),
+        m_bedDefensePanelOpacity.load(std::memory_order_acquire),
+        m_hypixelPanelHotkey.load(std::memory_order_acquire),
+        m_hypixelPanelOpacity.load(std::memory_order_acquire),
+        m_hypixelPanelScale.load(std::memory_order_acquire),
+        m_hypixelPanelX.load(std::memory_order_acquire),
+        m_hypixelPanelY.load(std::memory_order_acquire),
+        m_clickGuiLightTheme.load(std::memory_order_acquire),
+        m_playerEspColor.load(std::memory_order_acquire),
+        m_bedEspColor.load(std::memory_order_acquire),
+        m_bedDefensePanelColor.load(std::memory_order_acquire),
+        m_hypixelPanelColor.load(std::memory_order_acquire),
+        m_hypixelPanelHeight.load(std::memory_order_acquire),
+        m_nametagPanelOpacity.load(std::memory_order_acquire),
+        m_nametagPanelColor.load(std::memory_order_acquire),
+        m_clickGuiAccentColor.load(std::memory_order_acquire),
+        m_hypixelPanelFontIndex.load(std::memory_order_acquire),
+        m_nametagRange.load(std::memory_order_acquire),
+        m_nametagSizeIndex.load(std::memory_order_acquire),
+        m_hypixelRailColor.load(std::memory_order_acquire),
+        m_hypixelRailOpacity.load(std::memory_order_acquire),
+        m_safewalkReleaseDelayMs.load(std::memory_order_acquire),
+        m_safewalkEdgeSensitivity.load(std::memory_order_acquire),
+        m_safewalkMinimumPitch.load(std::memory_order_acquire),
+        m_safewalkHotkey.load(std::memory_order_acquire),
+        m_flySpeedPercent.load(std::memory_order_acquire),
+        m_aimSlowdownPercent.load(std::memory_order_acquire),
+        m_aimSpeedPercent.load(std::memory_order_acquire),
+        m_textGuiColor.load(std::memory_order_acquire),
+        m_textGuiX.load(std::memory_order_acquire),
+        m_textGuiY.load(std::memory_order_acquire));
     const bool interactiveNow = m_interactive.load(std::memory_order_acquire);
     if (env != nullptr) {
         if (interactiveNow && !m_gameInputReleased) {
@@ -1136,6 +1935,7 @@ void AgentRuntime::beforeSwapBuffers(HDC const deviceContext)
             m_gameInputReleased = false;
             m_lastInputFocusReleaseTick = 0U;
         }
+
     }
 
     // Renderer readiness must not depend on Minecraft class mappings. Lunar
@@ -1152,11 +1952,103 @@ void AgentRuntime::beforeSwapBuffers(HDC const deviceContext)
         m_bindings->sampleCamera(env);
     }
     GameSnapshot snapshot = m_bindings->snapshot(tickMilliseconds);
+
+    if (!interactiveNow) {
+        const bool safewalkHotkeyDown =
+            (::GetAsyncKeyState(activeFeatures.safewalkHotkey) & 0x8000) != 0;
+        if (safewalkHotkeyDown && !m_safewalkHotkeyWasDown) {
+            activeFeatures.safewalkEnabled = !activeFeatures.safewalkEnabled;
+            queueFeatureChanged(activeFeatures);
+        }
+        m_safewalkHotkeyWasDown = safewalkHotkeyDown;
+    } else {
+        m_safewalkHotkeyWasDown = false;
+    }
+
+    // Server guard is evaluated from currentServerData.serverIP and therefore
+    // remains active in lobbies and during respawn. The explicit override is
+    // persisted separately and never inferred from a feature hotkey.
+    if (snapshot.hypixelServer && !activeFeatures.allowHypixelMovement &&
+        (activeFeatures.scaffoldEnabled || activeFeatures.flyEnabled ||
+         activeFeatures.bhopEnabled)) {
+        activeFeatures.scaffoldEnabled = false;
+        activeFeatures.flyEnabled = false;
+        activeFeatures.bhopEnabled = false;
+        queueFeatureChanged(activeFeatures);
+        m_bindings->enqueueDebugChatLine(
+            "[Movement Guard] Fly/BHop/Scaffold were disabled on Hypixel.");
+    }
+
+    if (env != nullptr) {
+        GameplaySettings gameplay{};
+        gameplay.safewalk = activeFeatures.safewalkEnabled && !interactiveNow;
+        gameplay.scaffold = activeFeatures.scaffoldEnabled && !interactiveNow;
+        gameplay.fly = activeFeatures.flyEnabled && !interactiveNow;
+        gameplay.bhop = activeFeatures.bhopEnabled && !interactiveNow;
+        gameplay.bhopAutoJump = activeFeatures.bhopAutoJump;
+        gameplay.aimAssist = activeFeatures.aimAssistEnabled && !interactiveNow;
+        gameplay.aimSlowdownMode = activeFeatures.aimSlowdownMode;
+        gameplay.safewalkReleaseDelayMs = activeFeatures.safewalkReleaseDelayMs;
+        gameplay.safewalkEdgeSensitivity = activeFeatures.safewalkEdgeSensitivity;
+        gameplay.safewalkMinimumPitch = activeFeatures.safewalkMinimumPitch;
+        gameplay.flySpeedPercent = activeFeatures.flySpeedPercent;
+        gameplay.aimSlowdownPercent = activeFeatures.aimSlowdownPercent;
+        gameplay.aimSpeedPercent = activeFeatures.aimSpeedPercent;
+        (void)m_bindings->updateGameplay(env, gameplay, snapshot,
+                                         tickMilliseconds);
+    }
+    const std::uint32_t currentBlacklistRevision =
+        m_blacklistRevision.load(std::memory_order_acquire);
+    if (currentBlacklistRevision != m_runtimeBlacklistRevision) {
+        ::AcquireSRWLockShared(&m_blacklistLock);
+        m_runtimeBlacklistSnapshot = m_blacklistSnapshot;
+        ::ReleaseSRWLockShared(&m_blacklistLock);
+        m_runtimeBlacklistRevision = currentBlacklistRevision;
+    }
+    if (!snapshot.matchActive) {
+        m_blacklistChatWarnedCount = 0U;
+    } else if (m_runtimeBlacklistSnapshot.matchAlertsEnabled) {
+        for (std::uint32_t entryIndex = 0U;
+             entryIndex < m_runtimeBlacklistSnapshot.count; ++entryIndex) {
+            const BlacklistEntry& entry =
+                m_runtimeBlacklistSnapshot.entries[entryIndex];
+            if (!entry.warnOnEncounter) continue;
+            bool encountered = false;
+            for (std::uint32_t playerIndex = 0U;
+                 playerIndex < snapshot.playerCount; ++playerIndex) {
+                const PlayerIdentity& player = snapshot.players[playerIndex];
+                encountered = entry.idOnly
+                    ? ::_stricmp(entry.name.data(), player.name.data()) == 0
+                    : entry.uuid[0U] != '\0' && player.uuid[0U] != '\0' &&
+                      ::_stricmp(entry.uuid.data(), player.uuid.data()) == 0;
+                if (encountered) break;
+            }
+            if (!encountered) continue;
+            bool alreadyWarned = false;
+            for (std::uint32_t index = 0U;
+                 index < m_blacklistChatWarnedCount; ++index) {
+                if (::_stricmp(m_blacklistChatWarnedKeys[index].data(),
+                               entry.key.data()) == 0) {
+                    alreadyWarned = true;
+                    break;
+                }
+            }
+            if (alreadyWarned) continue;
+            if (m_blacklistChatWarnedCount <
+                m_blacklistChatWarnedKeys.size()) {
+                auto& key = m_blacklistChatWarnedKeys[
+                    m_blacklistChatWarnedCount++];
+                std::snprintf(key.data(), key.size(), "%s", entry.key.data());
+            }
+            m_bindings->enqueueWarningChatLine(entry.name.data(),
+                                                entry.reason.data());
+        }
+    }
+    if (env != nullptr)
+        m_bindings->publishDebugChat(env, activeFeatures.debugChatEnabled);
     if (m_visible.load(std::memory_order_acquire)) {
         m_renderer->setGuiScaleIndex(m_guiScaleIndex.load(std::memory_order_acquire));
-        m_renderer->setFeatureSettings(unpackFeatures(
-            m_featureBits.load(std::memory_order_acquire),
-            m_bedDefenseRadius.load(std::memory_order_acquire)));
+        m_renderer->setFeatureSettings(activeFeatures);
         ::AcquireSRWLockShared(&m_hypixelLock);
         const HypixelOverlaySnapshot hypixel = m_hypixelSnapshot;
         ::ReleaseSRWLockShared(&m_hypixelLock);
@@ -1170,6 +2062,16 @@ void AgentRuntime::beforeSwapBuffers(HDC const deviceContext)
         }
         ::ReleaseSRWLockShared(&m_playerStatsLock);
         m_renderer->setPlayerStatsSnapshot(playerStats);
+        const std::uint32_t blacklistRevision =
+            m_blacklistRevision.load(std::memory_order_acquire);
+        if (blacklistRevision != m_renderBlacklistRevision) {
+            BlacklistOverlaySnapshot blacklist{};
+            ::AcquireSRWLockShared(&m_blacklistLock);
+            blacklist = m_blacklistSnapshot;
+            ::ReleaseSRWLockShared(&m_blacklistLock);
+            m_renderer->setBlacklistSnapshot(blacklist);
+            m_renderBlacklistRevision = blacklistRevision;
+        }
         (void)m_renderer->render(deviceContext, snapshot,
                                  m_interactive.load(std::memory_order_acquire));
         FeatureSettings changedFeatures{};
@@ -1180,6 +2082,9 @@ void AgentRuntime::beforeSwapBuffers(HDC const deviceContext)
         if (m_renderer->consumeHypixelQuery(query)) {
             queueHypixelQuery(query);
         }
+        BlacklistAction blacklistAction{};
+        if (m_renderer->consumeBlacklistAction(blacklistAction))
+            queueBlacklistAction(blacklistAction);
         unsigned changedHotkey = 0U;
         if (m_renderer->consumeMenuHotkeyChange(changedHotkey)) {
             queueMenuHotkeyChanged(changedHotkey);

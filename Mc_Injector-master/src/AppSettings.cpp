@@ -10,6 +10,7 @@ namespace {
 constexpr auto kNavigationPaneWidth = "ui/navigationPaneWidth";
 constexpr auto kMenuHotkey = "overlay/menuHotkey";
 constexpr auto kGuiScaleIndex = "overlay/guiScaleIndex";
+constexpr auto kProcessAutoRefresh = "scanner/autoRefresh";
 }
 
 AppSettings::AppSettings(QObject *parent)
@@ -23,6 +24,8 @@ AppSettings::AppSettings(QObject *parent)
         settings.value(QLatin1StringView(kMenuHotkey), 0xDE).toInt(), 8, 254);
     m_guiScaleIndex = std::clamp(
         settings.value(QLatin1StringView(kGuiScaleIndex), 1).toInt(), 0, 3);
+    m_processAutoRefresh = settings.value(
+        QLatin1StringView(kProcessAutoRefresh), false).toBool();
 }
 
 void AppSettings::store(const char *key, const QVariant &value)
@@ -61,4 +64,13 @@ void AppSettings::setGuiScaleIndex(const int index)
     m_guiScaleIndex = bounded;
     store(kGuiScaleIndex, bounded);
     emit guiScaleIndexChanged();
+}
+
+void AppSettings::setProcessAutoRefresh(const bool enabled)
+{
+    if (enabled == m_processAutoRefresh)
+        return;
+    m_processAutoRefresh = enabled;
+    store(kProcessAutoRefresh, enabled);
+    emit processAutoRefreshChanged();
 }

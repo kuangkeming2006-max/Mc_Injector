@@ -6,6 +6,8 @@
 #include "AppSettings.h"
 #include "SkinProfileService.h"
 #include "SkinCuboidGeometry.h"
+#include "HotkeyCaptureService.h"
+#include "BlacklistService.h"
 
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
@@ -48,6 +50,8 @@ int main(int argc, char *argv[])
     HypixelApiClient hypixelApi(&apiKeys);
     PlayerStatsService playerStatsService(&apiKeys);
     SkinProfileService skinProfile;
+    HotkeyCaptureService hotkeyCapture;
+    BlacklistService blacklistService;
 
     // Restore controller preferences before QML or the native Agent observes
     // them. Changes coming back from the in-game GUI are persisted through the
@@ -72,6 +76,22 @@ int main(int argc, char *argv[])
                      &hypixelApi, &HypixelApiClient::lookupPlayer);
     QObject::connect(&overlayManager, &OverlayManager::playerFound,
                      &playerStatsService, &PlayerStatsService::enqueuePlayer);
+    QObject::connect(&overlayManager, &OverlayManager::playerIdentityFound,
+                     &blacklistService, &BlacklistService::observePlayer);
+    QObject::connect(&overlayManager, &OverlayManager::agentSessionReady,
+                     &blacklistService, &BlacklistService::synchronizeAgent);
+    QObject::connect(&blacklistService, &BlacklistService::commandReady,
+                     &overlayManager, &OverlayManager::sendBlacklistCommand);
+    QObject::connect(&overlayManager, &OverlayManager::blacklistAddRequested,
+                     &blacklistService, &BlacklistService::handleAgentAdd);
+    QObject::connect(&overlayManager, &OverlayManager::blacklistRemoveRequested,
+                     &blacklistService, &BlacklistService::handleAgentRemove);
+    QObject::connect(&overlayManager, &OverlayManager::blacklistWarningRequested,
+                     &blacklistService, &BlacklistService::handleAgentWarning);
+    QObject::connect(&overlayManager, &OverlayManager::blacklistLayoutChanged,
+                     &blacklistService, &BlacklistService::handleAgentLayout);
+    QObject::connect(&overlayManager, &OverlayManager::blacklistSettingsChanged,
+                     &blacklistService, &BlacklistService::handleAgentSettings);
     QObject::connect(&overlayManager, &OverlayManager::matchStateChanged,
                      &playerStatsService, &PlayerStatsService::setMatchActive);
     QObject::connect(&overlayManager, &OverlayManager::playerStatusChanged,
@@ -80,6 +100,8 @@ int main(int argc, char *argv[])
     });
     QObject::connect(&playerStatsService, &PlayerStatsService::statsReady,
                      &overlayManager, &OverlayManager::publishPlayerStats);
+    QObject::connect(&playerStatsService, &PlayerStatsService::statsFailed,
+                     &overlayManager, &OverlayManager::publishPlayerStatsError);
     const auto publishHypixelToAgent = [&overlayManager, &hypixelApi] {
         const QString status = hypixelApi.errorMessage().isEmpty()
             ? hypixelApi.statusMessage() : hypixelApi.errorMessage();
@@ -112,6 +134,8 @@ int main(int argc, char *argv[])
     qmlRegisterSingletonInstance("McOverlay", 1, 0,
                                  "OverlayManager", &overlayManager);
     qmlRegisterSingletonInstance("McOverlay", 1, 0,
+                                 "HotkeyCapture", &hotkeyCapture);
+    qmlRegisterSingletonInstance("McOverlay", 1, 0,
                                  "HypixelApi", &hypixelApi);
     qmlRegisterSingletonInstance("McOverlay", 1, 0,
                                  "ApiKeys", &apiKeys);
@@ -119,6 +143,8 @@ int main(int argc, char *argv[])
                                  "AppSettings", &appSettings);
     qmlRegisterSingletonInstance("McOverlay", 1, 0,
                                  "SkinProfile", &skinProfile);
+    qmlRegisterSingletonInstance("McOverlay", 1, 0,
+                                 "Blacklist", &blacklistService);
     qmlRegisterType<SkinCuboidGeometry>("McOverlay", 1, 0, "SkinCuboidGeometry");
 
     QQmlApplicationEngine engine;

@@ -50,8 +50,10 @@ RENDERER_READY OpenGL
 
 `RENDERER_READY` is emitted as soon as a valid Minecraft HWND/HGLRC initializes
 ImGui; Minecraft field mappings are not a prerequisite. The controller sends
-`STATE <visible> <interactive>`, `FEATURE_STATE <seven flags> <bed-radius-3..10>`, `BIND
-<virtual-key>`, bounded `HYPIXEL_RESULT`/`STATS` snapshots, or `DETACH`; state
+`STATE <visible> <interactive>`, a version-locked `FEATURE_STATE` snapshot,
+`BIND
+<virtual-key>`, bounded `HYPIXEL_RESULT`/`STATS` snapshots,
+`STATS_ERROR <player> <percent-encoded-reason>`, or `DETACH`; state
 commands are acknowledged with `STATE_APPLIED <visible> <interactive>`. Roster
 changes travel in the other direction as `MATCH_STATE <0|1>`, percent-encoded
 `PLAYER_STATUS <local-name>`, and `PLAYER_FOUND <name> <scoreboard-colour>`

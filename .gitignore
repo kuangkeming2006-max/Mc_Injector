@@ -1,0 +1,13 @@
+# Local build and packaged output
+/build-*/
+/dist-*/
+/*.zip
+
+# Local investigation/cache data
+/.research/
+
+# IDE and generated state
+*.user
+*.autosave
+.vs/
+.vscode/

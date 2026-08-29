@@ -381,6 +381,22 @@ try {
         }
     }
 
+    # Exercise the complete persisted feature-state grammar. The synthetic JVM
+    # has no Minecraft classes, but the renderer/control protocol must still
+    # accept and acknowledge the settings atomically.
+    # Keep this payload in lock-step with OverlayManager::sendFeatureState():
+    # 16 feature flags, four hotkey/range/card settings, Hypixel panel hotkey
+    # and opacity, stats-card scale/X/Y, Click-GUI theme, then four RGB colors.
+    # Protocol v18: 24 boolean feature flags followed by the complete layout,
+    # colour and Safewalk-delay payload. Keeping the smoke client version-locked
+    # catches Controller/Agent field-order drift before packaging.
+    $writer.WriteLine('FEATURE_STATE 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0 1 1 0 0 0 0 1 0 1 1 0 10 32 164 78 9 76 100 -1 -1 0 16777215 0 1644065 0 100 88 1052946 8543720 1 48 1 8543720 100 120 55 -5 119 100 45 35 8316927 -1 -1')
+    do {
+        $line = Read-ProtocolLine -Reader $reader -Stopwatch $protocolWatch `
+            -LimitSeconds $TimeoutSeconds -Operation 'applying the complete feature snapshot' `
+            -Received $received
+    } while ($line -cne 'FEATURE_STATE_APPLIED')
+
     # The synthetic JVM intentionally has no Minecraft classes, so telemetry
     # must still arrive with valid=0. This checks that mapping failure never
     # suppresses the controller dashboard protocol or blocks the render hook.

@@ -137,6 +137,8 @@ add_library(McOverlayAgent SHARED
     src/AgentOptions.h
     src/AgentRuntime.cpp
     src/AgentRuntime.h
+    bindings/BedWarsState.cpp
+    bindings/BedWarsState.h
     bindings/GameBindings.cpp
     bindings/GameBindings.h
     bindings/MappingProvider.cpp
@@ -209,6 +211,29 @@ else()
         -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
     if(MINGW AND MC_AGENT_STATIC_MINGW_RUNTIME)
         target_link_options(McOverlayMappingProviderTests PRIVATE
+            -static -static-libgcc -static-libstdc++)
+    endif()
+endif()
+
+# Qt/JVM-free tests for the language-independent Sidebar parser and the
+# canonical team/wool mappings used by bed ownership.
+add_executable(McOverlayBedWarsStateTests EXCLUDE_FROM_ALL
+    bindings/BedWarsState.cpp
+    bindings/BedWarsState.h
+    bindings/BedWarsStateTests.cpp)
+target_compile_features(McOverlayBedWarsStateTests PRIVATE cxx_std_20)
+target_include_directories(McOverlayBedWarsStateTests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/bindings")
+set_target_properties(McOverlayBedWarsStateTests PROPERTIES
+    AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+if(MSVC)
+    target_compile_options(McOverlayBedWarsStateTests PRIVATE
+        /W4 /permissive- /EHsc)
+else()
+    target_compile_options(McOverlayBedWarsStateTests PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wshadow)
+    if(MINGW AND MC_AGENT_STATIC_MINGW_RUNTIME)
+        target_link_options(McOverlayBedWarsStateTests PRIVATE
             -static -static-libgcc -static-libstdc++)
     endif()
 endif()

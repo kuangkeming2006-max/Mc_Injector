@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import McOverlay 1.0
 
 FocusScope {
     id: root
@@ -15,17 +16,8 @@ FocusScope {
     implicitHeight: 48
     activeFocusOnTab: true
 
-    onCapturingChanged: {
-        if (capturing) {
-            // Mouse release can move active focus back to the MouseArea on
-            // Windows. Defer focus acquisition until that release has been
-            // dispatched so the very next physical key reaches keySink.
-            Qt.callLater(function() {
-                if (root.capturing)
-                    keySink.forceActiveFocus(Qt.ShortcutFocusReason)
-            })
-        }
-    }
+    onVisibleChanged: if (!visible && capturing) HotkeyCapture.cancelCapture()
+    Component.onDestruction: if (capturing) HotkeyCapture.cancelCapture()
 
     function keyLabel(key) {
         const names = {
@@ -37,6 +29,8 @@ FocusScope {
             92: "Right Windows", 112: "F1", 113: "F2", 114: "F3",
             115: "F4", 116: "F5", 117: "F6", 118: "F7", 119: "F8",
             120: "F9", 121: "F10", 122: "F11", 123: "F12",
+            160: "Left Shift", 161: "Right Shift", 162: "Left Ctrl",
+            163: "Right Ctrl", 164: "Left Alt", 165: "Right Alt",
             186: ";", 187: "=", 188: ",", 189: "-", 190: ".",
             191: "/", 192: "`", 219: "[", 220: "\\", 221: "]",
             222: "Apostrophe (')"
@@ -48,56 +42,17 @@ FocusScope {
         return "Key " + key
     }
 
-    function fallbackVirtualKey(event) {
-        if (event.key >= Qt.Key_A && event.key <= Qt.Key_Z)
-            return event.key
-        if (event.key >= Qt.Key_0 && event.key <= Qt.Key_9)
-            return event.key
-        if (event.key >= Qt.Key_F1 && event.key <= Qt.Key_F12)
-            return 112 + event.key - Qt.Key_F1
-        const keys = {}
-        keys[Qt.Key_Backspace] = 8; keys[Qt.Key_Tab] = 9
-        keys[Qt.Key_Return] = 13; keys[Qt.Key_Enter] = 13
-        keys[Qt.Key_Space] = 32; keys[Qt.Key_PageUp] = 33
-        keys[Qt.Key_PageDown] = 34; keys[Qt.Key_End] = 35
-        keys[Qt.Key_Home] = 36; keys[Qt.Key_Left] = 37
-        keys[Qt.Key_Up] = 38; keys[Qt.Key_Right] = 39
-        keys[Qt.Key_Down] = 40; keys[Qt.Key_Insert] = 45
-        keys[Qt.Key_Delete] = 46; keys[Qt.Key_Apostrophe] = 222
-        return keys[event.key] || 0
-    }
-
-    function captureEvent(event) {
-        if (!root.capturing)
-            return
-        event.accepted = true
-        if (event.key === Qt.Key_Escape) {
-            root.capturing = false
-            return
-        }
-        let key = Number(event.nativeVirtualKey)
-        if (key < 8 || key > 254)
-            key = root.fallbackVirtualKey(event)
-        if (key >= 8 && key <= 254 && key !== 27) {
+    Connections {
+        target: HotkeyCapture
+        function onCaptureStarted() { root.capturing = false }
+        function onCaptureCanceled() { root.capturing = false }
+        function onKeyCaptured(key) {
+            if (!root.capturing)
+                return
             root.virtualKey = key
             root.capturing = false
             root.keyCaptured(key)
         }
-    }
-
-    // A real focusable key sink is more reliable than attaching Keys to the
-    // FocusScope itself. In particular, QQuickWindow otherwise restores focus
-    // to the MouseArea after a click and the Controller never sees key presses.
-    TextInput {
-        id: keySink
-        width: 1
-        height: 1
-        opacity: 0
-        enabled: root.capturing
-        focus: root.capturing
-        activeFocusOnPress: false
-        Keys.priority: Keys.BeforeItem
-        Keys.onPressed: function(event) { root.captureEvent(event) }
     }
 
     Rectangle {
@@ -144,6 +99,7 @@ FocusScope {
             ripple.burst(mouse.x, mouse.y)
         }
         onClicked: function(mouse) {
+            HotkeyCapture.beginCapture()
             root.capturing = true
         }
     }

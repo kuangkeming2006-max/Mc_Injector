@@ -91,13 +91,19 @@ void PlayerStatsService::enqueuePlayer(const QString &playerName,
     }
     const auto cached = m_statsCache.constFind(key);
     if (cached != m_statsCache.cend()) {
-        emit statsReady(name, team, cached->stars, cached->fkdr, cached->level);
+        emit statsReady(name, team, cached->stars, cached->fkdr,
+                        cached->wlr, cached->bblr, cached->wins,
+                        cached->finalKills, cached->bedsBroken,
+                        cached->winStreak, cached->level);
         m_deduplicateUntil.insert(key, now + kDedupeMilliseconds);
         return;
     }
     // Discovery is still remembered while no key exists. As soon as the user
     // saves one, reloadConfiguration() restarts this current-match roster.
-    if (m_apiKeys == nullptr || !m_apiKeys->configured()) return;
+    if (m_apiKeys == nullptr || !m_apiKeys->configured()) {
+        emit statsFailed(name, QStringLiteral("Hypixel API key is not configured"));
+        return;
+    }
 
     for (auto it = m_deduplicateUntil.begin(); it != m_deduplicateUntil.end();) {
         it = it.value() <= now ? m_deduplicateUntil.erase(it) : ++it;
@@ -191,14 +197,15 @@ void PlayerStatsService::finishIdentityLookup(QNetworkReply *reply,
     m_reply.clear();
     reply->deleteLater();
     if (tooLarge || !networkOk || status < 200 || status >= 300) {
-        failActive(QStringLiteral("Minecraft player ID lookup failed"));
+        failActive(status == 404 ? QStringLiteral("unavailable") :
+            QStringLiteral("Minecraft player ID lookup failed"));
         return;
     }
     const QJsonDocument json = QJsonDocument::fromJson(document);
     const QString uuid = json.object().value(QStringLiteral("id")).toString().toLower();
     static const QRegularExpression uuidExpression(QStringLiteral("^[0-9a-f]{32}$"));
     if (!uuidExpression.match(uuid).hasMatch()) {
-        failActive(QStringLiteral("Minecraft Services returned an invalid player ID"));
+        failActive(QStringLiteral("unavailable"));
         return;
     }
     startHypixelLookup(uuid, generation);
@@ -269,7 +276,7 @@ void PlayerStatsService::finishHypixelLookup(QNetworkReply *reply,
     const QJsonObject root = QJsonDocument::fromJson(document).object();
     const QJsonObject player = root.value(QStringLiteral("player")).toObject();
     if (!root.value(QStringLiteral("success")).toBool(false) || player.isEmpty()) {
-        failActive(QStringLiteral("Hypixel has no data for this player"));
+        failActive(QStringLiteral("unavailable"));
         return;
     }
     const QJsonObject bedWars = player.value(QStringLiteral("stats")).toObject()
@@ -277,18 +284,31 @@ void PlayerStatsService::finishHypixelLookup(QNetworkReply *reply,
     const QJsonObject achievements = player.value(QStringLiteral("achievements")).toObject();
     const qint64 finalKills = std::max<qint64>(0, integerField(bedWars, "final_kills_bedwars"));
     const qint64 finalDeaths = std::max<qint64>(0, integerField(bedWars, "final_deaths_bedwars"));
+    const qint64 wins = std::max<qint64>(0, integerField(bedWars, "wins_bedwars"));
+    const qint64 losses = std::max<qint64>(0, integerField(bedWars, "losses_bedwars"));
+    const qint64 bedsBroken = std::max<qint64>(0, integerField(bedWars, "beds_broken_bedwars"));
+    const qint64 bedsLost = std::max<qint64>(0, integerField(bedWars, "beds_lost_bedwars"));
+    const qint64 winStreakValue = std::max<qint64>(0, integerField(bedWars, "winstreak"));
     const int stars = static_cast<int>(std::clamp<qint64>(
         integerField(achievements, "bedwars_level"), 0, 100000));
     const double fkdr = static_cast<double>(finalKills) /
                         static_cast<double>(std::max<qint64>(1, finalDeaths));
+    const double wlr = static_cast<double>(wins) /
+                       static_cast<double>(std::max<qint64>(1, losses));
+    const double bblr = static_cast<double>(bedsBroken) /
+                        static_cast<double>(std::max<qint64>(1, bedsLost));
+    const int winStreak = static_cast<int>(std::clamp<qint64>(
+        winStreakValue, 0, 1'000'000));
     const int level = networkLevel(player.value(QStringLiteral("networkExp")).toDouble(0.0));
     if (m_statsCache.size() >= 1024)
         m_statsCache.erase(m_statsCache.begin());
     m_statsCache.insert(m_active.playerName.toLower(),
-                        CachedStats{stars, fkdr, level,
+                        CachedStats{stars, fkdr, wlr, bblr, wins, finalKills,
+                                    bedsBroken, winStreak, level,
                                     QDateTime::currentMSecsSinceEpoch() +
                                         kStatsCacheMilliseconds});
-    emit statsReady(m_active.playerName, m_active.teamPrefix, stars, fkdr, level);
+    emit statsReady(m_active.playerName, m_active.teamPrefix, stars, fkdr,
+                    wlr, bblr, wins, finalKills, bedsBroken, winStreak, level);
     completeActive();
 }
 

@@ -1,6 +1,7 @@
 #include "OverlayManager.h"
 
 #include <QCoreApplication>
+#include <QColor>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -8,6 +9,7 @@
 #include <QProcessEnvironment>
 #include <QRegularExpression>
 #include <QStandardPaths>
+#include <QSettings>
 #include <QUuid>
 
 #include <algorithm>
@@ -29,6 +31,12 @@ constexpr int kDetachTimeoutMilliseconds = 2500;
 constexpr qsizetype kMaximumAgentMessageBytes = 64 * 1024;
 constexpr qint64 kAgentReadChunkBytes = 4096;
 constexpr qint64 kGameStateStaleAfterMilliseconds = 3500;
+
+QString normalizedRgbColor(const QString &value)
+{
+    const QColor color(value.trimmed());
+    return color.isValid() ? color.name(QColor::HexRgb).toUpper() : QString{};
+}
 
 QString decodeProtocolToken(const QByteArray &token)
 {
@@ -138,6 +146,7 @@ QString nativeWindowTitle(HWND window)
 OverlayManager::OverlayManager(QObject *parent)
     : QObject(parent)
 {
+    loadFeatureSettings();
     m_server.setSocketOptions(QLocalServer::UserAccessOption);
     connect(&m_server, &QLocalServer::newConnection,
             this, &OverlayManager::acceptAgentConnection);
@@ -195,6 +204,14 @@ OverlayManager::OverlayManager(QObject *parent)
             this, &OverlayManager::refreshGameStateFreshness);
     m_gameStateReceiptClock.start();
     m_gameStateFreshnessTimer.start();
+
+    // Color pickers can update once per rendered frame. Coalesce those
+    // changes into one registry write after interaction settles so the
+    // controller never turns an in-game drag into synchronous I/O churn.
+    m_featureSettingsStoreTimer.setSingleShot(true);
+    m_featureSettingsStoreTimer.setInterval(300);
+    connect(&m_featureSettingsStoreTimer, &QTimer::timeout,
+            this, &OverlayManager::flushFeatureSettings);
 }
 
 OverlayManager::~OverlayManager()
@@ -208,6 +225,8 @@ OverlayManager::~OverlayManager()
     m_nativeFallbackGrace.stop();
     m_detachTimeout.stop();
     m_targetMonitor.stop();
+    m_featureSettingsStoreTimer.stop();
+    flushFeatureSettings();
     if (m_authenticated) {
         writeAgentCommand(QByteArrayLiteral("DETACH\n"));
         if (m_agentSocket)
@@ -483,6 +502,7 @@ void OverlayManager::setEspEnabled(const bool enabled)
 {
     if (m_espEnabled == enabled) return;
     m_espEnabled = enabled;
+    storeFeatureSettings();
     emit featureSettingsChanged();
     sendFeatureSnapshot();
 }
@@ -491,6 +511,16 @@ void OverlayManager::setEntityEspEnabled(const bool enabled)
 {
     if (m_entityEspEnabled == enabled) return;
     m_entityEspEnabled = enabled;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setEntityEspPlayersOnly(const bool enabled)
+{
+    if (m_entityEspPlayersOnly == enabled) return;
+    m_entityEspPlayersOnly = enabled;
+    storeFeatureSettings();
     emit featureSettingsChanged();
     sendFeatureSnapshot();
 }
@@ -499,6 +529,16 @@ void OverlayManager::setBedEspEnabled(const bool enabled)
 {
     if (m_bedEspEnabled == enabled) return;
     m_bedEspEnabled = enabled;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setBedAutoRefreshEnabled(const bool enabled)
+{
+    if (m_bedAutoRefreshEnabled == enabled) return;
+    m_bedAutoRefreshEnabled = enabled;
+    storeFeatureSettings();
     emit featureSettingsChanged();
     sendFeatureSnapshot();
 }
@@ -507,6 +547,7 @@ void OverlayManager::setEspLabelsEnabled(const bool enabled)
 {
     if (m_espLabelsEnabled == enabled) return;
     m_espLabelsEnabled = enabled;
+    storeFeatureSettings();
     emit featureSettingsChanged();
     sendFeatureSnapshot();
 }
@@ -515,6 +556,7 @@ void OverlayManager::setHypixelPanelEnabled(const bool enabled)
 {
     if (m_hypixelPanelEnabled == enabled) return;
     m_hypixelPanelEnabled = enabled;
+    storeFeatureSettings();
     emit featureSettingsChanged();
     sendFeatureSnapshot();
 }
@@ -523,6 +565,7 @@ void OverlayManager::setBedThreatAlertsEnabled(const bool enabled)
 {
     if (m_bedThreatAlertsEnabled == enabled) return;
     m_bedThreatAlertsEnabled = enabled;
+    storeFeatureSettings();
     emit featureSettingsChanged();
     sendFeatureSnapshot();
 }
@@ -531,6 +574,264 @@ void OverlayManager::setBedDefensePanelEnabled(const bool enabled)
 {
     if (m_bedDefensePanelEnabled == enabled) return;
     m_bedDefensePanelEnabled = enabled;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setHypixelPanelHoldToShow(const bool enabled)
+{
+    if (m_hypixelPanelHoldToShow == enabled) return;
+    m_hypixelPanelHoldToShow = enabled;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setHypixelPanelHotkey(const int virtualKey)
+{
+    if (virtualKey < 8 || virtualKey > 254 || m_hypixelPanelHotkey == virtualKey) return;
+    m_hypixelPanelHotkey = virtualKey;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setHypixelPanelOpacity(const int opacity)
+{
+    const int bounded = std::clamp(opacity, 0, 100);
+    if (m_hypixelPanelOpacity == bounded) return;
+    m_hypixelPanelOpacity = bounded;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setHypixelPanelColor(const QString &color)
+{
+    const QString requested = normalizedRgbColor(color);
+    const QString normalized = requested == QStringLiteral("#FFFFFF")
+        ? QStringLiteral("#FFFFFF") : QStringLiteral("#000000");
+    if (normalized.isEmpty() || normalized == m_hypixelPanelColor) return;
+    m_hypixelPanelColor = normalized;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setHypixelRailColor(const QString &color)
+{
+    const QString normalized = normalizedRgbColor(color);
+    if (normalized.isEmpty() || normalized == m_hypixelRailColor) return;
+    m_hypixelRailColor = normalized;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setHypixelRailOpacity(const int opacity)
+{
+    const int bounded = std::clamp(opacity, 0, 100);
+    if (bounded == m_hypixelRailOpacity) return;
+    m_hypixelRailOpacity = bounded;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setHypixelPanelScale(const int scale)
+{
+    const int bounded = std::clamp(scale, 70, 160);
+    if (m_hypixelPanelScale == bounded) return;
+    m_hypixelPanelScale = bounded;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setHypixelPanelX(const int normalizedX)
+{
+    const int bounded = std::clamp(normalizedX, -1, 1000);
+    if (m_hypixelPanelX == bounded) return;
+    m_hypixelPanelX = bounded;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setHypixelPanelY(const int normalizedY)
+{
+    const int bounded = std::clamp(normalizedY, -1, 1000);
+    if (m_hypixelPanelY == bounded) return;
+    m_hypixelPanelY = bounded;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setClickGuiLightTheme(const bool light)
+{
+    if (m_clickGuiLightTheme == light) return;
+    m_clickGuiLightTheme = light;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setBedEspFilled(const bool enabled)
+{
+    if (m_bedEspFilled == enabled) return;
+    m_bedEspFilled = enabled;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setDebugChatEnabled(const bool enabled)
+{
+    if (m_debugChatEnabled == enabled) return;
+    m_debugChatEnabled = enabled;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setShowOwnBedDefenseInfo(const bool enabled)
+{
+    if (m_showOwnBedDefenseInfo == enabled) return;
+    m_showOwnBedDefenseInfo = enabled;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setShowTeammateBoxes(const bool enabled)
+{
+    if (m_showTeammateBoxes == enabled) return;
+    m_showTeammateBoxes = enabled;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setShowTeammateArrows(const bool enabled)
+{
+    if (m_showTeammateArrows == enabled) return;
+    m_showTeammateArrows = enabled;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setSafewalkEnabled(const bool enabled)
+{
+    if (m_safewalkEnabled == enabled) return;
+    m_safewalkEnabled = enabled;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setSafewalkReleaseDelayMs(const int delayMs)
+{
+    const int bounded = std::clamp(delayMs, 0, 750);
+    if (m_safewalkReleaseDelayMs == bounded) return;
+    m_safewalkReleaseDelayMs = bounded;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+#define MC_OVERLAY_BOOL_SETTER(Name, Member) \
+void OverlayManager::Name(const bool enabled) \
+{ \
+    if (Member == enabled) return; \
+    Member = enabled; \
+    storeFeatureSettings(); \
+    emit featureSettingsChanged(); \
+    sendFeatureSnapshot(); \
+}
+
+MC_OVERLAY_BOOL_SETTER(setScaffoldEnabled, m_scaffoldEnabled)
+MC_OVERLAY_BOOL_SETTER(setFlyEnabled, m_flyEnabled)
+MC_OVERLAY_BOOL_SETTER(setBhopEnabled, m_bhopEnabled)
+MC_OVERLAY_BOOL_SETTER(setBhopAutoJump, m_bhopAutoJump)
+MC_OVERLAY_BOOL_SETTER(setAimAssistEnabled, m_aimAssistEnabled)
+MC_OVERLAY_BOOL_SETTER(setAimSlowdownMode, m_aimSlowdownMode)
+MC_OVERLAY_BOOL_SETTER(setTextGuiEnabled, m_textGuiEnabled)
+MC_OVERLAY_BOOL_SETTER(setAllowHypixelMovement, m_allowHypixelMovement)
+
+#undef MC_OVERLAY_BOOL_SETTER
+
+void OverlayManager::setSafewalkEdgeSensitivity(const int sensitivity)
+{
+    const int bounded = std::clamp(sensitivity, 0, 95);
+    if (m_safewalkEdgeSensitivity == bounded) return;
+    m_safewalkEdgeSensitivity = bounded;
+    storeFeatureSettings(); emit featureSettingsChanged(); sendFeatureSnapshot();
+}
+
+void OverlayManager::setSafewalkMinimumPitch(const int pitch)
+{
+    const int bounded = std::clamp(pitch, -90, 90);
+    if (m_safewalkMinimumPitch == bounded) return;
+    m_safewalkMinimumPitch = bounded;
+    storeFeatureSettings(); emit featureSettingsChanged(); sendFeatureSnapshot();
+}
+
+void OverlayManager::setSafewalkHotkey(const int virtualKey)
+{
+    if (virtualKey < 8 || virtualKey > 254 || m_safewalkHotkey == virtualKey) return;
+    m_safewalkHotkey = virtualKey;
+    storeFeatureSettings(); emit featureSettingsChanged(); sendFeatureSnapshot();
+}
+
+void OverlayManager::setFlySpeedPercent(const int speed)
+{
+    const int bounded = std::clamp(speed, 10, 500);
+    if (m_flySpeedPercent == bounded) return;
+    m_flySpeedPercent = bounded;
+    storeFeatureSettings(); emit featureSettingsChanged(); sendFeatureSnapshot();
+}
+
+void OverlayManager::setAimSlowdownPercent(const int coefficient)
+{
+    const int bounded = std::clamp(coefficient, 5, 95);
+    if (m_aimSlowdownPercent == bounded) return;
+    m_aimSlowdownPercent = bounded;
+    storeFeatureSettings(); emit featureSettingsChanged(); sendFeatureSnapshot();
+}
+
+void OverlayManager::setAimSpeedPercent(const int speed)
+{
+    const int bounded = std::clamp(speed, 1, 100);
+    if (m_aimSpeedPercent == bounded) return;
+    m_aimSpeedPercent = bounded;
+    storeFeatureSettings(); emit featureSettingsChanged(); sendFeatureSnapshot();
+}
+
+void OverlayManager::setTextGuiColor(const QString &color)
+{
+    const QString normalized = normalizedRgbColor(color);
+    if (normalized.isEmpty() || normalized == m_textGuiColor) return;
+    m_textGuiColor = normalized;
+    storeFeatureSettings(); emit featureSettingsChanged(); sendFeatureSnapshot();
+}
+
+void OverlayManager::setBedDefenseHoldToShow(const bool enabled)
+{
+    if (m_bedDefenseHoldToShow == enabled) return;
+    m_bedDefenseHoldToShow = enabled;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setBedDefensePerspectiveScale(const bool enabled)
+{
+    if (m_bedDefensePerspectiveScale == enabled) return;
+    m_bedDefensePerspectiveScale = enabled;
+    storeFeatureSettings();
     emit featureSettingsChanged();
     sendFeatureSnapshot();
 }
@@ -540,6 +841,66 @@ void OverlayManager::setBedDefenseRadius(const int radius)
     const int bounded = std::clamp(radius, 3, 10);
     if (m_bedDefenseRadius == bounded) return;
     m_bedDefenseRadius = bounded;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setBedThreatRadius(const int radius)
+{
+    const int bounded = std::clamp(radius, 3, 32);
+    if (m_bedThreatRadius == bounded) return;
+    m_bedThreatRadius = bounded;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setBedDefenseHotkey(const int virtualKey)
+{
+    if (virtualKey < 8 || virtualKey > 254 || m_bedDefenseHotkey == virtualKey) return;
+    m_bedDefenseHotkey = virtualKey;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setBedDefensePanelOpacity(const int opacity)
+{
+    const int bounded = std::clamp(opacity, 0, 100);
+    if (m_bedDefensePanelOpacity == bounded) return;
+    m_bedDefensePanelOpacity = bounded;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setPlayerEspColor(const QString &color)
+{
+    const QString normalized = normalizedRgbColor(color);
+    if (normalized.isEmpty() || normalized == m_playerEspColor) return;
+    m_playerEspColor = normalized;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setBedEspColor(const QString &color)
+{
+    const QString normalized = normalizedRgbColor(color);
+    if (normalized.isEmpty() || normalized == m_bedEspColor) return;
+    m_bedEspColor = normalized;
+    storeFeatureSettings();
+    emit featureSettingsChanged();
+    sendFeatureSnapshot();
+}
+
+void OverlayManager::setBedDefensePanelColor(const QString &color)
+{
+    const QString normalized = normalizedRgbColor(color);
+    if (normalized.isEmpty() || normalized == m_bedDefensePanelColor) return;
+    m_bedDefensePanelColor = normalized;
+    storeFeatureSettings();
     emit featureSettingsChanged();
     sendFeatureSnapshot();
 }
@@ -591,6 +952,12 @@ void OverlayManager::publishPlayerStats(const QString &playerName,
                                         const QString &teamPrefix,
                                         const int stars,
                                         const double fkdr,
+                                        const double wlr,
+                                        const double bblr,
+                                        const qint64 wins,
+                                        const qint64 finalKills,
+                                        const qint64 bedsBroken,
+                                        const int winStreak,
                                         const int level)
 {
     if (!m_authenticated) return;
@@ -601,13 +968,52 @@ void OverlayManager::publishPlayerStats(const QString &playerName,
         ((team.at(1) >= QLatin1Char('0') && team.at(1) <= QLatin1Char('9')) ||
          (team.at(1) >= QLatin1Char('a') && team.at(1) <= QLatin1Char('f')));
     if (!nameExpression.match(playerName).hasMatch() || !validTeam ||
-        stars < 0 || level < 0 || !std::isfinite(fkdr) || fkdr < 0.0) {
+        stars < 0 || level < 0 || winStreak < 0 || wins < 0 ||
+        finalKills < 0 || bedsBroken < 0 || !std::isfinite(fkdr) ||
+        !std::isfinite(wlr) || !std::isfinite(bblr) || fkdr < 0.0 ||
+        wlr < 0.0 || bblr < 0.0) {
         return;
     }
     writeAgentCommand(QByteArrayLiteral("STATS ") + encodeProtocolToken(playerName) + ' ' +
                       encodeProtocolToken(team) + ' ' + QByteArray::number(stars) + ' ' +
                       QByteArray::number(fkdr, 'g', 9) + ' ' +
+                      QByteArray::number(wlr, 'g', 9) + ' ' +
+                      QByteArray::number(bblr, 'g', 9) + ' ' +
+                      QByteArray::number(wins) + ' ' +
+                      QByteArray::number(finalKills) + ' ' +
+                      QByteArray::number(bedsBroken) + ' ' +
+                      QByteArray::number(winStreak) + ' ' +
                       QByteArray::number(level) + '\n');
+}
+
+void OverlayManager::sendBlacklistCommand(const QByteArray &command)
+{
+    if (!m_authenticated || command.isEmpty() || command.size() > 2048 ||
+        command.count('\n') != 1 || !command.endsWith('\n')) return;
+    static const std::array<QByteArray, 7U> allowed{{
+        QByteArrayLiteral("BLACKLIST_RESET\n"),
+        QByteArrayLiteral("BLACKLIST_SETTINGS "),
+        QByteArrayLiteral("BLACKLIST_PRESET "),
+        QByteArrayLiteral("BLACKLIST_ENTRY "),
+        QByteArrayLiteral("BLACKLIST_REMOVE "),
+        QByteArrayLiteral("BLACKLIST_WARNING "),
+        QByteArrayLiteral("BLACKLIST_SYNC_END\n")}};
+    const bool permitted = std::any_of(allowed.cbegin(), allowed.cend(),
+        [&command](const QByteArray &prefix) { return command.startsWith(prefix); });
+    if (permitted) writeAgentCommand(command);
+}
+
+void OverlayManager::publishPlayerStatsError(const QString &playerName,
+                                             const QString &reason)
+{
+    if (!m_authenticated) return;
+    static const QRegularExpression nameExpression(
+        QStringLiteral("^[A-Za-z0-9_]{1,16}$"));
+    const QString safeReason = reason.simplified().left(96);
+    if (!nameExpression.match(playerName).hasMatch() || safeReason.isEmpty()) return;
+    writeAgentCommand(QByteArrayLiteral("STATS_ERROR ") +
+                      encodeProtocolToken(playerName) + ' ' +
+                      encodeProtocolToken(safeReason) + '\n');
 }
 
 void OverlayManager::acceptAgentConnection()
@@ -1131,21 +1537,176 @@ void OverlayManager::processAgentLine(const QByteArray &line)
             emit interactiveChanged();
         }
     } else if (type == QByteArrayLiteral("FEATURE_STATE_CHANGED")) {
-        if (fields.size() != 9) return;
-        bool values[7]{};
-        for (int index = 0; index < 7; ++index) {
+        if (fields.size() != 66) return;
+        std::array<bool, 32U> values{};
+        for (int index = 0; index < 32; ++index) {
             const QByteArray token = fields.at(index + 1);
             if (token != QByteArrayLiteral("0") && token != QByteArrayLiteral("1")) return;
-            values[index] = token == QByteArrayLiteral("1");
+            values[static_cast<std::size_t>(index)] = token == QByteArrayLiteral("1");
         }
-        bool radiusOk = false;
-        const int radius = fields.at(8).toInt(&radiusOk);
-        if (!radiusOk || radius < 3 || radius > 10) return;
+        bool defenseRadiusOk = false;
+        bool threatRadiusOk = false;
+        bool bedHotkeyOk = false;
+        bool panelOpacityOk = false;
+        bool hypixelHotkeyOk = false;
+        bool hypixelOpacityOk = false;
+        bool hypixelScaleOk = false;
+        bool hypixelXOk = false;
+        bool hypixelYOk = false;
+        bool clickGuiThemeOk = false;
+        bool playerColorOk = false;
+        bool bedColorOk = false;
+        bool panelColorOk = false;
+        bool hypixelColorOk = false;
+        bool hypixelHeightOk = false;
+        bool nametagOpacityOk = false;
+        bool nametagColorOk = false;
+        bool accentColorOk = false;
+        bool hypixelFontIndexOk = false;
+        bool nametagRangeOk = false;
+        bool nametagSizeIndexOk = false;
+        bool hypixelRailColorOk = false;
+        bool hypixelRailOpacityOk = false;
+        bool safewalkReleaseDelayOk = false;
+        bool safewalkSensitivityOk = false, safewalkPitchOk = false;
+        bool safewalkHotkeyOk = false, flySpeedOk = false;
+        bool aimSlowdownOk = false, aimSpeedOk = false;
+        bool textColorOk = false, textXOk = false, textYOk = false;
+        const int defenseRadius = fields.at(33).toInt(&defenseRadiusOk);
+        const int threatRadius = fields.at(34).toInt(&threatRadiusOk);
+        const int bedHotkey = fields.at(35).toInt(&bedHotkeyOk);
+        const int panelOpacity = fields.at(36).toInt(&panelOpacityOk);
+        const int hypixelHotkey = fields.at(37).toInt(&hypixelHotkeyOk);
+        const int hypixelOpacity = fields.at(38).toInt(&hypixelOpacityOk);
+        const int hypixelScale = fields.at(39).toInt(&hypixelScaleOk);
+        const int hypixelX = fields.at(40).toInt(&hypixelXOk);
+        const int hypixelY = fields.at(41).toInt(&hypixelYOk);
+        const int clickGuiTheme = fields.at(42).toInt(&clickGuiThemeOk);
+        const quint32 playerColor = fields.at(43).toUInt(&playerColorOk);
+        const quint32 bedColor = fields.at(44).toUInt(&bedColorOk);
+        const quint32 panelColor = fields.at(45).toUInt(&panelColorOk);
+        const quint32 hypixelColor = fields.at(46).toUInt(&hypixelColorOk);
+        const int hypixelHeight = fields.at(47).toInt(&hypixelHeightOk);
+        const int nametagOpacity = fields.at(48).toInt(&nametagOpacityOk);
+        const quint32 nametagColor = fields.at(49).toUInt(&nametagColorOk);
+        const quint32 accentColor = fields.at(50).toUInt(&accentColorOk);
+        const int hypixelFontIndex = fields.at(51).toInt(&hypixelFontIndexOk);
+        const int nametagRange = fields.at(52).toInt(&nametagRangeOk);
+        const int nametagSizeIndex = fields.at(53).toInt(&nametagSizeIndexOk);
+        const quint32 hypixelRailColor = fields.at(54).toUInt(&hypixelRailColorOk);
+        const int hypixelRailOpacity = fields.at(55).toInt(&hypixelRailOpacityOk);
+        const int safewalkReleaseDelayMs = fields.at(56).toInt(
+            &safewalkReleaseDelayOk);
+        const int safewalkSensitivity = fields.at(57).toInt(&safewalkSensitivityOk);
+        const int safewalkPitch = fields.at(58).toInt(&safewalkPitchOk);
+        const int safewalkHotkey = fields.at(59).toInt(&safewalkHotkeyOk);
+        const int flySpeed = fields.at(60).toInt(&flySpeedOk);
+        const int aimSlowdown = fields.at(61).toInt(&aimSlowdownOk);
+        const int aimSpeed = fields.at(62).toInt(&aimSpeedOk);
+        const quint32 textColor = fields.at(63).toUInt(&textColorOk);
+        const int textX = fields.at(64).toInt(&textXOk);
+        const int textY = fields.at(65).toInt(&textYOk);
+        if (!defenseRadiusOk || defenseRadius < 3 || defenseRadius > 10 ||
+            !threatRadiusOk || threatRadius < 3 || threatRadius > 32 ||
+            !bedHotkeyOk || bedHotkey < 8 || bedHotkey > 254 ||
+            !panelOpacityOk || panelOpacity < 0 || panelOpacity > 100 ||
+            !hypixelHotkeyOk || hypixelHotkey < 8 || hypixelHotkey > 254 ||
+            !hypixelOpacityOk || hypixelOpacity < 0 || hypixelOpacity > 100 ||
+            !hypixelScaleOk || hypixelScale < 70 || hypixelScale > 160 ||
+            !hypixelHeightOk || hypixelHeight < 60 || hypixelHeight > 400 ||
+            !hypixelXOk || hypixelX < -1 || hypixelX > 1000 ||
+            !hypixelYOk || hypixelY < -1 || hypixelY > 1000 ||
+            !clickGuiThemeOk || clickGuiTheme < 0 || clickGuiTheme > 1 ||
+            !playerColorOk || playerColor > 0xFFFFFFU ||
+            !bedColorOk || bedColor > 0xFFFFFFU ||
+            !panelColorOk || panelColor > 0xFFFFFFU ||
+            !hypixelColorOk || hypixelColor > 0xFFFFFFU ||
+            !nametagOpacityOk || nametagOpacity < 10 || nametagOpacity > 100 ||
+            !nametagColorOk || nametagColor > 0xFFFFFFU ||
+            !accentColorOk || accentColor > 0xFFFFFFU ||
+            !hypixelFontIndexOk || hypixelFontIndex < 0 || hypixelFontIndex > 3 ||
+            !nametagRangeOk || nametagRange < 4 || nametagRange > 128 ||
+            !nametagSizeIndexOk || nametagSizeIndex < 0 || nametagSizeIndex > 3 ||
+            !hypixelRailColorOk || hypixelRailColor > 0xFFFFFFU ||
+            !hypixelRailOpacityOk || hypixelRailOpacity < 0 ||
+            hypixelRailOpacity > 100 || !safewalkReleaseDelayOk ||
+            safewalkReleaseDelayMs < 0 || safewalkReleaseDelayMs > 750 ||
+            !safewalkSensitivityOk || safewalkSensitivity < 0 || safewalkSensitivity > 95 ||
+            !safewalkPitchOk || safewalkPitch < -90 || safewalkPitch > 90 ||
+            !safewalkHotkeyOk || safewalkHotkey < 8 || safewalkHotkey > 254 ||
+            !flySpeedOk || flySpeed < 10 || flySpeed > 500 ||
+            !aimSlowdownOk || aimSlowdown < 5 || aimSlowdown > 95 ||
+            !aimSpeedOk || aimSpeed < 1 || aimSpeed > 100 ||
+            !textColorOk || textColor > 0xFFFFFFU ||
+            !textXOk || textX < -1 || textX > 1000 ||
+            !textYOk || textY < -1 || textY > 1000) return;
+        const QString playerColorName = QStringLiteral("#%1")
+            .arg(playerColor, 6, 16, QLatin1Char('0')).toUpper();
+        const QString bedColorName = QStringLiteral("#%1")
+            .arg(bedColor, 6, 16, QLatin1Char('0')).toUpper();
+        const QString panelColorName = QStringLiteral("#%1")
+            .arg(panelColor, 6, 16, QLatin1Char('0')).toUpper();
+        const QString hypixelColorName = QStringLiteral("#%1")
+            .arg(hypixelColor, 6, 16, QLatin1Char('0')).toUpper();
+        const QString nametagColorName = QStringLiteral("#%1")
+            .arg(nametagColor, 6, 16, QLatin1Char('0')).toUpper();
+        const QString accentColorName = QStringLiteral("#%1")
+            .arg(accentColor, 6, 16, QLatin1Char('0')).toUpper();
+        const QString hypixelRailColorName = QStringLiteral("#%1")
+            .arg(hypixelRailColor, 6, 16, QLatin1Char('0')).toUpper();
+        const QString textColorName = QStringLiteral("#%1")
+            .arg(textColor, 6, 16, QLatin1Char('0')).toUpper();
         const bool changed = m_espEnabled != values[0] ||
             m_entityEspEnabled != values[1] || m_bedEspEnabled != values[2] ||
             m_espLabelsEnabled != values[3] || m_hypixelPanelEnabled != values[4] ||
             m_bedThreatAlertsEnabled != values[5] ||
-            m_bedDefensePanelEnabled != values[6] || m_bedDefenseRadius != radius;
+            m_bedDefensePanelEnabled != values[6] ||
+            m_entityEspPlayersOnly != values[7] ||
+            m_bedAutoRefreshEnabled != values[8] || m_bedEspFilled != values[9] ||
+            m_debugChatEnabled != values[10] || m_showOwnBedDefenseInfo != values[11] ||
+            m_showTeammateBoxes != values[12] ||
+            m_bedDefenseHoldToShow != values[13] ||
+            m_bedDefensePerspectiveScale != values[14] ||
+            m_hypixelPanelHoldToShow != values[15] ||
+            m_nametagEnabled != values[16] ||
+            m_nametagSidePlacement != values[17] ||
+            m_enemyItemIndicatorsEnabled != values[18] ||
+            m_showTeammateNametags != values[19] ||
+            m_nametagNearbyEnemiesOnly != values[20] ||
+            m_nametagTeamPulse != values[21] ||
+            m_showTeammateArrows != values[22] ||
+            m_safewalkEnabled != values[23] ||
+            m_scaffoldEnabled != values[24] || m_flyEnabled != values[25] ||
+            m_bhopEnabled != values[26] || m_bhopAutoJump != values[27] ||
+            m_aimAssistEnabled != values[28] || m_aimSlowdownMode != values[29] ||
+            m_textGuiEnabled != values[30] || m_allowHypixelMovement != values[31] ||
+            m_bedDefenseRadius != defenseRadius || m_bedThreatRadius != threatRadius ||
+            m_bedDefenseHotkey != bedHotkey ||
+            m_bedDefensePanelOpacity != panelOpacity ||
+            m_hypixelPanelHotkey != hypixelHotkey ||
+            m_hypixelPanelOpacity != hypixelOpacity ||
+            m_hypixelPanelScale != hypixelScale ||
+            m_hypixelPanelHeight != hypixelHeight ||
+            m_hypixelPanelX != hypixelX || m_hypixelPanelY != hypixelY ||
+            m_clickGuiLightTheme != (clickGuiTheme != 0) ||
+            m_playerEspColor != playerColorName || m_bedEspColor != bedColorName ||
+            m_bedDefensePanelColor != panelColorName ||
+            m_hypixelPanelColor != hypixelColorName ||
+            m_nametagPanelOpacity != nametagOpacity ||
+            m_nametagPanelColor != nametagColorName ||
+            m_clickGuiAccentColor != accentColorName ||
+            m_hypixelPanelFontIndex != hypixelFontIndex ||
+            m_nametagRange != nametagRange ||
+            m_nametagSizeIndex != nametagSizeIndex ||
+            m_hypixelRailColor != hypixelRailColorName ||
+            m_hypixelRailOpacity != hypixelRailOpacity ||
+            m_safewalkReleaseDelayMs != safewalkReleaseDelayMs ||
+            m_safewalkEdgeSensitivity != safewalkSensitivity ||
+            m_safewalkMinimumPitch != safewalkPitch ||
+            m_safewalkHotkey != safewalkHotkey ||
+            m_flySpeedPercent != flySpeed ||
+            m_aimSlowdownPercent != aimSlowdown || m_aimSpeedPercent != aimSpeed ||
+            m_textGuiColor != textColorName || m_textGuiX != textX || m_textGuiY != textY;
         m_espEnabled = values[0];
         m_entityEspEnabled = values[1];
         m_bedEspEnabled = values[2];
@@ -1153,8 +1714,68 @@ void OverlayManager::processAgentLine(const QByteArray &line)
         m_hypixelPanelEnabled = values[4];
         m_bedThreatAlertsEnabled = values[5];
         m_bedDefensePanelEnabled = values[6];
-        m_bedDefenseRadius = radius;
-        if (changed) emit featureSettingsChanged();
+        m_entityEspPlayersOnly = values[7];
+        m_bedAutoRefreshEnabled = values[8];
+        m_bedEspFilled = values[9];
+        m_debugChatEnabled = values[10];
+        m_showOwnBedDefenseInfo = values[11];
+        m_showTeammateBoxes = values[12];
+        m_bedDefenseHoldToShow = values[13];
+        m_bedDefensePerspectiveScale = values[14];
+        m_hypixelPanelHoldToShow = values[15];
+        m_nametagEnabled = values[16];
+        m_nametagSidePlacement = values[17];
+        m_enemyItemIndicatorsEnabled = values[18];
+        m_showTeammateNametags = values[19];
+        m_nametagNearbyEnemiesOnly = values[20];
+        m_nametagTeamPulse = values[21];
+        m_showTeammateArrows = values[22];
+        m_safewalkEnabled = values[23];
+        m_scaffoldEnabled = values[24];
+        m_flyEnabled = values[25];
+        m_bhopEnabled = values[26];
+        m_bhopAutoJump = values[27];
+        m_aimAssistEnabled = values[28];
+        m_aimSlowdownMode = values[29];
+        m_textGuiEnabled = values[30];
+        m_allowHypixelMovement = values[31];
+        m_bedDefenseRadius = defenseRadius;
+        m_bedThreatRadius = threatRadius;
+        m_bedDefenseHotkey = bedHotkey;
+        m_bedDefensePanelOpacity = panelOpacity;
+        m_hypixelPanelHotkey = hypixelHotkey;
+        m_hypixelPanelOpacity = hypixelOpacity;
+        m_hypixelPanelScale = hypixelScale;
+        m_hypixelPanelHeight = hypixelHeight;
+        m_hypixelPanelX = hypixelX;
+        m_hypixelPanelY = hypixelY;
+        m_clickGuiLightTheme = clickGuiTheme != 0;
+        m_playerEspColor = playerColorName;
+        m_bedEspColor = bedColorName;
+        m_bedDefensePanelColor = panelColorName;
+        m_hypixelPanelColor = hypixelColorName;
+        m_nametagPanelOpacity = nametagOpacity;
+        m_nametagPanelColor = nametagColorName;
+        m_clickGuiAccentColor = accentColorName;
+        m_hypixelPanelFontIndex = hypixelFontIndex;
+        m_nametagRange = nametagRange;
+        m_nametagSizeIndex = nametagSizeIndex;
+        m_hypixelRailColor = hypixelRailColorName;
+        m_hypixelRailOpacity = hypixelRailOpacity;
+        m_safewalkReleaseDelayMs = safewalkReleaseDelayMs;
+        m_safewalkEdgeSensitivity = safewalkSensitivity;
+        m_safewalkMinimumPitch = safewalkPitch;
+        m_safewalkHotkey = safewalkHotkey;
+        m_flySpeedPercent = flySpeed;
+        m_aimSlowdownPercent = aimSlowdown;
+        m_aimSpeedPercent = aimSpeed;
+        m_textGuiColor = textColorName;
+        m_textGuiX = textX;
+        m_textGuiY = textY;
+        if (changed) {
+            storeFeatureSettings();
+            emit featureSettingsChanged();
+        }
     } else if (type == QByteArrayLiteral("BIND_CHANGED")) {
         bool valid = false;
         const int virtualKey = fields.value(1).toInt(&valid);
@@ -1172,17 +1793,72 @@ void OverlayManager::processAgentLine(const QByteArray &line)
             emit guiScaleIndexChanged();
         }
     } else if (type == QByteArrayLiteral("PLAYER_FOUND")) {
-        if (fields.size() != 3) return;
+        if (fields.size() != 3 && fields.size() != 4) return;
         const QString playerName = decodeProtocolToken(fields.at(1));
         const QString teamPrefix = decodeProtocolToken(fields.at(2)).toLower();
+        QString uuid = fields.size() == 4 ? decodeProtocolToken(fields.at(3)).toLower()
+                                          : QString{};
+        uuid.remove(QLatin1Char('-'));
         static const QRegularExpression nameExpression(
             QStringLiteral("^[A-Za-z0-9_]{1,16}$"));
+        static const QRegularExpression uuidExpression(
+            QStringLiteral("^[0-9a-f]{32}$"));
         const bool validTeam = teamPrefix.size() == 2 &&
             teamPrefix.at(0) == QChar(0x00A7) &&
             ((teamPrefix.at(1) >= QLatin1Char('0') && teamPrefix.at(1) <= QLatin1Char('9')) ||
              (teamPrefix.at(1) >= QLatin1Char('a') && teamPrefix.at(1) <= QLatin1Char('f')));
-        if (nameExpression.match(playerName).hasMatch() && validTeam)
+        if (!uuid.isEmpty() && !uuidExpression.match(uuid).hasMatch()) return;
+        if (nameExpression.match(playerName).hasMatch() && validTeam) {
             emit playerFound(playerName, teamPrefix);
+            emit playerIdentityFound(playerName, teamPrefix, uuid);
+        }
+    } else if (type == QByteArrayLiteral("BLACKLIST_ADD")) {
+        if (fields.size() != 6) return;
+        const QString name = decodeProtocolToken(fields.at(1));
+        const QString uuid = decodeProtocolToken(fields.at(2));
+        const QString reason = decodeProtocolToken(fields.at(3));
+        if ((fields.at(4) != "0" && fields.at(4) != "1") ||
+            (fields.at(5) != "0" && fields.at(5) != "1")) return;
+        emit blacklistAddRequested(name, uuid, reason,
+            fields.at(4) == "1", fields.at(5) == "1");
+    } else if (type == QByteArrayLiteral("BLACKLIST_REMOVE")) {
+        if (fields.size() == 2)
+            emit blacklistRemoveRequested(decodeProtocolToken(fields.at(1)));
+    } else if (type == QByteArrayLiteral("BLACKLIST_WARNING")) {
+        if (fields.size() == 3 &&
+            (fields.at(2) == "0" || fields.at(2) == "1")) {
+            emit blacklistWarningRequested(decodeProtocolToken(fields.at(1)),
+                                           fields.at(2) == "1");
+        }
+    } else if (type == QByteArrayLiteral("BLACKLIST_LAYOUT")) {
+        if (fields.size() != 5) return;
+        bool xOk = false, yOk = false, widthOk = false, heightOk = false;
+        const int x = fields.at(1).toInt(&xOk);
+        const int y = fields.at(2).toInt(&yOk);
+        const int width = fields.at(3).toInt(&widthOk);
+        const int height = fields.at(4).toInt(&heightOk);
+        if (xOk && yOk && widthOk && heightOk && x >= -1 && x <= 1000 &&
+            y >= -1 && y <= 1000 && width >= 60 && width <= 180 &&
+            height >= 60 && height <= 300) {
+            emit blacklistLayoutChanged(x, y, width, height);
+        }
+    } else if (type == QByteArrayLiteral("BLACKLIST_SETTINGS_CHANGED")) {
+        if (fields.size() != 8 ||
+            (fields.at(1) != "0" && fields.at(1) != "1") ||
+            (fields.at(2) != "0" && fields.at(2) != "1") ||
+            (fields.at(3) != "0" && fields.at(3) != "1") ||
+            (fields.at(4) != "0" && fields.at(4) != "1") ||
+            (fields.at(5) != "0" && fields.at(5) != "1")) return;
+        bool opacityOk = false, colorOk = false;
+        const int opacity = fields.at(6).toInt(&opacityOk);
+        const quint32 color = fields.at(7).toUInt(&colorOk);
+        if (!opacityOk || opacity < 0 || opacity > 100 ||
+            !colorOk || color > 0xFFFFFFU) return;
+        emit blacklistSettingsChanged(
+            fields.at(1) == "1", fields.at(2) == "1", fields.at(3) == "1",
+            fields.at(4) == "1", fields.at(5) == "1",
+            opacity, QStringLiteral("#%1").arg(
+                color, 6, 16, QLatin1Char('0')).toUpper());
     } else if (type == QByteArrayLiteral("MATCH_STATE")) {
         if (fields.size() != 2 ||
             (fields.at(1) != QByteArrayLiteral("0") && fields.at(1) != QByteArrayLiteral("1"))) {
@@ -1324,6 +2000,227 @@ void OverlayManager::sendStateSnapshot()
     sendGuiScaleSnapshot();
 }
 
+void OverlayManager::loadFeatureSettings()
+{
+    QSettings settings;
+    settings.beginGroup(QStringLiteral("features"));
+    m_espEnabled = settings.value(QStringLiteral("espEnabled"), true).toBool();
+    m_entityEspEnabled = settings.value(QStringLiteral("entityEspEnabled"), true).toBool();
+    m_entityEspPlayersOnly = settings.value(QStringLiteral("entityEspPlayersOnly"), false).toBool();
+    m_bedEspEnabled = settings.value(QStringLiteral("bedEspEnabled"), true).toBool();
+    m_bedAutoRefreshEnabled = settings.value(QStringLiteral("bedAutoRefreshEnabled"), false).toBool();
+    m_espLabelsEnabled = settings.value(QStringLiteral("labelsEnabled"), true).toBool();
+    m_hypixelPanelEnabled = settings.value(QStringLiteral("hypixelPanelEnabled"), true).toBool();
+    m_hypixelPanelHoldToShow = settings.value(
+        QStringLiteral("hypixelPanelHoldToShow"), true).toBool();
+    m_hypixelPanelHotkey = std::clamp(settings.value(
+        QStringLiteral("hypixelPanelHotkey"), 0x09).toInt(), 8, 254);
+    m_hypixelPanelOpacity = std::clamp(settings.value(
+        QStringLiteral("hypixelPanelOpacity"), 76).toInt(), 0, 100);
+    m_hypixelRailOpacity = std::clamp(settings.value(
+        QStringLiteral("hypixelRailOpacity"), 100).toInt(), 0, 100);
+    m_hypixelPanelScale = std::clamp(settings.value(
+        QStringLiteral("hypixelPanelScale"), 100).toInt(), 70, 160);
+    m_hypixelPanelHeight = std::clamp(settings.value(
+        QStringLiteral("hypixelPanelHeight"), 100).toInt(), 60, 400);
+    m_hypixelPanelX = std::clamp(settings.value(
+        QStringLiteral("hypixelPanelX"), -1).toInt(), -1, 1000);
+    m_hypixelPanelY = std::clamp(settings.value(
+        QStringLiteral("hypixelPanelY"), -1).toInt(), -1, 1000);
+    m_hypixelPanelFontIndex = std::clamp(settings.value(
+        QStringLiteral("hypixelPanelFontIndex"), 1).toInt(), 0, 3);
+    m_clickGuiLightTheme = settings.value(
+        QStringLiteral("clickGuiLightTheme"), false).toBool();
+    m_nametagEnabled = settings.value(QStringLiteral("nametagEnabled"), true).toBool();
+    m_nametagSidePlacement = settings.value(
+        QStringLiteral("nametagSidePlacement"), false).toBool();
+    m_enemyItemIndicatorsEnabled = settings.value(
+        QStringLiteral("enemyItemIndicatorsEnabled"), true).toBool();
+    m_showTeammateNametags = settings.value(
+        QStringLiteral("showTeammateNametags"), true).toBool();
+    m_nametagNearbyEnemiesOnly = settings.value(
+        QStringLiteral("nametagNearbyEnemiesOnly"), false).toBool();
+    m_nametagTeamPulse = settings.value(
+        QStringLiteral("nametagTeamPulse"), true).toBool();
+    m_nametagRange = std::clamp(settings.value(
+        QStringLiteral("nametagRange"), 32).toInt(), 4, 128);
+    m_nametagSizeIndex = std::clamp(settings.value(
+        QStringLiteral("nametagSizeIndex"), 1).toInt(), 0, 3);
+    m_nametagPanelOpacity = std::clamp(settings.value(
+        QStringLiteral("nametagPanelOpacity"), 82).toInt(), 10, 100);
+    m_bedThreatAlertsEnabled = settings.value(QStringLiteral("bedThreatAlertsEnabled"), true).toBool();
+    m_bedDefensePanelEnabled = settings.value(QStringLiteral("bedDefensePanelEnabled"), true).toBool();
+    m_bedEspFilled = settings.value(QStringLiteral("bedEspFilled"), false).toBool();
+    m_debugChatEnabled = settings.value(QStringLiteral("debugChatEnabled"), true).toBool();
+    m_showOwnBedDefenseInfo = settings.value(QStringLiteral("showOwnBedDefenseInfo"), true).toBool();
+    m_showTeammateBoxes = settings.value(QStringLiteral("showTeammateBoxes"), true).toBool();
+    m_showTeammateArrows = settings.value(
+        QStringLiteral("showTeammateArrows"), true).toBool();
+    m_safewalkEnabled = settings.value(
+        QStringLiteral("safewalkEnabled"), false).toBool();
+    m_safewalkReleaseDelayMs = std::clamp(settings.value(
+        QStringLiteral("safewalkReleaseDelayMs"), 120).toInt(), 0, 750);
+    m_safewalkEdgeSensitivity = std::clamp(settings.value(
+        QStringLiteral("safewalkEdgeSensitivity"), 55).toInt(), 0, 95);
+    m_safewalkMinimumPitch = std::clamp(settings.value(
+        QStringLiteral("safewalkMinimumPitch"), -5).toInt(), -90, 90);
+    m_safewalkHotkey = std::clamp(settings.value(
+        QStringLiteral("safewalkHotkey"), 0x77).toInt(), 8, 254);
+    m_scaffoldEnabled = settings.value(
+        QStringLiteral("scaffoldEnabled"), false).toBool();
+    m_flyEnabled = settings.value(QStringLiteral("flyEnabled"), false).toBool();
+    m_flySpeedPercent = std::clamp(settings.value(
+        QStringLiteral("flySpeedPercent"), 100).toInt(), 10, 500);
+    m_bhopEnabled = settings.value(QStringLiteral("bhopEnabled"), false).toBool();
+    m_bhopAutoJump = settings.value(QStringLiteral("bhopAutoJump"), true).toBool();
+    m_aimAssistEnabled = settings.value(
+        QStringLiteral("aimAssistEnabled"), false).toBool();
+    m_aimSlowdownMode = settings.value(
+        QStringLiteral("aimSlowdownMode"), true).toBool();
+    m_aimSlowdownPercent = std::clamp(settings.value(
+        QStringLiteral("aimSlowdownPercent"), 45).toInt(), 5, 95);
+    m_aimSpeedPercent = std::clamp(settings.value(
+        QStringLiteral("aimSpeedPercent"), 35).toInt(), 1, 100);
+    m_textGuiEnabled = settings.value(
+        QStringLiteral("textGuiEnabled"), false).toBool();
+    m_textGuiX = std::clamp(settings.value(
+        QStringLiteral("textGuiX"), -1).toInt(), -1, 1000);
+    m_textGuiY = std::clamp(settings.value(
+        QStringLiteral("textGuiY"), -1).toInt(), -1, 1000);
+    m_allowHypixelMovement = settings.value(
+        QStringLiteral("allowHypixelMovement"), false).toBool();
+    m_bedDefenseHoldToShow = settings.value(QStringLiteral("bedDefenseHoldToShow"), true).toBool();
+    m_bedDefensePerspectiveScale = settings.value(QStringLiteral("bedDefensePerspectiveScale"), false).toBool();
+    m_bedDefenseRadius = std::clamp(
+        settings.value(QStringLiteral("bedDefenseRadius"), 6).toInt(), 3, 10);
+    m_bedThreatRadius = std::clamp(
+        settings.value(QStringLiteral("bedThreatRadius"), 8).toInt(), 3, 32);
+    m_bedDefenseHotkey = std::clamp(
+        settings.value(QStringLiteral("bedDefenseHotkey"), 0xA4).toInt(), 8, 254);
+    m_bedDefensePanelOpacity = std::clamp(
+        settings.value(QStringLiteral("bedDefensePanelOpacity"), 78).toInt(), 0, 100);
+    const QString savedPlayerColor = normalizedRgbColor(
+        settings.value(QStringLiteral("playerEspColor"), QStringLiteral("#FF3B30")).toString());
+    const QString savedBedColor = normalizedRgbColor(
+        settings.value(QStringLiteral("bedEspColor"), QStringLiteral("#FF5C68")).toString());
+    const QString savedPanelColor = normalizedRgbColor(
+        settings.value(QStringLiteral("bedDefensePanelColor"), QStringLiteral("#191621")).toString());
+    const QString savedHypixelPanelColor = normalizedRgbColor(
+        settings.value(QStringLiteral("hypixelPanelColor"),
+                       QStringLiteral("#000000")).toString());
+    const QString savedHypixelRailColor = normalizedRgbColor(
+        settings.value(QStringLiteral("hypixelRailColor"),
+                       QStringLiteral("#825DE8")).toString());
+    const QString savedNametagColor = normalizedRgbColor(settings.value(
+        QStringLiteral("nametagPanelColor"), QStringLiteral("#101218")).toString());
+    const QString savedAccentColor = normalizedRgbColor(settings.value(
+        QStringLiteral("clickGuiAccentColor"), QStringLiteral("#825DE8")).toString());
+    const QString savedTextGuiColor = normalizedRgbColor(settings.value(
+        QStringLiteral("textGuiColor"), QStringLiteral("#7EE7FF")).toString());
+    m_playerEspColor = savedPlayerColor.isEmpty() ? QStringLiteral("#FF3B30") : savedPlayerColor;
+    m_bedEspColor = savedBedColor.isEmpty() ? QStringLiteral("#FF5C68") : savedBedColor;
+    m_bedDefensePanelColor = savedPanelColor.isEmpty()
+        ? QStringLiteral("#191621") : savedPanelColor;
+    // Version migration: the redesigned card intentionally exposes only
+    // black/white surfaces. Existing custom colors map to the closest legible
+    // tone instead of silently producing low-contrast column headers.
+    const QColor migratedHypixelColor(savedHypixelPanelColor);
+    m_hypixelPanelColor = migratedHypixelColor.isValid() &&
+            migratedHypixelColor.lightness() >= 128
+        ? QStringLiteral("#FFFFFF") : QStringLiteral("#000000");
+    m_hypixelRailColor = savedHypixelRailColor.isEmpty()
+        ? QStringLiteral("#825DE8") : savedHypixelRailColor;
+    m_nametagPanelColor = savedNametagColor.isEmpty()
+        ? QStringLiteral("#101218") : savedNametagColor;
+    m_clickGuiAccentColor = savedAccentColor.isEmpty()
+        ? QStringLiteral("#825DE8") : savedAccentColor;
+    m_textGuiColor = savedTextGuiColor.isEmpty()
+        ? QStringLiteral("#7EE7FF") : savedTextGuiColor;
+    settings.endGroup();
+}
+
+void OverlayManager::storeFeatureSettings()
+{
+    m_featureSettingsStoreTimer.start();
+}
+
+void OverlayManager::flushFeatureSettings() const
+{
+    QSettings settings;
+    settings.beginGroup(QStringLiteral("features"));
+    settings.setValue(QStringLiteral("espEnabled"), m_espEnabled);
+    settings.setValue(QStringLiteral("entityEspEnabled"), m_entityEspEnabled);
+    settings.setValue(QStringLiteral("entityEspPlayersOnly"), m_entityEspPlayersOnly);
+    settings.setValue(QStringLiteral("bedEspEnabled"), m_bedEspEnabled);
+    settings.setValue(QStringLiteral("bedAutoRefreshEnabled"), m_bedAutoRefreshEnabled);
+    settings.setValue(QStringLiteral("labelsEnabled"), m_espLabelsEnabled);
+    settings.setValue(QStringLiteral("hypixelPanelEnabled"), m_hypixelPanelEnabled);
+    settings.setValue(QStringLiteral("hypixelPanelHoldToShow"), m_hypixelPanelHoldToShow);
+    settings.setValue(QStringLiteral("hypixelPanelHotkey"), m_hypixelPanelHotkey);
+    settings.setValue(QStringLiteral("hypixelPanelOpacity"), m_hypixelPanelOpacity);
+    settings.setValue(QStringLiteral("hypixelPanelColor"), m_hypixelPanelColor);
+    settings.setValue(QStringLiteral("hypixelRailColor"), m_hypixelRailColor);
+    settings.setValue(QStringLiteral("hypixelRailOpacity"), m_hypixelRailOpacity);
+    settings.setValue(QStringLiteral("hypixelPanelScale"), m_hypixelPanelScale);
+    settings.setValue(QStringLiteral("hypixelPanelHeight"), m_hypixelPanelHeight);
+    settings.setValue(QStringLiteral("hypixelPanelX"), m_hypixelPanelX);
+    settings.setValue(QStringLiteral("hypixelPanelY"), m_hypixelPanelY);
+    settings.setValue(QStringLiteral("hypixelPanelFontIndex"), m_hypixelPanelFontIndex);
+    settings.setValue(QStringLiteral("clickGuiLightTheme"), m_clickGuiLightTheme);
+    settings.setValue(QStringLiteral("nametagEnabled"), m_nametagEnabled);
+    settings.setValue(QStringLiteral("nametagSidePlacement"), m_nametagSidePlacement);
+    settings.setValue(QStringLiteral("enemyItemIndicatorsEnabled"), m_enemyItemIndicatorsEnabled);
+    settings.setValue(QStringLiteral("showTeammateNametags"), m_showTeammateNametags);
+    settings.setValue(QStringLiteral("nametagNearbyEnemiesOnly"), m_nametagNearbyEnemiesOnly);
+    settings.setValue(QStringLiteral("nametagTeamPulse"), m_nametagTeamPulse);
+    settings.setValue(QStringLiteral("nametagRange"), m_nametagRange);
+    settings.setValue(QStringLiteral("nametagSizeIndex"), m_nametagSizeIndex);
+    settings.setValue(QStringLiteral("nametagPanelOpacity"), m_nametagPanelOpacity);
+    settings.setValue(QStringLiteral("nametagPanelColor"), m_nametagPanelColor);
+    settings.setValue(QStringLiteral("clickGuiAccentColor"), m_clickGuiAccentColor);
+    settings.setValue(QStringLiteral("bedThreatAlertsEnabled"), m_bedThreatAlertsEnabled);
+    settings.setValue(QStringLiteral("bedDefensePanelEnabled"), m_bedDefensePanelEnabled);
+    settings.setValue(QStringLiteral("bedEspFilled"), m_bedEspFilled);
+    settings.setValue(QStringLiteral("debugChatEnabled"), m_debugChatEnabled);
+    settings.setValue(QStringLiteral("showOwnBedDefenseInfo"), m_showOwnBedDefenseInfo);
+    settings.setValue(QStringLiteral("showTeammateBoxes"), m_showTeammateBoxes);
+    settings.setValue(QStringLiteral("showTeammateArrows"), m_showTeammateArrows);
+    settings.setValue(QStringLiteral("safewalkEnabled"), m_safewalkEnabled);
+    settings.setValue(QStringLiteral("safewalkReleaseDelayMs"),
+                      m_safewalkReleaseDelayMs);
+    settings.setValue(QStringLiteral("safewalkEdgeSensitivity"),
+                      m_safewalkEdgeSensitivity);
+    settings.setValue(QStringLiteral("safewalkMinimumPitch"),
+                      m_safewalkMinimumPitch);
+    settings.setValue(QStringLiteral("safewalkHotkey"), m_safewalkHotkey);
+    settings.setValue(QStringLiteral("scaffoldEnabled"), m_scaffoldEnabled);
+    settings.setValue(QStringLiteral("flyEnabled"), m_flyEnabled);
+    settings.setValue(QStringLiteral("flySpeedPercent"), m_flySpeedPercent);
+    settings.setValue(QStringLiteral("bhopEnabled"), m_bhopEnabled);
+    settings.setValue(QStringLiteral("bhopAutoJump"), m_bhopAutoJump);
+    settings.setValue(QStringLiteral("aimAssistEnabled"), m_aimAssistEnabled);
+    settings.setValue(QStringLiteral("aimSlowdownMode"), m_aimSlowdownMode);
+    settings.setValue(QStringLiteral("aimSlowdownPercent"), m_aimSlowdownPercent);
+    settings.setValue(QStringLiteral("aimSpeedPercent"), m_aimSpeedPercent);
+    settings.setValue(QStringLiteral("textGuiEnabled"), m_textGuiEnabled);
+    settings.setValue(QStringLiteral("textGuiColor"), m_textGuiColor);
+    settings.setValue(QStringLiteral("textGuiX"), m_textGuiX);
+    settings.setValue(QStringLiteral("textGuiY"), m_textGuiY);
+    settings.setValue(QStringLiteral("allowHypixelMovement"),
+                      m_allowHypixelMovement);
+    settings.setValue(QStringLiteral("bedDefenseHoldToShow"), m_bedDefenseHoldToShow);
+    settings.setValue(QStringLiteral("bedDefensePerspectiveScale"), m_bedDefensePerspectiveScale);
+    settings.setValue(QStringLiteral("bedDefenseRadius"), m_bedDefenseRadius);
+    settings.setValue(QStringLiteral("bedThreatRadius"), m_bedThreatRadius);
+    settings.setValue(QStringLiteral("bedDefenseHotkey"), m_bedDefenseHotkey);
+    settings.setValue(QStringLiteral("bedDefensePanelOpacity"), m_bedDefensePanelOpacity);
+    settings.setValue(QStringLiteral("playerEspColor"), m_playerEspColor);
+    settings.setValue(QStringLiteral("bedEspColor"), m_bedEspColor);
+    settings.setValue(QStringLiteral("bedDefensePanelColor"), m_bedDefensePanelColor);
+    settings.endGroup();
+    settings.sync();
+}
+
 void OverlayManager::sendFeatureSnapshot()
 {
     if (!m_authenticated) return;
@@ -1335,7 +2232,64 @@ void OverlayManager::sendFeatureSnapshot()
                       + (m_hypixelPanelEnabled ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
                       + (m_bedThreatAlertsEnabled ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
                       + (m_bedDefensePanelEnabled ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
-                      + QByteArray::number(std::clamp(m_bedDefenseRadius, 3, 10)) + '\n');
+                      + (m_entityEspPlayersOnly ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_bedAutoRefreshEnabled ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_bedEspFilled ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_debugChatEnabled ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_showOwnBedDefenseInfo ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_showTeammateBoxes ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_bedDefenseHoldToShow ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_bedDefensePerspectiveScale ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_hypixelPanelHoldToShow ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_nametagEnabled ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_nametagSidePlacement ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_enemyItemIndicatorsEnabled ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_showTeammateNametags ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_nametagNearbyEnemiesOnly ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_nametagTeamPulse ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_showTeammateArrows ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_safewalkEnabled ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_scaffoldEnabled ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_flyEnabled ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_bhopEnabled ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_bhopAutoJump ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_aimAssistEnabled ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_aimSlowdownMode ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_textGuiEnabled ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + (m_allowHypixelMovement ? QByteArrayLiteral("1 ") : QByteArrayLiteral("0 "))
+                      + QByteArray::number(std::clamp(m_bedDefenseRadius, 3, 10)) + ' '
+                      + QByteArray::number(std::clamp(m_bedThreatRadius, 3, 32)) + ' '
+                      + QByteArray::number(std::clamp(m_bedDefenseHotkey, 8, 254)) + ' '
+                      + QByteArray::number(std::clamp(m_bedDefensePanelOpacity, 0, 100)) + ' '
+                      + QByteArray::number(std::clamp(m_hypixelPanelHotkey, 8, 254)) + ' '
+                      + QByteArray::number(std::clamp(m_hypixelPanelOpacity, 0, 100)) + ' '
+                      + QByteArray::number(std::clamp(m_hypixelPanelScale, 70, 160)) + ' '
+                      + QByteArray::number(std::clamp(m_hypixelPanelX, -1, 1000)) + ' '
+                      + QByteArray::number(std::clamp(m_hypixelPanelY, -1, 1000)) + ' '
+                      + QByteArray::number(m_clickGuiLightTheme ? 1 : 0) + ' '
+                      + QByteArray::number(QColor(m_playerEspColor).rgb() & 0xFFFFFFU) + ' '
+                      + QByteArray::number(QColor(m_bedEspColor).rgb() & 0xFFFFFFU) + ' '
+                      + QByteArray::number(QColor(m_bedDefensePanelColor).rgb() & 0xFFFFFFU) + ' '
+                      + QByteArray::number(QColor(m_hypixelPanelColor).rgb() & 0xFFFFFFU) + ' '
+                      + QByteArray::number(std::clamp(m_hypixelPanelHeight, 60, 400)) + ' '
+                      + QByteArray::number(std::clamp(m_nametagPanelOpacity, 10, 100)) + ' '
+                      + QByteArray::number(QColor(m_nametagPanelColor).rgb() & 0xFFFFFFU) + ' '
+                      + QByteArray::number(QColor(m_clickGuiAccentColor).rgb() & 0xFFFFFFU) + ' '
+                      + QByteArray::number(std::clamp(m_hypixelPanelFontIndex, 0, 3)) + ' '
+                      + QByteArray::number(std::clamp(m_nametagRange, 4, 128)) + ' '
+                      + QByteArray::number(std::clamp(m_nametagSizeIndex, 0, 3)) + ' '
+                      + QByteArray::number(QColor(m_hypixelRailColor).rgb() & 0xFFFFFFU) + ' '
+                      + QByteArray::number(std::clamp(m_hypixelRailOpacity, 0, 100)) + ' '
+                      + QByteArray::number(std::clamp(m_safewalkReleaseDelayMs, 0, 750)) + ' '
+                      + QByteArray::number(std::clamp(m_safewalkEdgeSensitivity, 0, 95)) + ' '
+                      + QByteArray::number(std::clamp(m_safewalkMinimumPitch, -90, 90)) + ' '
+                      + QByteArray::number(std::clamp(m_safewalkHotkey, 8, 254)) + ' '
+                      + QByteArray::number(std::clamp(m_flySpeedPercent, 10, 500)) + ' '
+                      + QByteArray::number(std::clamp(m_aimSlowdownPercent, 5, 95)) + ' '
+                      + QByteArray::number(std::clamp(m_aimSpeedPercent, 1, 100)) + ' '
+                      + QByteArray::number(QColor(m_textGuiColor).rgb() & 0xFFFFFFU) + ' '
+                      + QByteArray::number(std::clamp(m_textGuiX, -1, 1000)) + ' '
+                      + QByteArray::number(std::clamp(m_textGuiY, -1, 1000)) + '\n');
 }
 
 void OverlayManager::sendBindSnapshot()

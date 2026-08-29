@@ -15,6 +15,8 @@ class AppSettings final : public QObject
                    WRITE setMenuHotkey NOTIFY menuHotkeyChanged)
     Q_PROPERTY(int guiScaleIndex READ guiScaleIndex
                    WRITE setGuiScaleIndex NOTIFY guiScaleIndexChanged)
+    Q_PROPERTY(bool processAutoRefresh READ processAutoRefresh
+                   WRITE setProcessAutoRefresh NOTIFY processAutoRefreshChanged)
 
 public:
     explicit AppSettings(QObject *parent = nullptr);
@@ -25,16 +27,19 @@ public:
     }
     [[nodiscard]] int menuHotkey() const noexcept { return m_menuHotkey; }
     [[nodiscard]] int guiScaleIndex() const noexcept { return m_guiScaleIndex; }
+    [[nodiscard]] bool processAutoRefresh() const noexcept { return m_processAutoRefresh; }
 
 public slots:
     void setNavigationPaneWidth(double width);
     void setMenuHotkey(int virtualKey);
     void setGuiScaleIndex(int index);
+    void setProcessAutoRefresh(bool enabled);
 
 signals:
     void navigationPaneWidthChanged();
     void menuHotkeyChanged();
     void guiScaleIndexChanged();
+    void processAutoRefreshChanged();
 
 private:
     void store(const char *key, const QVariant &value);
@@ -42,4 +47,5 @@ private:
     double m_navigationPaneWidth = 232.0;
     int m_menuHotkey = 0xDE; // VK_OEM_7 / apostrophe
     int m_guiScaleIndex = 1; // M
+    bool m_processAutoRefresh = false;
 };

@@ -80,7 +80,13 @@ ApplicationWindow {
                                                     : setupNavigationItems
 
     property string activeRoute: "scanner"
-    property bool autoRefresh: false
+    property alias autoRefresh: autoRefreshBinding.value
+    QtObject {
+        id: autoRefreshBinding
+        property bool value: AppSettings.processAutoRefresh
+        onValueChanged: if (AppSettings.processAutoRefresh !== value)
+                            AppSettings.processAutoRefresh = value
+    }
     property var pendingProcess: ({})
 
     function menuHotkeyIndex(virtualKey) {
@@ -1086,13 +1092,22 @@ ApplicationWindow {
 
                                 Repeater {
                                     model: [
-                                        { "label": "ESP master", "detail": "Single-player world-space diagnostics", "key": "master" },
+                                        { "label": "ESP master", "detail": "World-space overlay rendering", "key": "master" },
                                         { "label": "3D living hitboxes", "detail": "Occlusion-independent projected AABB wireframes", "key": "entities" },
+                                        { "label": "Players only", "detail": "Hide non-player living-entity boxes", "key": "playersOnly" },
+                                        { "label": "Show teammate boxes", "detail": "Keep 3D boxes around teammates in confirmed matches", "key": "teammateBoxes" },
                                         { "label": "Bed ESP", "detail": "Chunk diffing, bulk section copy and lazy verification", "key": "beds" },
-                                        { "label": "Bed proximity alert", "detail": "Rate-limited lower-right warning when another player enters 8 blocks", "key": "bedThreat" },
+                                        { "label": "Automatic bed refresh", "detail": "Periodically rebuild loaded-chunk bed data", "key": "bedAuto" },
+                                        { "label": "Solid translucent bed fill", "detail": "Fill projected bed boxes while retaining the outline", "key": "bedFill" },
+                                        { "label": "Bed proximity alert", "detail": "Persistent distance-tracking warning while an enemy is in range", "key": "bedThreat" },
                                         { "label": "Bed defense panel", "detail": "Fixed-size material icons above each detected bed", "key": "bedDefense" },
+                                        { "label": "Show own bed materials", "detail": "Include the local team's bed defense information", "key": "ownBedInfo" },
+                                        { "label": "Hold key to show materials", "detail": "Show defense cards only while the configured key is held", "key": "bedHold" },
+                                        { "label": "Perspective-sized cards", "detail": "Near cards appear larger and distant cards smaller", "key": "bedPerspective" },
+                                        { "label": "Local Debug chat", "detail": "Show match, team and teammate decisions only in your chat log", "key": "debugChat" },
                                         { "label": "World labels", "detail": "Coordinates and entity identifiers", "key": "labels" },
-                                        { "label": "Hypixel panel", "detail": "Show the draggable official-API result card in game", "key": "hypixel" }
+                                        { "label": "Hypixel panel", "detail": "Compact automatic team roster and Bed Wars metrics", "key": "hypixel" },
+                                        { "label": "Hold key for player stats", "detail": "Keep the roster card hidden until its configured key is held", "key": "hypixelHold" }
                                     ]
 
                                     delegate: RowLayout {
@@ -1106,24 +1121,295 @@ ApplicationWindow {
                                             Text { text: modelData.detail; color: app.secondaryTextColor; font.pixelSize: 11; elide: Text.ElideRight; Layout.fillWidth: true }
                                         }
                                         Switch {
-                                            enabled: OverlayManager.attached
                                             checked: modelData.key === "master" ? OverlayManager.espEnabled
                                                    : modelData.key === "entities" ? OverlayManager.entityEspEnabled
+                                                   : modelData.key === "playersOnly" ? OverlayManager.entityEspPlayersOnly
+                                                   : modelData.key === "teammateBoxes" ? OverlayManager.showTeammateBoxes
                                                    : modelData.key === "beds" ? OverlayManager.bedEspEnabled
+                                                   : modelData.key === "bedAuto" ? OverlayManager.bedAutoRefreshEnabled
+                                                   : modelData.key === "bedFill" ? OverlayManager.bedEspFilled
                                                    : modelData.key === "bedThreat" ? OverlayManager.bedThreatAlertsEnabled
                                                    : modelData.key === "bedDefense" ? OverlayManager.bedDefensePanelEnabled
+                                                   : modelData.key === "ownBedInfo" ? OverlayManager.showOwnBedDefenseInfo
+                                                   : modelData.key === "bedHold" ? OverlayManager.bedDefenseHoldToShow
+                                                   : modelData.key === "bedPerspective" ? OverlayManager.bedDefensePerspectiveScale
+                                                   : modelData.key === "debugChat" ? OverlayManager.debugChatEnabled
                                                    : modelData.key === "labels" ? OverlayManager.espLabelsEnabled
-                                                   : OverlayManager.hypixelPanelEnabled
+                                                   : modelData.key === "hypixel" ? OverlayManager.hypixelPanelEnabled
+                                                   : OverlayManager.hypixelPanelHoldToShow
                                             onToggled: {
                                                 if (modelData.key === "master") OverlayManager.espEnabled = checked
                                                 else if (modelData.key === "entities") OverlayManager.entityEspEnabled = checked
+                                                else if (modelData.key === "playersOnly") OverlayManager.entityEspPlayersOnly = checked
+                                                else if (modelData.key === "teammateBoxes") OverlayManager.showTeammateBoxes = checked
                                                 else if (modelData.key === "beds") OverlayManager.bedEspEnabled = checked
+                                                else if (modelData.key === "bedAuto") OverlayManager.bedAutoRefreshEnabled = checked
+                                                else if (modelData.key === "bedFill") OverlayManager.bedEspFilled = checked
                                                 else if (modelData.key === "bedThreat") OverlayManager.bedThreatAlertsEnabled = checked
                                                 else if (modelData.key === "bedDefense") OverlayManager.bedDefensePanelEnabled = checked
+                                                else if (modelData.key === "ownBedInfo") OverlayManager.showOwnBedDefenseInfo = checked
+                                                else if (modelData.key === "bedHold") OverlayManager.bedDefenseHoldToShow = checked
+                                                else if (modelData.key === "bedPerspective") OverlayManager.bedDefensePerspectiveScale = checked
+                                                else if (modelData.key === "debugChat") OverlayManager.debugChatEnabled = checked
                                                 else if (modelData.key === "labels") OverlayManager.espLabelsEnabled = checked
-                                                else OverlayManager.hypixelPanelEnabled = checked
+                                                else if (modelData.key === "hypixel") OverlayManager.hypixelPanelEnabled = checked
+                                                else OverlayManager.hypixelPanelHoldToShow = checked
                                             }
                                         }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 12
+                                    Text { Layout.preferredWidth: 156; text: "Player box color"; color: app.textColor; font.pixelSize: 13; font.weight: Font.Medium }
+                                    Repeater {
+                                        model: ["#FF3B30", "#FF9500", "#FFD60A", "#30D158", "#64D2FF", "#0A84FF", "#BF5AF2", "#FFFFFF"]
+                                        Rectangle {
+                                            required property string modelData
+                                            width: 26; height: 26; radius: 13; color: modelData
+                                            border.width: OverlayManager.playerEspColor.toUpperCase() === modelData ? 3 : 1
+                                            border.color: OverlayManager.playerEspColor.toUpperCase() === modelData ? app.primaryColor : "#8B8490"
+                                            TapHandler { onTapped: OverlayManager.playerEspColor = parent.modelData }
+                                        }
+                                    }
+                                    MaterialTextField {
+                                        id: playerColorField
+                                        Layout.preferredWidth: 106; Layout.preferredHeight: 40
+                                        text: OverlayManager.playerEspColor
+                                        maximumLength: 7
+                                        onEditingFinished: {
+                                            if (/^#[0-9a-fA-F]{6}$/.test(text)) OverlayManager.playerEspColor = text
+                                            text = OverlayManager.playerEspColor
+                                        }
+                                        Connections {
+                                            target: OverlayManager
+                                            function onFeatureSettingsChanged() {
+                                                if (!playerColorField.activeFocus) playerColorField.text = OverlayManager.playerEspColor
+                                            }
+                                        }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 12
+                                    Text { Layout.preferredWidth: 156; text: "Material card color"; color: app.textColor; font.pixelSize: 13; font.weight: Font.Medium }
+                                    Repeater {
+                                        model: ["#191621", "#202532", "#12252A", "#2A181F", "#241E34", "#111111"]
+                                        Rectangle {
+                                            required property string modelData
+                                            width: 26; height: 26; radius: 13; color: modelData
+                                            border.width: OverlayManager.bedDefensePanelColor.toUpperCase() === modelData ? 3 : 1
+                                            border.color: OverlayManager.bedDefensePanelColor.toUpperCase() === modelData ? app.primaryColor : "#8B8490"
+                                            TapHandler { onTapped: OverlayManager.bedDefensePanelColor = parent.modelData }
+                                        }
+                                    }
+                                    MaterialTextField {
+                                        id: materialPanelColorField
+                                        Layout.preferredWidth: 106; Layout.preferredHeight: 40
+                                        text: OverlayManager.bedDefensePanelColor
+                                        maximumLength: 7
+                                        onEditingFinished: {
+                                            if (/^#[0-9a-fA-F]{6}$/.test(text)) OverlayManager.bedDefensePanelColor = text
+                                            text = OverlayManager.bedDefensePanelColor
+                                        }
+                                        Connections {
+                                            target: OverlayManager
+                                            function onFeatureSettingsChanged() {
+                                                if (!materialPanelColorField.activeFocus)
+                                                    materialPanelColorField.text = OverlayManager.bedDefensePanelColor
+                                            }
+                                        }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 14
+                                    Text { Layout.preferredWidth: 156; text: "Material card opacity"; color: app.textColor; font.pixelSize: 13; font.weight: Font.Medium }
+                                    Slider {
+                                        Layout.fillWidth: true
+                                        from: 0; to: 100; stepSize: 1
+                                        value: OverlayManager.bedDefensePanelOpacity
+                                        onMoved: OverlayManager.bedDefensePanelOpacity = Math.round(value)
+                                    }
+                                    Rectangle {
+                                        Layout.preferredWidth: 74; Layout.preferredHeight: 34; radius: 17; color: app.primaryContainer
+                                        Text { anchors.centerIn: parent; text: OverlayManager.bedDefensePanelOpacity + "%"; color: app.primaryColor; font.pixelSize: 12; font.weight: Font.Bold }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 12
+                                    Text { Layout.preferredWidth: 156; text: "Stats card color"; color: app.textColor; font.pixelSize: 13; font.weight: Font.Medium }
+                                    Repeater {
+                                        model: ["#000000", "#FFFFFF"]
+                                        Rectangle {
+                                            required property string modelData
+                                            width: 34; height: 34; radius: 17; color: modelData
+                                            border.width: OverlayManager.hypixelPanelColor.toUpperCase() === modelData ? 3 : 1
+                                            border.color: OverlayManager.hypixelPanelColor.toUpperCase() === modelData ? app.primaryColor : "#8B8490"
+                                            TapHandler { onTapped: OverlayManager.hypixelPanelColor = parent.modelData }
+                                        }
+                                    }
+                                    Item { Layout.fillWidth: true }
+                                    Text {
+                                        text: OverlayManager.hypixelPanelColor.toUpperCase() === "#FFFFFF" ? "LIGHT" : "DARK"
+                                        color: app.mutedColor
+                                        font.pixelSize: 12
+                                        font.weight: Font.Bold
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 14
+                                    Text { Layout.preferredWidth: 156; text: "Stats card opacity"; color: app.textColor; font.pixelSize: 13; font.weight: Font.Medium }
+                                    Slider {
+                                        Layout.fillWidth: true
+                                        from: 0; to: 100; stepSize: 1
+                                        value: OverlayManager.hypixelPanelOpacity
+                                        onMoved: OverlayManager.hypixelPanelOpacity = Math.round(value)
+                                    }
+                                    Rectangle {
+                                        Layout.preferredWidth: 74; Layout.preferredHeight: 34; radius: 17; color: app.primaryContainer
+                                        Text { anchors.centerIn: parent; text: OverlayManager.hypixelPanelOpacity + "%"; color: app.primaryColor; font.pixelSize: 12; font.weight: Font.Bold }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 12
+                                    Text { Layout.preferredWidth: 156; text: "STATS rail"; color: app.textColor; font.pixelSize: 13; font.weight: Font.Medium }
+                                    Repeater {
+                                        model: ["#825DE8", "#0A84FF", "#30D158", "#FF9F0A", "#FF375F", "#FFFFFF", "#000000"]
+                                        Rectangle {
+                                            required property string modelData
+                                            width: 26; height: 26; radius: 13; color: modelData
+                                            border.width: OverlayManager.hypixelRailColor.toUpperCase() === modelData ? 3 : 1
+                                            border.color: OverlayManager.hypixelRailColor.toUpperCase() === modelData ? app.primaryColor : "#8B8490"
+                                            TapHandler { onTapped: OverlayManager.hypixelRailColor = parent.modelData }
+                                        }
+                                    }
+                                    MaterialTextField {
+                                        id: statsRailColorField
+                                        Layout.preferredWidth: 106; Layout.preferredHeight: 40
+                                        text: OverlayManager.hypixelRailColor
+                                        maximumLength: 7
+                                        onEditingFinished: {
+                                            if (/^#[0-9a-fA-F]{6}$/.test(text)) OverlayManager.hypixelRailColor = text
+                                            text = OverlayManager.hypixelRailColor
+                                        }
+                                        Connections {
+                                            target: OverlayManager
+                                            function onFeatureSettingsChanged() {
+                                                if (!statsRailColorField.activeFocus) statsRailColorField.text = OverlayManager.hypixelRailColor
+                                            }
+                                        }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 14
+                                    Text { Layout.preferredWidth: 156; text: "Rail opacity"; color: app.textColor; font.pixelSize: 13; font.weight: Font.Medium }
+                                    Slider {
+                                        Layout.fillWidth: true
+                                        from: 0; to: 100; stepSize: 1
+                                        value: OverlayManager.hypixelRailOpacity
+                                        onMoved: OverlayManager.hypixelRailOpacity = Math.round(value)
+                                    }
+                                    Rectangle {
+                                        Layout.preferredWidth: 74; Layout.preferredHeight: 34; radius: 17; color: app.primaryContainer
+                                        Text { anchors.centerIn: parent; text: OverlayManager.hypixelRailOpacity + "%"; color: app.primaryColor; font.pixelSize: 12; font.weight: Font.Bold }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 14
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 2
+                                        Text { text: "Player-stats hold key"; color: app.textColor; font.pixelSize: 13; font.weight: Font.Medium }
+                                        Text { text: "TAB is the default; the confirmed roster remains cached while released"; color: app.secondaryTextColor; font.pixelSize: 11 }
+                                    }
+                                    KeyCaptureButton {
+                                        Layout.preferredWidth: 190
+                                        virtualKey: OverlayManager.hypixelPanelHotkey
+                                        primaryColor: app.primaryColor
+                                        surfaceColor: app.surfaceColor
+                                        textColor: app.textColor
+                                        onKeyCaptured: function(key) { OverlayManager.hypixelPanelHotkey = key }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 14
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 2
+                                        Text { text: "Hold-to-view key"; color: app.textColor; font.pixelSize: 13; font.weight: Font.Medium }
+                                        Text { text: "Press and hold in game; release to hide the material cards"; color: app.secondaryTextColor; font.pixelSize: 11 }
+                                    }
+                                    KeyCaptureButton {
+                                        Layout.preferredWidth: 190
+                                        virtualKey: OverlayManager.bedDefenseHotkey
+                                        primaryColor: app.primaryColor
+                                        surfaceColor: app.surfaceColor
+                                        textColor: app.textColor
+                                        onKeyCaptured: function(key) { OverlayManager.bedDefenseHotkey = key }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 12
+                                    Text { Layout.preferredWidth: 156; text: "Bed box color"; color: app.textColor; font.pixelSize: 13; font.weight: Font.Medium }
+                                    Repeater {
+                                        model: ["#FF5C68", "#FF9500", "#FFD60A", "#30D158", "#64D2FF", "#0A84FF", "#BF5AF2", "#FFFFFF"]
+                                        Rectangle {
+                                            required property string modelData
+                                            width: 26; height: 26; radius: 13; color: modelData
+                                            border.width: OverlayManager.bedEspColor.toUpperCase() === modelData ? 3 : 1
+                                            border.color: OverlayManager.bedEspColor.toUpperCase() === modelData ? app.primaryColor : "#8B8490"
+                                            TapHandler { onTapped: OverlayManager.bedEspColor = parent.modelData }
+                                        }
+                                    }
+                                    MaterialTextField {
+                                        id: bedColorField
+                                        Layout.preferredWidth: 106; Layout.preferredHeight: 40
+                                        text: OverlayManager.bedEspColor
+                                        maximumLength: 7
+                                        onEditingFinished: {
+                                            if (/^#[0-9a-fA-F]{6}$/.test(text)) OverlayManager.bedEspColor = text
+                                            text = OverlayManager.bedEspColor
+                                        }
+                                        Connections {
+                                            target: OverlayManager
+                                            function onFeatureSettingsChanged() {
+                                                if (!bedColorField.activeFocus) bedColorField.text = OverlayManager.bedEspColor
+                                            }
+                                        }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 14
+                                    Text { Layout.preferredWidth: 156; text: "Bed warning range"; color: app.textColor; font.pixelSize: 13; font.weight: Font.Medium }
+                                    Slider {
+                                        Layout.fillWidth: true
+                                        from: 3; to: 32; stepSize: 1
+                                        value: OverlayManager.bedThreatRadius
+                                        onMoved: OverlayManager.bedThreatRadius = Math.round(value)
+                                    }
+                                    Rectangle {
+                                        Layout.preferredWidth: 74; Layout.preferredHeight: 34; radius: 17; color: app.primaryContainer
+                                        Text { anchors.centerIn: parent; text: OverlayManager.bedThreatRadius + " m"; color: app.primaryColor; font.pixelSize: 12; font.weight: Font.Bold }
                                     }
                                 }
 
@@ -1148,7 +1434,6 @@ ApplicationWindow {
                                             containerColor: app.primaryColor
                                             foregroundColor: filled ? "white" : app.primaryColor
                                             outlineColor: "#CAC4D0"
-                                            enabled: OverlayManager.attached
                                             onClicked: OverlayManager.bedDefenseRadius = radiusValue
                                         }
                                     }
@@ -1179,7 +1464,7 @@ ApplicationWindow {
                                 Text {
                                     Layout.fillWidth: true
                                     text: "Press " + app.menuHotkeyLabel(OverlayManager.menuHotkey)
-                                          + " in Minecraft to open the animated Click GUI. ESP remains hard-locked outside integrated single-player worlds."
+                                          + " in Minecraft to open the animated Click GUI. Match-only team features remain inactive until Sidebar state is confirmed."
                                     color: app.primaryColor
                                     font.pixelSize: 11
                                     wrapMode: Text.WordWrap

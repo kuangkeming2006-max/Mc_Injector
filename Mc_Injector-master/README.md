@@ -79,9 +79,19 @@ uses its separate DPAPI-protected store. Skin PNGs are downloaded from the
 trusted Mojang texture host, validated as 64-pixel Minecraft textures, and
 atomically cached as local files before Quick3D renders them.
 
-The Qt ESP page and in-game Click GUI share one authenticated `FEATURE_STATE`
-snapshot (seven toggles plus a validated 3–10 block radius), so changes made in
-either surface are reflected by the other. Manual
+The Qt controller and in-game Click GUI share one authenticated, version-locked
+`FEATURE_STATE` snapshot, so changes made in either surface are reflected by
+the other and restored on the next attach. The Player ESP page exposes teammate
+boxes and teammate arrows independently. The SAFE category contains an optional
+Safewalk implementation which samples the player's support footprint through
+JNI, drives Minecraft's own sneak `KeyBinding` at an edge, preserves a physical
+sneak press, and releases only after a real air-to-block placement transition
+plus the configured delay. Fly, BHop, and Scaffold are explicitly local/testing
+movement tools: every off-to-on transition produces a ban-risk warning. The
+Agent reads `Minecraft.getCurrentServerData().serverIP` and force-disables all
+three on `hypixel.net` (including subdomains and explicit ports) unless the
+separately persisted **Interface / Server Safety** override is enabled. This is
+a safety interlock only; the project contains no anti-cheat bypass. Manual
 Hypixel player-name requests travel from the game panel to the controller;
 only the controller performs HTTPS and returns a bounded result snapshot to
 ImGui. `BIND`/`BIND_CHANGED` keep the configurable Click-GUI hotkey synchronized.

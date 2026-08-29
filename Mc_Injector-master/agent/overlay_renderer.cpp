@@ -15,6 +15,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
+#include <functional>
 #include <new>
 #include <utility>
 
@@ -43,6 +45,10 @@ struct OverlayInputState final {
     std::atomic<bool> directImGuiWndProc{false};
     std::atomic<bool> captureHotkey{false};
     std::atomic<unsigned> capturedHotkey{0U};
+    // One immutable native cursor is retained for the whole overlay session.
+    // Changing HCURSOR shapes every render frame is both visually wrong for
+    // custom/Lunar cursors and creates a WM_SETCURSOR race while dragging.
+    std::atomic<HCURSOR> sessionCursor{nullptr};
     std::atomic<HWND> window{nullptr};
     std::atomic<ImGuiContext*> imguiContext{nullptr};
     bool fallbackPrimed = false;
@@ -54,6 +60,32 @@ struct OverlayInputState final {
 };
 
 namespace {
+
+void advancePresentationSpring(float& value, float& velocity,
+                               const float target, const float delta) noexcept
+{
+    constexpr float stiffness = 70.0F;
+    constexpr float damping = 12.5F;
+    constexpr float halfDamping = damping * 0.5F;
+    constexpr float dampedFrequency = std::sqrt(
+        stiffness - halfDamping * halfDamping);
+    const float displacement = value - target;
+    const float secondary = (velocity + halfDamping * displacement) /
+                            dampedFrequency;
+    const float decay = std::exp(-halfDamping * delta);
+    const float cosine = std::cos(dampedFrequency * delta);
+    const float sine = std::sin(dampedFrequency * delta);
+    const float evolved = displacement * cosine + secondary * sine;
+    value = target + decay * evolved;
+    velocity = decay *
+        (-halfDamping * evolved - displacement * dampedFrequency * sine +
+         secondary * dampedFrequency * cosine);
+    value = std::clamp(value, -0.045F, 1.055F);
+    if (std::abs(target - value) < 0.0005F && std::abs(velocity) < 0.005F) {
+        value = target;
+        velocity = 0.0F;
+    }
+}
 
 struct ScreenPoint final { float x = 0.0F; float y = 0.0F; bool visible = false; };
 
@@ -102,7 +134,8 @@ void drawProjectedBox(ImDrawList* const drawList,
                       const ImVec2 displaySize,
                       const AxisAlignedBox& box,
                       const ImU32 color,
-                      const char* const label) noexcept
+                      const char* const label,
+                      const bool filled = false) noexcept
 {
     if (drawList == nullptr || !camera.valid) return;
     const std::array<std::array<double, 3U>, 8U> corners{{
@@ -118,6 +151,26 @@ void drawProjectedBox(ImDrawList* const drawList,
         anyVisible = anyVisible || projected[index].visible;
     }
     if (!anyVisible) return;
+    if (filled) {
+        constexpr std::array<std::array<std::uint8_t, 4U>, 6U> faces{{
+            {{0, 1, 2, 3}}, {{4, 5, 6, 7}}, {{0, 1, 5, 4}},
+            {{1, 2, 6, 5}}, {{2, 3, 7, 6}}, {{3, 0, 4, 7}}}};
+        const ImU32 fillColor = (color & ~IM_COL32_A_MASK) |
+                                (42U << IM_COL32_A_SHIFT);
+        for (const auto& face : faces) {
+            std::array<ImVec2, 4U> points{};
+            bool complete = true;
+            for (std::size_t point = 0U; point < face.size(); ++point) {
+                const ScreenPoint& projectedPoint = projected[face[point]];
+                if (!projectedPoint.visible) {
+                    complete = false;
+                    break;
+                }
+                points[point] = ImVec2(projectedPoint.x, projectedPoint.y);
+            }
+            if (complete) drawList->AddConvexPolyFilled(points.data(), 4, fillColor);
+        }
+    }
     constexpr std::array<std::array<std::uint8_t, 2U>, 12U> edges{{
         {{0,1}}, {{1,2}}, {{2,3}}, {{3,0}}, {{4,5}}, {{5,6}},
         {{6,7}}, {{7,4}}, {{0,4}}, {{1,5}}, {{2,6}}, {{3,7}}}};
@@ -150,12 +203,170 @@ void drawProjectedBox(ImDrawList* const drawList,
     }
 }
 
+ImU32 packedRgbColor(const std::uint32_t rgb, const int alpha = 255) noexcept
+{
+    return IM_COL32(static_cast<int>((rgb >> 16U) & 0xFFU),
+                    static_cast<int>((rgb >> 8U) & 0xFFU),
+                    static_cast<int>(rgb & 0xFFU), alpha);
+}
+
+ImU32 contrastingTextColor(const std::uint32_t rgb) noexcept
+{
+    const int red = static_cast<int>((rgb >> 16U) & 0xFFU);
+    const int green = static_cast<int>((rgb >> 8U) & 0xFFU);
+    const int blue = static_cast<int>(rgb & 0xFFU);
+    const int luminance = red * 299 + green * 587 + blue * 114;
+    return luminance >= 150000 ? IM_COL32(18, 18, 22, 255)
+                               : IM_COL32(255, 255, 255, 255);
+}
+
+std::array<float, 3U> unpackRgb(const std::uint32_t rgb) noexcept
+{
+    return {static_cast<float>((rgb >> 16U) & 0xFFU) / 255.0F,
+            static_cast<float>((rgb >> 8U) & 0xFFU) / 255.0F,
+            static_cast<float>(rgb & 0xFFU) / 255.0F};
+}
+
+std::uint32_t packRgb(const std::array<float, 3U>& color) noexcept
+{
+    const auto channel = [](const float value) noexcept {
+        return static_cast<std::uint32_t>(std::lround(
+            std::clamp(value, 0.0F, 1.0F) * 255.0F));
+    };
+    return (channel(color[0U]) << 16U) |
+           (channel(color[1U]) << 8U) | channel(color[2U]);
+}
+
+struct PrestigeStyle final {
+    ImU32 color = IM_COL32(170, 170, 170, 255);
+    bool master = false;
+};
+
+PrestigeStyle bedWarsPrestigeStyle(const int stars) noexcept
+{
+    // Hypixel's classic 100-star prestige cadence. At 1000+ the icon changes
+    // to the master-prestige star; later tiers continue rotating the familiar
+    // palette so the compact row remains readable without reproducing chat's
+    // multi-glyph rainbow formatter.
+    const int prestige = std::max(0, stars) / 100;
+    constexpr std::array<ImU32, 10U> colors{{
+        IM_COL32(170, 170, 170, 255), IM_COL32(245, 245, 245, 255),
+        IM_COL32(255, 190, 58, 255),  IM_COL32(83, 220, 238, 255),
+        IM_COL32(72, 204, 112, 255),  IM_COL32(48, 190, 190, 255),
+        IM_COL32(236, 76, 86, 255),   IM_COL32(241, 110, 196, 255),
+        IM_COL32(91, 137, 255, 255),  IM_COL32(177, 106, 235, 255)}};
+    PrestigeStyle result;
+    result.color = colors[static_cast<std::size_t>(prestige % 10)];
+    result.master = prestige >= 10;
+    return result;
+}
+
+bool projectedBoxBounds(const WorldCameraSnapshot& camera,
+                        const ImVec2 displaySize,
+                        const AxisAlignedBox& box,
+                        ImVec2& minimum,
+                        ImVec2& maximum) noexcept
+{
+    const std::array<std::array<double, 3U>, 8U> corners{{
+        {{box.minX, box.minY, box.minZ}}, {{box.maxX, box.minY, box.minZ}},
+        {{box.maxX, box.minY, box.maxZ}}, {{box.minX, box.minY, box.maxZ}},
+        {{box.minX, box.maxY, box.minZ}}, {{box.maxX, box.maxY, box.minZ}},
+        {{box.maxX, box.maxY, box.maxZ}}, {{box.minX, box.maxY, box.maxZ}}}};
+    minimum = displaySize;
+    maximum = ImVec2(0.0F, 0.0F);
+    bool found = false;
+    for (const auto& corner : corners) {
+        const ScreenPoint point = projectPoint(
+            camera, displaySize, corner[0U], corner[1U], corner[2U]);
+        if (!point.visible) continue;
+        minimum.x = std::min(minimum.x, point.x);
+        minimum.y = std::min(minimum.y, point.y);
+        maximum.x = std::max(maximum.x, point.x);
+        maximum.y = std::max(maximum.y, point.y);
+        found = true;
+    }
+    return found;
+}
+
+const char* protectionRoman(const std::uint8_t level) noexcept
+{
+    constexpr std::array<const char*, 6U> labels{{"", "I", "II", "III", "IV", "V"}};
+    return level < labels.size() ? labels[level] : "V+";
+}
+
+void drawPrestigeStar(ImDrawList* const drawList, const ImVec2 center,
+                      const float radius, const ImU32 color,
+                      const bool master) noexcept
+{
+    if (drawList == nullptr || radius <= 0.0F) return;
+    std::array<ImVec2, 10U> points{};
+    constexpr float pi = 3.14159265358979323846F;
+    for (std::size_t index = 0U; index < points.size(); ++index) {
+        const float angle = -pi * 0.5F + static_cast<float>(index) * pi / 5.0F;
+        const float pointRadius = (index % 2U) == 0U ? radius : radius * 0.44F;
+        points[index] = ImVec2(center.x + std::cos(angle) * pointRadius,
+                               center.y + std::sin(angle) * pointRadius);
+    }
+    drawList->AddConvexPolyFilled(points.data(), static_cast<int>(points.size()), color);
+    if (master) {
+        const ImU32 ring = IM_COL32(255, 255, 255, 220);
+        drawList->AddPolyline(points.data(), static_cast<int>(points.size()), ring,
+                              ImDrawFlags_Closed, std::max(1.0F, radius * 0.18F));
+        drawList->AddCircle(center, radius * 1.20F, color, 20,
+                            std::max(1.0F, radius * 0.14F));
+    }
+}
+
+void formatCompactCount(char* const output, const std::size_t capacity,
+                        const std::int64_t value) noexcept
+{
+    if (output == nullptr || capacity == 0U) return;
+    if (value >= 1'000'000)
+        std::snprintf(output, capacity, "%.1fM", static_cast<double>(value) / 1'000'000.0);
+    else if (value >= 1'000)
+        std::snprintf(output, capacity, "%.1fk", static_cast<double>(value) / 1'000.0);
+    else
+        std::snprintf(output, capacity, "%lld", static_cast<long long>(value));
+}
+
+void drawRoundedTriangle(ImDrawList* const drawList,
+                         const ImVec2 a, const ImVec2 b, const ImVec2 c,
+                         const float radius, const ImU32 color) noexcept
+{
+    if (drawList == nullptr) return;
+    const auto toward = [](const ImVec2 from, const ImVec2 to,
+                           const float distance) noexcept {
+        const float dx = to.x - from.x;
+        const float dy = to.y - from.y;
+        const float length = std::sqrt(dx * dx + dy * dy);
+        if (length <= 0.001F) return from;
+        const float amount = std::min(distance / length, 0.45F);
+        return ImVec2(from.x + dx * amount, from.y + dy * amount);
+    };
+    const ImVec2 aToB = toward(a, b, radius);
+    const ImVec2 bFromA = toward(b, a, radius);
+    const ImVec2 bToC = toward(b, c, radius);
+    const ImVec2 cFromB = toward(c, b, radius);
+    const ImVec2 cToA = toward(c, a, radius);
+    const ImVec2 aFromC = toward(a, c, radius);
+    drawList->PathClear();
+    drawList->PathLineTo(aToB);
+    drawList->PathLineTo(bFromA);
+    drawList->PathBezierQuadraticCurveTo(b, bToC);
+    drawList->PathLineTo(cFromB);
+    drawList->PathBezierQuadraticCurveTo(c, cToA);
+    drawList->PathLineTo(aFromC);
+    drawList->PathBezierQuadraticCurveTo(a, aToB);
+    drawList->PathFillConvex(color);
+}
+
 bool isMouseMessage(const UINT message) noexcept
 {
     return (message >= WM_MOUSEFIRST && message <= WM_MOUSELAST) ||
            message == WM_NCMOUSEMOVE || message == WM_NCLBUTTONDOWN ||
            message == WM_NCLBUTTONUP || message == WM_NCRBUTTONDOWN ||
-           message == WM_NCRBUTTONUP || message == WM_INPUT;
+           message == WM_NCRBUTTONUP || message == WM_SETCURSOR ||
+           message == WM_INPUT;
 }
 
 bool isKeyboardMessage(const UINT message) noexcept
@@ -182,8 +393,10 @@ bool animatedToggle(const char* const label, bool& value, float& animation,
     animation += (target - animation) * (1.0F - std::exp(-14.0F * dt));
     const float eased = animation * animation * (3.0F - 2.0F * animation);
     ImDrawList* const draw = ImGui::GetWindowDrawList();
-    const ImVec4 offColor(0.26F, 0.25F, 0.30F, 1.0F);
-    const ImVec4 onColor(0.55F, 0.40F, 0.94F, 1.0F);
+    const ImVec4 offColor = ImGui::GetStyleColorVec4(ImGuiCol_FrameBg);
+    const ImVec4 onColor = ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive);
+    const ImVec4 textColor = ImGui::GetStyleColorVec4(ImGuiCol_Text);
+    const bool lightSurface = textColor.x + textColor.y + textColor.z < 1.5F;
     const ImVec4 mixedColor(
         offColor.x + (onColor.x - offColor.x) * eased,
         offColor.y + (onColor.y - offColor.y) * eased,
@@ -191,10 +404,34 @@ bool animatedToggle(const char* const label, bool& value, float& animation,
     const ImU32 track = ImGui::GetColorU32(mixedColor);
     draw->AddRectFilled(start, ImVec2(start.x + width, start.y + height),
                         track, height * 0.5F);
+    if (!value && animation < 0.5F) {
+        const ImVec4 outline = lightSurface
+            ? ImVec4(0.47F, 0.44F, 0.50F, 0.72F)
+            : ImVec4(0.70F, 0.66F, 0.76F, 0.55F);
+        draw->AddRect(start, ImVec2(start.x + width, start.y + height),
+                      ImGui::GetColorU32(outline), height * 0.5F, 0,
+                      1.0F * uiScale);
+    }
     const float knobX = start.x + 11.0F * uiScale +
                         eased * (width - 22.0F * uiScale);
-    draw->AddCircleFilled(ImVec2(knobX, start.y + height * 0.5F), 8.0F * uiScale,
-                          IM_COL32(246, 241, 255, 255));
+    const bool hovered = ImGui::IsItemHovered();
+    if (hovered) {
+        draw->AddCircleFilled(ImVec2(knobX, start.y + height * 0.5F),
+                              10.0F * uiScale,
+                              ImGui::GetColorU32(ImVec4(
+                                  onColor.x, onColor.y, onColor.z, 0.15F)));
+    }
+    const ImVec4 offKnob = lightSurface
+        ? ImVec4(0.36F, 0.34F, 0.39F, 1.0F)
+        : ImVec4(0.76F, 0.72F, 0.80F, 1.0F);
+    const ImVec4 onKnob = ImVec4(0.99F, 0.985F, 1.0F, 1.0F);
+    const ImVec4 knobColor(
+        offKnob.x + (onKnob.x - offKnob.x) * eased,
+        offKnob.y + (onKnob.y - offKnob.y) * eased,
+        offKnob.z + (onKnob.z - offKnob.z) * eased, 1.0F);
+    draw->AddCircleFilled(ImVec2(knobX, start.y + height * 0.5F),
+                          (hovered ? 8.4F : 8.0F) * uiScale,
+                          ImGui::GetColorU32(knobColor));
     ImGui::SameLine(0.0F, 12.0F * uiScale);
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(label);
@@ -221,6 +458,7 @@ float guiScaleForIndex(const int index) noexcept
 
 const char* hotkeyName(const unsigned virtualKey) noexcept
 {
+    static thread_local std::array<char, 64U> name{};
     switch (virtualKey) {
     case VK_OEM_7: return "Apostrophe";
     case VK_INSERT: return "Insert";
@@ -231,8 +469,21 @@ const char* hotkeyName(const unsigned virtualKey) noexcept
     case VK_F10: return "F10";
     case VK_F11: return "F11";
     case VK_F12: return "F12";
-    default: return "Custom key";
+    default: break;
     }
+    name.fill('\0');
+    UINT scan = ::MapVirtualKeyW(virtualKey, MAPVK_VK_TO_VSC);
+    if (virtualKey == VK_LEFT || virtualKey == VK_RIGHT || virtualKey == VK_UP ||
+        virtualKey == VK_DOWN || virtualKey == VK_PRIOR || virtualKey == VK_NEXT ||
+        virtualKey == VK_END || virtualKey == VK_HOME || virtualKey == VK_INSERT ||
+        virtualKey == VK_DELETE || virtualKey == VK_DIVIDE || virtualKey == VK_NUMLOCK) {
+        scan |= 0x100U;
+    }
+    const LONG parameter = static_cast<LONG>(scan << 16U);
+    if (::GetKeyNameTextA(parameter, name.data(),
+                          static_cast<int>(name.size())) > 0) return name.data();
+    std::snprintf(name.data(), name.size(), "VK 0x%02X", virtualKey);
+    return name.data();
 }
 
 ImVec4 teamColor(const char code) noexcept
@@ -367,7 +618,8 @@ void OverlayRenderer::setFeatureSettings(const FeatureSettings& settings) noexce
 {
     // Do not overwrite a just-clicked ImGui value before AgentRuntime has
     // consumed it and published the corresponding atomic bitset.
-    if (!m_featureSettingsDirty) {
+    if (!m_featureSettingsDirty &&
+        !m_statsPanelDragging && !m_statsPanelResizing) {
         if (m_featureSnapshotInitialized && m_features != settings) {
             enqueueFeatureToasts(m_features, settings);
         }
@@ -393,6 +645,25 @@ void OverlayRenderer::setPlayerStatsSnapshot(
     const PlayerStatsOverlaySnapshot& snapshot) noexcept
 {
     m_playerStats = snapshot;
+}
+
+void OverlayRenderer::setBlacklistSnapshot(
+    const BlacklistOverlaySnapshot& snapshot) noexcept
+{
+    // Layout changes created by an active drag are first returned to the
+    // Controller. Do not let an older pipe snapshot pull the panel backward
+    // before that acknowledgement arrives.
+    if (!m_blacklistPanelDragging && !m_blacklistPanelResizing)
+        m_blacklist = snapshot;
+}
+
+bool OverlayRenderer::consumeBlacklistAction(BlacklistAction& action) noexcept
+{
+    if (!m_blacklistActionDirty) return false;
+    action = m_blacklistAction;
+    m_blacklistAction = {};
+    m_blacklistActionDirty = false;
+    return true;
 }
 
 bool OverlayRenderer::consumeHypixelQuery(std::array<char, 17U>& playerId) noexcept
@@ -614,7 +885,7 @@ void OverlayRenderer::applyGuiScaleStyle(const float scale, const int fontIndex)
 void OverlayRenderer::enqueueToast(const char* const label, const bool enabled) noexcept
 {
     if (label == nullptr || label[0] == '\0') return;
-    char message[52]{};
+    char message[96]{};
     std::snprintf(message, sizeof(message), "%s %s", label,
                   enabled ? "enabled" : "disabled");
     enqueueMessage(message, enabled);
@@ -654,92 +925,192 @@ void OverlayRenderer::enqueueFeatureToasts(const FeatureSettings& before,
         enqueueToast("Bed threat alerts", after.bedThreatAlertsEnabled);
     if (before.bedDefensePanelEnabled != after.bedDefensePanelEnabled)
         enqueueToast("Bed defense panel", after.bedDefensePanelEnabled);
+    const auto movementWarning = [&](const char* feature, const bool wasEnabled,
+                                     const bool enabled) noexcept {
+        if (wasEnabled == enabled) return;
+        if (enabled) {
+            char warning[96]{};
+            std::snprintf(warning, sizeof(warning),
+                "WARNING: %s can cause a server ban. Use only offline.", feature);
+            enqueueMessage(warning, false);
+        } else enqueueToast(feature, false);
+    };
+    movementWarning("Scaffold", before.scaffoldEnabled, after.scaffoldEnabled);
+    movementWarning("Fly", before.flyEnabled, after.flyEnabled);
+    movementWarning("BHop", before.bhopEnabled, after.bhopEnabled);
+    if (before.safewalkEnabled != after.safewalkEnabled)
+        enqueueToast("Safewalk", after.safewalkEnabled);
+    if (before.aimAssistEnabled != after.aimAssistEnabled)
+        enqueueToast("Aim Assist", after.aimAssistEnabled);
+    if (before.textGuiEnabled != after.textGuiEnabled)
+        enqueueToast("Text GUI", after.textGuiEnabled);
 }
 
 void OverlayRenderer::updateBedThreatAlerts(const GameSnapshot& snapshot) noexcept
 {
     const std::uint64_t now = static_cast<std::uint64_t>(::GetTickCount64());
     if (!m_features.bedThreatAlertsEnabled ||
-        snapshot.state != GameSnapshot::State::Ready) {
+        snapshot.state != GameSnapshot::State::Ready ||
+        !snapshot.matchActive || snapshot.ownTeam == 'u' ||
+        !snapshot.ownBedKnown) {
         for (ThreatContact& contact : m_threatContacts) contact.inside = false;
         return;
     }
 
-    if (snapshot.matchActive && snapshot.ownTeam != 'u' && !m_ownBedKnown) {
-        for (ThreatContact& contact : m_threatContacts) contact.inside = false;
-        return;
+    const double enterDistance = static_cast<double>(
+        std::clamp(m_features.bedThreatRadius, 3, 32));
+    const double leaveDistance = enterDistance + 1.25;
+
+    // Ownership is intentionally persistent for the lifetime of the world,
+    // whereas the high-performance bed scanner cache may be briefly empty
+    // until a chunk refresh completes. Threat distance must therefore use the
+    // locked own-bed coordinates directly and only borrow the paired foot
+    // coordinate when the current marker happens to be available.
+    int ownBedFootX = snapshot.ownBedX;
+    int ownBedFootZ = snapshot.ownBedZ;
+    for (std::uint32_t bedIndex = 0U; bedIndex < snapshot.bedMarkerCount; ++bedIndex) {
+        const BedMarker& marker = snapshot.bedMarkers[bedIndex];
+        if (marker.x == snapshot.ownBedX && marker.y == snapshot.ownBedY &&
+            marker.z == snapshot.ownBedZ) {
+            ownBedFootX = marker.footX;
+            ownBedFootZ = marker.footZ;
+            break;
+        }
     }
 
-    constexpr double enterDistance = 8.0;
-    constexpr double leaveDistance = 9.5;
-    constexpr std::uint64_t perContactCooldown = 12000U;
-    constexpr std::uint64_t globalCooldown = 1800U;
+    auto checkEntity = [&](const EntityMarker& entity) {
+        if (!entity.player) return;
 
-    auto checkEntity = [&](const int id, const double ex, const double ey, const double ez, const char armorTeam) {
-        if (snapshot.ownTeam != 'u' && armorTeam == snapshot.ownTeam) return;
-        if (id == snapshot.entityId) return; // Ignore local player
-        
-        for (std::uint32_t bedIndex = 0U; bedIndex < snapshot.bedMarkerCount; ++bedIndex) {
-            const BedMarker& bed = snapshot.bedMarkers[bedIndex];
-            
-            // Only alert for own bed if we are in BedWars
-            if (snapshot.matchActive && m_ownBedKnown) {
-                if (bed.x != m_ownBedX || bed.y != m_ownBedY || bed.z != m_ownBedZ) continue;
+        // The live entity name/team metadata may disappear for a few frames
+        // while an enemy becomes invisible (some transformed clients rebuild
+        // their NetworkPlayerInfo wrapper at that point).  The ESP box does
+        // not depend on that metadata, so requiring a fresh TAB-name match
+        // here made the box remain visible while the bed alert silently
+        // dropped the same entity.  Reuse an identity only when it belongs to
+        // this exact entity id and this world's locked own bed.  A non-empty,
+        // different live name rejects the cache to guard against entity-id
+        // reuse.
+        ThreatContact* identityContact = nullptr;
+        for (ThreatContact& candidate : m_threatContacts) {
+            if (candidate.entityId != entity.entityId ||
+                candidate.bedX != snapshot.ownBedX ||
+                candidate.bedY != snapshot.ownBedY ||
+                candidate.bedZ != snapshot.ownBedZ ||
+                candidate.teamColor == 'u') {
+                continue;
             }
-            const double dx = std::min(std::abs(ex - (bed.x + 0.5)),
-                                       std::abs(ex - (bed.footX + 0.5)));
-            const double dz = std::min(std::abs(ez - (bed.z + 0.5)),
-                                       std::abs(ez - (bed.footZ + 0.5)));
-            const double dy = std::abs(ey - static_cast<double>(bed.y));
-            const double distance = std::sqrt(dx * dx + dz * dz + dy * dy);
+            const bool uuidMatch = entity.uuid[0U] != '\0' &&
+                candidate.uuid[0U] != '\0' &&
+                std::strcmp(entity.uuid.data(), candidate.uuid.data()) == 0;
+            const bool liveNameMissing = entity.playerName[0U] == '\0';
+            const bool cachedNameMissing = candidate.playerName[0U] == '\0';
+            const bool sameName = !liveNameMissing && !cachedNameMissing &&
+                ::_stricmp(entity.playerName.data(),
+                           candidate.playerName.data()) == 0;
+            if (uuidMatch || liveNameMissing || cachedNameMissing || sameName) {
+                identityContact = &candidate;
+                break;
+            }
+        }
 
-            ThreatContact* contact = nullptr;
-            ThreatContact* oldest = &m_threatContacts.front();
-            for (ThreatContact& candidate : m_threatContacts) {
-                if (candidate.entityId == id && candidate.bedX == bed.x &&
-                    candidate.bedY == bed.y && candidate.bedZ == bed.z) {
-                    contact = &candidate;
+        bool persistentRosterKnown = false;
+        bool persistentRosterTeammate = false;
+        char persistentRosterTeam = 'u';
+        std::array<char, 17U> persistentRosterName{};
+        if (entity.playerName[0U] != '\0' || entity.uuid[0U] != '\0') {
+            for (std::uint32_t index = 0U; index < snapshot.playerCount; ++index) {
+                const PlayerIdentity& identity = snapshot.players[index];
+                const bool uuidMatch = entity.uuid[0U] != '\0' &&
+                    identity.uuid[0U] != '\0' &&
+                    std::strcmp(identity.uuid.data(), entity.uuid.data()) == 0;
+                const bool nameMatch = entity.playerName[0U] != '\0' &&
+                    ::_stricmp(identity.name.data(), entity.playerName.data()) == 0;
+                if (uuidMatch || nameMatch) {
+                    persistentRosterKnown = true;
+                    persistentRosterTeammate = identity.teamColor == snapshot.ownTeam;
+                    persistentRosterTeam = identity.teamColor;
+                    persistentRosterName = identity.name;
                     break;
                 }
-                if (candidate.entityId < 0 ||
-                    candidate.lastSeenTick < oldest->lastSeenTick) oldest = &candidate;
+            }
+        }
+        if (!persistentRosterKnown && identityContact != nullptr) {
+            persistentRosterKnown = true;
+            persistentRosterTeam = identityContact->teamColor;
+            persistentRosterTeammate =
+                identityContact->teamColor == snapshot.ownTeam;
+            persistentRosterName = identityContact->playerName;
+        }
+        // Threats and API lookups share the same monotonic, colour-validated
+        // TAB roster. Uncoloured lobby/start NPCs are never admitted, while a
+        // real player remains known through death/respawn TAB gaps.
+        if (!persistentRosterKnown) return;
+        // The monotonic TAB roster is authoritative once a player has been
+        // admitted.  Invisibility removes armour, so live armour colour must
+        // never be required to keep a confirmed enemy classified as a threat.
+        // This also keeps respawning teammates excluded while their armour is
+        // temporarily absent.
+        if (persistentRosterTeammate) return;
+        if (entity.entityId == snapshot.entityId) return; // Ignore local player
+
+        {
+            const double dx = std::min(
+                std::abs(entity.currentX - (snapshot.ownBedX + 0.5)),
+                std::abs(entity.currentX - (ownBedFootX + 0.5)));
+            const double dz = std::min(
+                std::abs(entity.currentZ - (snapshot.ownBedZ + 0.5)),
+                std::abs(entity.currentZ - (ownBedFootZ + 0.5)));
+            const double dy = std::abs(
+                entity.currentY - static_cast<double>(snapshot.ownBedY));
+            const double distance = std::sqrt(dx * dx + dz * dz + dy * dy);
+
+            ThreatContact* contact = identityContact;
+            ThreatContact* oldest = &m_threatContacts.front();
+            if (contact == nullptr) {
+                for (ThreatContact& candidate : m_threatContacts) {
+                    if (candidate.entityId == entity.entityId &&
+                        candidate.bedX == snapshot.ownBedX &&
+                        candidate.bedY == snapshot.ownBedY &&
+                        candidate.bedZ == snapshot.ownBedZ) {
+                        contact = &candidate;
+                        break;
+                    }
+                    if (candidate.entityId < 0 ||
+                        candidate.lastSeenTick < oldest->lastSeenTick) oldest = &candidate;
+                }
             }
             if (contact == nullptr) {
                 contact = oldest;
                 *contact = {};
-                contact->entityId = id;
-                contact->bedX = bed.x;
-                contact->bedY = bed.y;
-                contact->bedZ = bed.z;
+                contact->entityId = entity.entityId;
+                contact->bedX = snapshot.ownBedX;
+                contact->bedY = snapshot.ownBedY;
+                contact->bedZ = snapshot.ownBedZ;
             }
             contact->lastSeenTick = now;
-            const bool entered = !contact->inside && distance <= enterDistance;
+            contact->distance = distance;
+            contact->teamColor = persistentRosterTeam;
+            contact->uuid = entity.uuid;
+            if (persistentRosterName[0U] != '\0')
+                contact->playerName = persistentRosterName;
+            else if (entity.playerName[0U] != '\0')
+                contact->playerName = entity.playerName;
+            contact->invisible = entity.invisible;
+            if (entity.skinTextureId != 0U)
+                contact->skinTextureId = entity.skinTextureId;
             if (distance > leaveDistance) contact->inside = false;
             else if (distance <= enterDistance) contact->inside = true;
-            if (entered && now - contact->lastAlertTick >= perContactCooldown &&
-                now - m_lastThreatToastTick >= globalCooldown) {
-                char message[52]{};
-                std::snprintf(message, sizeof(message),
-                              "Player #%d near bed  %.1fm", id, distance);
-                enqueueMessage(message, false);
-                contact->lastAlertTick = now;
-                m_lastThreatToastTick = now;
-            }
         }
     };
-
-    if (snapshot.entityId >= 0) {
-        // Local player does not trigger own bed threat
-    }
 
     for (std::uint32_t entityIndex = 0U;
          entityIndex < snapshot.entityMarkerCount; ++entityIndex) {
         const EntityMarker& entity = snapshot.entityMarkers[entityIndex];
         if (!entity.player) continue;
-        checkEntity(entity.entityId, entity.currentX, entity.currentY, entity.currentZ, entity.armorTeam);
+        checkEntity(entity);
     }
     for (ThreatContact& contact : m_threatContacts) {
-        if (contact.entityId >= 0 && now - contact.lastSeenTick > 3000U) contact.inside = false;
+        if (contact.entityId >= 0 && now - contact.lastSeenTick > 500U) contact.inside = false;
     }
 }
 
@@ -748,9 +1119,22 @@ void OverlayRenderer::renderToasts(const float deltaSeconds, const float uiScale
     constexpr float lifetime = 3.4F;
     constexpr float transition = 0.32F;
     const ImVec2 display = ImGui::GetIO().DisplaySize;
-    const float width = 300.0F * uiScale;
-    const float height = 58.0F * uiScale;
+    const float width = 326.0F * uiScale;
+    const float height = 68.0F * uiScale;
     const float gap = 10.0F * uiScale;
+    std::array<const ThreatContact*, 64U> threats{};
+    std::size_t threatCount = 0U;
+    for (ThreatContact& contact : m_threatContacts) {
+        const float target = contact.inside && contact.entityId >= 0 ? 1.0F : 0.0F;
+        contact.presentation += (target - contact.presentation) *
+            (1.0F - std::exp(-13.0F * std::clamp(deltaSeconds, 0.0F, 0.05F)));
+        if (contact.presentation > 0.005F && contact.entityId >= 0)
+            threats[threatCount++] = &contact;
+    }
+    std::sort(threats.begin(), threats.begin() + threatCount,
+              [](const ThreatContact* first, const ThreatContact* second) {
+                  return first->distance < second->distance;
+              });
     std::array<Toast*, 6U> ordered{};
     std::size_t count = 0U;
     for (Toast& toast : m_toasts) {
@@ -762,6 +1146,91 @@ void OverlayRenderer::renderToasts(const float deltaSeconds, const float uiScale
     std::sort(ordered.begin(), ordered.begin() + count,
               [](const Toast* a, const Toast* b) { return a->sequence > b->sequence; });
     ImDrawList* const draw = ImGui::GetForegroundDrawList();
+    for (std::size_t index = 0U; index < threatCount; ++index) {
+        const ThreatContact& contact = *threats[index];
+        const float targetX = display.x - width - 22.0F * uiScale;
+        const float slideLinear = std::clamp(contact.presentation, 0.0F, 1.0F);
+        const float slideEase = 1.0F - std::pow(1.0F - slideLinear, 3.0F);
+        const float outsideX = display.x + 12.0F * uiScale;
+        const float x = outsideX + (targetX - outsideX) * slideEase;
+        const float y = display.y - 24.0F * uiScale - height -
+                        static_cast<float>(index) * (height + gap);
+        const ImVec2 min(x, y), max(x + width, y + height);
+        draw->AddRectFilled(ImVec2(min.x + 4.0F * uiScale, min.y + 7.0F * uiScale),
+                            ImVec2(max.x + 4.0F * uiScale, max.y + 7.0F * uiScale),
+                            IM_COL32(0, 0, 0, 75), 15.0F * uiScale);
+        draw->AddRectFilled(min, max, IM_COL32(36, 24, 30, 246), 15.0F * uiScale);
+        const ImU32 accent = IM_COL32(255, 92, 104, 255);
+        const float warningPulse = 0.5F + 0.5F * static_cast<float>(
+            std::sin(ImGui::GetTime() * 6.2));
+        const int warningAlpha = static_cast<int>(120.0F + warningPulse * 125.0F);
+        const float warningThickness = (1.4F + warningPulse * 1.4F) * uiScale;
+        draw->AddRect(ImVec2(min.x - 2.0F * uiScale, min.y - 2.0F * uiScale),
+                      ImVec2(max.x + 2.0F * uiScale, max.y + 2.0F * uiScale),
+                      IM_COL32(255, 58, 76, warningAlpha), 17.0F * uiScale, 0,
+                      warningThickness);
+        draw->AddRect(ImVec2(min.x - 4.0F * uiScale, min.y - 4.0F * uiScale),
+                      ImVec2(max.x + 4.0F * uiScale, max.y + 4.0F * uiScale),
+                      IM_COL32(255, 58, 76,
+                          static_cast<int>(warningAlpha * 0.28F)),
+                      19.0F * uiScale, 0, 1.0F * uiScale);
+        draw->AddCircleFilled(ImVec2(min.x + 20.0F * uiScale, min.y + 18.0F * uiScale),
+                              10.0F * uiScale, accent);
+        const ImVec2 exclamationSize = ImGui::CalcTextSize("!");
+        draw->AddText(ImVec2(min.x + 20.0F * uiScale - exclamationSize.x * 0.5F,
+                             min.y + 18.0F * uiScale - exclamationSize.y * 0.5F),
+                      IM_COL32(255, 255, 255, 255), "!");
+        const char* const name = contact.playerName[0U] == '\0'
+            ? "Unknown player" : contact.playerName.data();
+        const ImU32 nameColor = ImGui::ColorConvertFloat4ToU32(teamColor(contact.teamColor));
+        // Minecraft's TextureManager owns this texture in the exact OpenGL
+        // context used by the hook. Draw the 8x8 face and hat UV regions from
+        // the already-loaded 64x64 skin; no controller download or per-frame
+        // upload is necessary.
+        const ImVec2 avatarMin(min.x + 39.0F * uiScale, min.y + 14.0F * uiScale);
+        const ImVec2 avatarMax(avatarMin.x + 38.0F * uiScale,
+                              avatarMin.y + 38.0F * uiScale);
+        draw->AddRectFilled(avatarMin, avatarMax, IM_COL32(20, 18, 24, 255),
+                            8.0F * uiScale);
+        if (contact.skinTextureId != 0U) {
+            const ImTextureID skin = reinterpret_cast<ImTextureID>(
+                static_cast<std::uintptr_t>(contact.skinTextureId));
+            draw->AddImage(skin, avatarMin, avatarMax,
+                           ImVec2(8.0F / 64.0F, 8.0F / 64.0F),
+                           ImVec2(16.0F / 64.0F, 16.0F / 64.0F));
+            draw->AddImage(skin, avatarMin, avatarMax,
+                           ImVec2(40.0F / 64.0F, 8.0F / 64.0F),
+                           ImVec2(48.0F / 64.0F, 16.0F / 64.0F));
+        } else {
+            ImVec4 avatarTint = teamColor(contact.teamColor);
+            avatarTint.w = 0.34F;
+            draw->AddRectFilled(avatarMin, avatarMax,
+                                ImGui::ColorConvertFloat4ToU32(avatarTint),
+                                8.0F * uiScale);
+        }
+        draw->AddRect(avatarMin, avatarMax, nameColor, 10.0F * uiScale, 0,
+                      1.5F * uiScale);
+        const ImVec2 textPos(min.x + 88.0F * uiScale, min.y + 10.0F * uiScale);
+        ImFont* const warningFont = m_fonts[static_cast<std::size_t>(
+            std::clamp(m_appliedGuiScaleIndex, 0, 3))];
+        if (warningFont != nullptr) {
+            draw->AddText(warningFont, warningFont->LegacySize * 1.18F,
+                          textPos, nameColor, name);
+        } else {
+            draw->AddText(textPos, nameColor, name);
+        }
+        char distanceLabel[64]{};
+        std::snprintf(distanceLabel, sizeof(distanceLabel),
+                      contact.invisible
+                          ? "INVIS  |  Enemy near bed  %.1fm / %dm"
+                          : "Enemy near bed  %.1fm / %dm",
+                      contact.distance,
+                      std::clamp(m_features.bedThreatRadius, 3, 32));
+        draw->AddText(ImVec2(textPos.x, textPos.y + 28.0F * uiScale),
+                      contact.invisible ? IM_COL32(255, 91, 108, 255)
+                                        : IM_COL32(235, 224, 232, 255),
+                      distanceLabel);
+    }
     for (std::size_t index = 0U; index < count; ++index) {
         Toast& toast = *ordered[index];
         const float enter = std::clamp(toast.age / transition, 0.0F, 1.0F);
@@ -772,7 +1241,7 @@ void OverlayRenderer::renderToasts(const float deltaSeconds, const float uiScale
         const float x = display.x + 12.0F * uiScale +
                         (targetX - display.x - 12.0F * uiScale) * eased;
         const float y = display.y - 24.0F * uiScale - height -
-                        static_cast<float>(index) * (height + gap);
+                        static_cast<float>(index + threatCount) * (height + gap);
         const ImVec2 min(x, y), max(x + width, y + height);
         draw->AddRectFilled(ImVec2(min.x + 4.0F * uiScale, min.y + 7.0F * uiScale),
                             ImVec2(max.x + 4.0F * uiScale, max.y + 7.0F * uiScale),
@@ -813,7 +1282,6 @@ bool OverlayRenderer::initialize(HWND const window, HGLRC const context) noexcep
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 
     // FontGlobalScale enlarges a single bitmap and becomes visibly blurry.
     // Build four independently rasterized Segoe UI sizes into one atlas and
@@ -821,9 +1289,12 @@ bool OverlayRenderer::initialize(HWND const window, HGLRC const context) noexcep
     char windowsDirectory[MAX_PATH]{};
     const UINT windowsLength = ::GetWindowsDirectoryA(windowsDirectory, MAX_PATH);
     std::array<char, MAX_PATH> fontPath{};
+    std::array<char, MAX_PATH> boldFontPath{};
     if (windowsLength > 0U && windowsLength + 20U < fontPath.size()) {
         std::snprintf(fontPath.data(), fontPath.size(), "%s\\Fonts\\segoeui.ttf",
                       windowsDirectory);
+        std::snprintf(boldFontPath.data(), boldFontPath.size(),
+                      "%s\\Fonts\\segoeuib.ttf", windowsDirectory);
     }
     constexpr std::array<float, 4U> fontSizes{15.0F, 19.0F, 23.0F, 27.0F};
     for (std::size_t index = 0U; index < m_fonts.size(); ++index) {
@@ -840,6 +1311,16 @@ bool OverlayRenderer::initialize(HWND const window, HGLRC const context) noexcep
             fontConfig.SizePixels = fontSizes[index];
             m_fonts[index] = io.Fonts->AddFontDefault(&fontConfig);
         }
+        ImFontConfig boldConfig{};
+        boldConfig.OversampleH = 3;
+        boldConfig.OversampleV = 2;
+        boldConfig.PixelSnapH = false;
+        if (boldFontPath[0U] != '\0') {
+            m_boldFonts[index] = io.Fonts->AddFontFromFileTTF(
+                boldFontPath.data(), fontSizes[index], &boldConfig,
+                io.Fonts->GetGlyphRangesDefault());
+        }
+        if (m_boldFonts[index] == nullptr) m_boldFonts[index] = m_fonts[index];
     }
 
     m_appliedGuiScaleIndex = -1;
@@ -850,6 +1331,7 @@ bool OverlayRenderer::initialize(HWND const window, HGLRC const context) noexcep
         ImGui::DestroyContext(m_imguiContext);
         m_imguiContext = nullptr;
         m_fonts = {};
+        m_boldFonts = {};
         return false;
     }
     if (!ImGui_ImplOpenGL2_Init()) {
@@ -857,6 +1339,7 @@ bool OverlayRenderer::initialize(HWND const window, HGLRC const context) noexcep
         ImGui::DestroyContext(m_imguiContext);
         m_imguiContext = nullptr;
         m_fonts = {};
+        m_boldFonts = {};
         return false;
     }
 
@@ -869,6 +1352,10 @@ bool OverlayRenderer::initialize(HWND const window, HGLRC const context) noexcep
     m_inputState->directImGuiWndProc.store(
         windowThreadId != 0U && windowThreadId == ::GetCurrentThreadId(),
         std::memory_order_release);
+    // Minecraft/LWJGL remains the cursor style owner. The overlay only keeps
+    // the cursor visible while interactive; it never swaps the game's native
+    // pointer for ImGui's smaller default arrow or resize sprites.
+    io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
     const bool windowProcedureInstalled = m_windowProcedure.install(
         window, &OverlayRenderer::handleWindowMessage, m_inputState);
     m_inputState->windowProcedureAvailable.store(
@@ -959,15 +1446,25 @@ void OverlayRenderer::shutdownWithCurrentContext() noexcept
             tex = 0U;
         }
     }
+    for (BlacklistTexture& cached : m_blacklistTextures) {
+        if (cached.texture != 0U) {
+            const GLuint texture = static_cast<GLuint>(cached.texture);
+            ::glDeleteTextures(1, &texture);
+        }
+        cached = {};
+    }
     ImGui_ImplOpenGL2_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext(m_imguiContext);
     m_imguiContext = nullptr;
     m_fonts = {};
+    m_boldFonts = {};
     m_blurTexture = 0U;
     m_bedTexture = 0U;
     m_blurWidth = 0;
     m_blurHeight = 0;
+    m_blacklistTextures = {};
+    m_cursorSessionActive = false;
     m_window = nullptr;
     m_glContext = nullptr;
     m_initialized = false;
@@ -1000,6 +1497,7 @@ void OverlayRenderer::abandonForContextChange() noexcept
     }
     m_imguiContext = nullptr;
     m_fonts = {};
+    m_boldFonts = {};
     // The old HGLRC is unavailable, so its texture cannot be deleted here.
     // Drop the name to prevent a later context generation from deleting an
     // unrelated object which happens to reuse the same GLuint value.
@@ -1007,6 +1505,8 @@ void OverlayRenderer::abandonForContextChange() noexcept
     m_bedTexture = 0U;
     m_blurWidth = 0;
     m_blurHeight = 0;
+    m_blacklistTextures = {};
+    m_cursorSessionActive = false;
     m_window = nullptr;
     m_glContext = nullptr;
     m_initialized = false;
@@ -1022,6 +1522,9 @@ void OverlayRenderer::abandonAfterWndProcDrainTimeout() noexcept
     m_inputState = nullptr;
     m_imguiContext = nullptr;
     m_fonts = {};
+    m_boldFonts = {};
+    m_blacklistTextures = {};
+    m_cursorSessionActive = false;
     m_window = nullptr;
     m_glContext = nullptr;
     m_initialized = false;
@@ -1033,13 +1536,12 @@ void OverlayRenderer::abandonAfterHookDisabled() noexcept
     abandonForContextChange();
 }
 
-void OverlayRenderer::renderInventoryBlur(const float strength) noexcept
+void OverlayRenderer::captureBackdropTexture() noexcept
 {
-    if (strength <= 0.01F) return;
     const ImGuiIO& io = ImGui::GetIO();
     const int width = static_cast<int>(io.DisplaySize.x);
     const int height = static_cast<int>(io.DisplaySize.y);
-    if (width < 2 || height < 2) return;
+    if (width < 2 || height < 2 || m_backdropCapturedThisFrame) return;
 
     ::glPushAttrib(GL_ALL_ATTRIB_BITS);
     if (m_blurTexture == 0U) {
@@ -1058,10 +1560,26 @@ void OverlayRenderer::renderInventoryBlur(const float strength) noexcept
         m_blurWidth = width;
         m_blurHeight = height;
     }
-    // Copy once, then blend five linearly filtered offset taps. This is a
-    // fixed-pipeline Gaussian approximation compatible with Minecraft 1.8.9's
-    // OpenGL2 context and avoids shader/FBO setup in third-party clients.
     ::glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height);
+    ::glPopAttrib();
+    m_backdropCapturedThisFrame = true;
+}
+
+void OverlayRenderer::renderInventoryBlur(const float strength) noexcept
+{
+    if (strength <= 0.01F) return;
+    const ImGuiIO& io = ImGui::GetIO();
+    const int width = static_cast<int>(io.DisplaySize.x);
+    const int height = static_cast<int>(io.DisplaySize.y);
+    if (width < 2 || height < 2) return;
+
+    captureBackdropTexture();
+    if (m_blurTexture == 0U) return;
+    ::glPushAttrib(GL_ALL_ATTRIB_BITS);
+    ::glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(m_blurTexture));
+    // Copy once, then blend weighted centre/near/far samples. The symmetric
+    // nine-tap kernel remains compatible with Minecraft 1.8.9's fixed OpenGL2
+    // pipeline and avoids an FBO or client-specific GLSL.
     ::glDisable(GL_DEPTH_TEST);
     ::glDisable(GL_CULL_FACE);
     ::glDisable(GL_ALPHA_TEST);
@@ -1076,15 +1594,23 @@ void OverlayRenderer::renderInventoryBlur(const float strength) noexcept
     ::glMatrixMode(GL_MODELVIEW);
     ::glPushMatrix();
     ::glLoadIdentity();
-    constexpr std::array<std::array<float, 2U>, 5U> offsets{{
-        {{-2.2F, 0.0F}}, {{2.2F, 0.0F}}, {{0.0F, -2.2F}},
-        {{0.0F, 2.2F}}, {{0.0F, 0.0F}}}};
-    for (const auto& offset : offsets) {
-        ::glColor4f(1.0F, 1.0F, 1.0F, 0.135F * strength);
-        const float x0 = offset[0U];
-        const float y0 = offset[1U];
-        const float x1 = static_cast<float>(width) + offset[0U];
-        const float y1 = static_cast<float>(height) + offset[1U];
+    struct BlurSample final { float x; float y; float weight; };
+    // Preserve the previous kernel's 0.921 aggregate opacity and 19 px extent,
+    // but fold the diagonal ring into the bilinear near/far weights. Nine full
+    // screen samples instead of thirteen reduce fill bandwidth by about 31%
+    // without changing the GUI animation or its perceived blur strength.
+    constexpr std::array<BlurSample, 9U> samples{{
+        {0.0F, 0.0F, 0.145F},
+        {-9.0F, 0.0F, 0.120F}, {9.0F, 0.0F, 0.120F},
+        {0.0F, -9.0F, 0.120F}, {0.0F, 9.0F, 0.120F},
+        {-19.0F, 0.0F, 0.074F}, {19.0F, 0.0F, 0.074F},
+        {0.0F, -19.0F, 0.074F}, {0.0F, 19.0F, 0.074F}}};
+    for (const BlurSample& sample : samples) {
+        ::glColor4f(1.0F, 1.0F, 1.0F, sample.weight * strength);
+        const float x0 = sample.x;
+        const float y0 = sample.y;
+        const float x1 = static_cast<float>(width) + sample.x;
+        const float y1 = static_cast<float>(height) + sample.y;
         ::glBegin(GL_QUADS);
         ::glTexCoord2f(0.0F, 1.0F); ::glVertex2f(x0, y0);
         ::glTexCoord2f(1.0F, 1.0F); ::glVertex2f(x1, y0);
@@ -1146,7 +1672,11 @@ bool OverlayRenderer::render(HDC const deviceContext,
     m_inputState->interactive.store(interactive, std::memory_order_release);
     if (!interactive) {
         m_inputState->captureHotkey.store(false, std::memory_order_release);
+        m_inputState->sessionCursor.store(nullptr, std::memory_order_release);
         m_waitingForHotkey = false;
+        m_hotkeyCaptureTarget = 0;
+        m_statsPanelDragging = false;
+        m_statsPanelResizing = false;
     }
     ImGui::SetCurrentContext(m_imguiContext);
     ImGuiIO& io = ImGui::GetIO();
@@ -1161,54 +1691,57 @@ bool OverlayRenderer::render(HDC const deviceContext,
     // smooth size transition without ever compounding ScaleAllSizes values.
     applyGuiScaleStyle(m_animatedGuiScale, m_guiScaleIndex);
     const float uiScale = m_animatedGuiScale;
-    if (interactive) {
-        io.ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
-    } else {
-        io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+    io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+    if (interactive && !m_cursorSessionActive) {
+        CURSORINFO cursorInfo{};
+        cursorInfo.cbSize = sizeof(cursorInfo);
+        HCURSOR cursor = nullptr;
+        if (::GetCursorInfo(&cursorInfo) != FALSE &&
+            (cursorInfo.flags & CURSOR_SHOWING) != 0U) {
+            cursor = cursorInfo.hCursor;
+        }
+        if (cursor == nullptr) {
+            cursor = reinterpret_cast<HCURSOR>(::GetClassLongPtrW(
+                window, GCLP_HCURSOR));
+        }
+        if (cursor == nullptr) cursor = ::LoadCursorW(nullptr, IDC_ARROW);
+        m_inputState->sessionCursor.store(cursor, std::memory_order_release);
+        m_cursorSessionActive = true;
+    } else if (!interactive && m_cursorSessionActive) {
+        m_cursorSessionActive = false;
+        m_inputState->sessionCursor.store(nullptr, std::memory_order_release);
     }
 
     ImGui_ImplOpenGL2_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
+    m_backdropCapturedThisFrame = false;
 
     const float targetGui = interactive ? 1.0F : 0.0F;
-    const float delta = std::clamp(io.DeltaTime, 0.0F, 0.05F);
-    m_clickGuiProgress += (targetGui - m_clickGuiProgress) *
-                          (1.0F - std::exp(-12.0F * delta));
-    const float guiEase = m_clickGuiProgress * m_clickGuiProgress *
-                          (3.0F - 2.0F * m_clickGuiProgress);
-    renderInventoryBlur(guiEase);
-
-    if (!m_lastMatchActive && snapshot.matchActive) {
-        m_ownBedKnown = false;
-    }
-    m_lastMatchActive = snapshot.matchActive;
-
-    if (snapshot.matchActive && snapshot.ownTeam != 'u' && !m_ownBedKnown) {
-        double minDistanceSq = 30.0 * 30.0;
-        for (std::uint32_t i = 0; i < snapshot.bedMarkerCount; ++i) {
-            const BedMarker& bed = snapshot.bedMarkers[i];
-            const double dx = (bed.x + bed.footX) * 0.5 - snapshot.x;
-            const double dy = bed.y - snapshot.y;
-            const double dz = (bed.z + bed.footZ) * 0.5 - snapshot.z;
-            const double distSq = dx * dx + dy * dy + dz * dz;
-            if (distSq < minDistanceSq) {
-                minDistanceSq = distSq;
-                m_ownBedX = bed.x;
-                m_ownBedY = bed.y;
-                m_ownBedZ = bed.z;
-                m_ownBedKnown = true;
-            }
-        }
-    }
+    const float delta = std::clamp(io.DeltaTime, 0.0F, 0.10F);
+    // A lightly under-damped spring takes roughly half a second to settle. It
+    // is slower than the previous exponential lerp but still responsive, and
+    // its single small overshoot provides the requested lightweight rebound.
+    // Exact under-damped oscillator integration. At normal frame rates this is
+    // visually equivalent to the previous spring, while uneven/slow title-menu
+    // frames no longer quantize the motion into Euler steps.
+    advancePresentationSpring(m_clickGuiProgress, m_clickGuiVelocity,
+                              targetGui, delta);
+    const float guiLinear = std::clamp(m_clickGuiProgress, 0.0F, 1.0F);
+    const float guiEase = guiLinear * guiLinear * (3.0F - 2.0F * guiLinear);
+    renderInventoryBlur(std::clamp(guiEase * 1.28F, 0.0F, 1.0F));
 
     updateBedThreatAlerts(snapshot);
 
-    if (snapshot.state == GameSnapshot::State::Ready &&
-        m_features.espEnabled && snapshot.camera.valid) {
+    if (snapshot.state == GameSnapshot::State::Ready && snapshot.camera.valid) {
         ImDrawList* const background = ImGui::GetBackgroundDrawList();
         const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
         if (m_features.bedEspEnabled) {
+            const bool defenseHotkeyDown =
+                (::GetAsyncKeyState(std::clamp(m_features.bedDefenseHotkey, 8, 254)) &
+                 0x8000) != 0;
+            const bool defensePanelsVisible = m_features.bedDefensePanelEnabled &&
+                (!m_features.bedDefenseHoldToShow || defenseHotkeyDown);
             if (m_features.bedAutoRefreshEnabled) {
                 const double now = ImGui::GetTime();
                 if (now - m_lastBedRefreshTime >= 2.0) {
@@ -1230,14 +1763,19 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     std::snprintf(label, sizeof(label), "Bed  %d %d %d", bed.x, bed.y, bed.z);
                 }
                 
-                ImU32 boxColor = IM_COL32(255, 92, 104, 255);
-                if (m_ownBedKnown && bed.x == m_ownBedX && bed.y == m_ownBedY && bed.z == m_ownBedZ) {
-                    boxColor = IM_COL32(40, 255, 40, 255);
-                }
+                const ImU32 boxColor = packedRgbColor(m_features.bedEspColor);
+                const bool ownBed = snapshot.ownBedKnown &&
+                    bed.x == snapshot.ownBedX && bed.y == snapshot.ownBedY &&
+                    bed.z == snapshot.ownBedZ;
                 
-                drawProjectedBox(background, snapshot.camera, displaySize, bedBox, boxColor, label);
+                drawProjectedBox(background, snapshot.camera, displaySize, bedBox,
+                                 boxColor, label, m_features.bedEspFilled);
 
-                if (m_features.bedDefensePanelEnabled && bed.defenseCount > 0U) {
+                const bool defenseOwnershipVisible =
+                    m_features.showOwnBedDefenseInfo || !snapshot.matchActive ||
+                    !snapshot.ownBedKnown || !ownBed;
+                if (defensePanelsVisible && bed.defenseCount > 0U &&
+                    defenseOwnershipVisible) {
                     const int radius = std::clamp(m_features.bedDefenseRadius, 3, 10);
                     std::array<std::uint16_t, BedMarker::MaxDefenseBlocks> totals{};
                     std::uint32_t visibleBlocks = 0U;
@@ -1257,7 +1795,17 @@ bool OverlayRenderer::render(HDC const deviceContext,
                         static_cast<double>(bed.y) + 1.65,
                         (static_cast<double>(bed.z + bed.footZ) + 1.0) * 0.5);
                     if (anchor.visible && visibleBlocks > 0U) {
-                        const float panelScale = uiScale;
+                        const double dx = (static_cast<double>(bed.x + bed.footX) + 1.0) *
+                            0.5 - snapshot.x;
+                        const double dy = static_cast<double>(bed.y) - snapshot.y;
+                        const double dz = (static_cast<double>(bed.z + bed.footZ) + 1.0) *
+                            0.5 - snapshot.z;
+                        const double bedDistance = std::sqrt(dx * dx + dy * dy + dz * dz);
+                        const float distanceScale = m_features.bedDefensePerspectiveScale
+                            ? std::clamp(static_cast<float>(14.0 / (bedDistance + 4.0)),
+                                         0.55F, 1.40F)
+                            : 1.0F;
+                        const float panelScale = uiScale * distanceScale;
                         const unsigned columns = std::min<std::uint32_t>(visibleBlocks, 6U);
                         const unsigned rows = (visibleBlocks + 5U) / 6U;
                         const float cell = 45.0F * panelScale;
@@ -1277,10 +1825,49 @@ bool OverlayRenderer::render(HDC const deviceContext,
                                    panelMin.y + 5.0F * panelScale),
                             ImVec2(panelMax.x + 3.0F * panelScale,
                                    panelMax.y + 5.0F * panelScale),
-                            IM_COL32(0, 0, 0, 85), 12.0F * panelScale);
-                        background->AddRectFilled(panelMin, panelMax,
-                                                  IM_COL32(25, 22, 33, 228),
-                                                  12.0F * panelScale);
+                             IM_COL32(0, 0, 0, 85), 12.0F * panelScale);
+                        const int panelAlpha = static_cast<int>(std::lround(
+                            std::clamp(m_features.bedDefensePanelOpacity, 0, 100) * 2.55));
+                        if (panelAlpha < 250) {
+                            captureBackdropTexture();
+                            if (m_blurTexture != 0U) {
+                                constexpr std::array<ImVec2, 5U> blurOffsets{{
+                                    ImVec2(-3.0F, 0.0F), ImVec2(3.0F, 0.0F),
+                                    ImVec2(0.0F, -3.0F), ImVec2(0.0F, 3.0F),
+                                    ImVec2(0.0F, 0.0F)}};
+                                for (const ImVec2 offset : blurOffsets) {
+                                    const float sourceLeft = std::clamp(
+                                        panelMin.x + offset.x * panelScale,
+                                        0.0F, displaySize.x);
+                                    const float sourceTop = std::clamp(
+                                        panelMin.y + offset.y * panelScale,
+                                        0.0F, displaySize.y);
+                                    const float sourceRight = std::clamp(
+                                        panelMax.x + offset.x * panelScale,
+                                        0.0F, displaySize.x);
+                                    const float sourceBottom = std::clamp(
+                                        panelMax.y + offset.y * panelScale,
+                                        0.0F, displaySize.y);
+                                    background->AddImageRounded(
+                                        reinterpret_cast<ImTextureID>(
+                                            static_cast<std::uintptr_t>(m_blurTexture)),
+                                        panelMin, panelMax,
+                                        ImVec2(sourceLeft / displaySize.x,
+                                               1.0F - sourceTop / displaySize.y),
+                                        ImVec2(sourceRight / displaySize.x,
+                                               1.0F - sourceBottom / displaySize.y),
+                                        IM_COL32(255, 255, 255, 48),
+                                        12.0F * panelScale);
+                                }
+                            }
+                        }
+                        background->AddRectFilled(
+                            panelMin, panelMax,
+                            packedRgbColor(m_features.bedDefensePanelColor, panelAlpha),
+                            12.0F * panelScale);
+                        background->AddRect(
+                            panelMin, panelMax, IM_COL32(255, 255, 255, 38),
+                            12.0F * panelScale, 0, 1.0F * panelScale);
                         
                         // Draw 2D vanilla bed item icon
                         const float bedIconSize = 18.0F * panelScale;
@@ -1325,7 +1912,7 @@ bool OverlayRenderer::render(HDC const deviceContext,
                 }
             }
         }
-        if (m_features.entityEspEnabled) {
+        if (m_features.entityEspEnabled || m_features.nametagEnabled) {
             const float partial = std::clamp(snapshot.camera.partialTicks, 0.0F, 1.0F);
             if (snapshot.entitySampleGeneration != m_lastEntitySampleGeneration) {
                 m_lastEntitySampleGeneration = snapshot.entitySampleGeneration;
@@ -1358,123 +1945,653 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     entity.bounds.minZ + offsetZ, entity.bounds.maxX + offsetX,
                     entity.bounds.maxY + offsetY, entity.bounds.maxZ + offsetZ};
                 char label[64]{};
-                if (m_features.labelsEnabled) {
-                    std::snprintf(label, sizeof(label), "Entity #%d  %.1fm",
-                                  entity.entityId, entity.distance);
+                if (m_features.entityEspEnabled && m_features.labelsEnabled &&
+                    !(entity.player && m_features.nametagEnabled)) {
+                    if (entity.player && entity.playerName[0U] != '\0') {
+                        std::snprintf(label, sizeof(label), "%s  %.1fm",
+                                      entity.playerName.data(), entity.distance);
+                    } else {
+                        std::snprintf(label, sizeof(label), "Entity #%d  %.1fm",
+                                      entity.entityId, entity.distance);
+                    }
                 }
                 
-                bool isTeammate = snapshot.ownTeam != 'u' && entity.armorTeam == snapshot.ownTeam;
-                if (isTeammate) {
+                const ImU32 entityColor = entity.player
+                    ? packedRgbColor(m_features.playerEspColor)
+                    : IM_COL32(255, 168, 74, 255);
+                // Restore the original live armour-colour classification as
+                // the primary signal. Roster metadata is retained only as a
+                // fallback for a frame where armour JNI data is unavailable.
+                const bool armorTeammate = entity.armorTeam != 'u' &&
+                    entity.armorTeam == snapshot.ownTeam;
+                const bool rosterTeammate = entity.teamColor != 'u' &&
+                    entity.teamColor == snapshot.ownTeam;
+                const bool isTeammate = snapshot.matchActive && entity.player &&
+                    snapshot.ownTeam != 'u' && (armorTeammate || rosterTeammate);
+                if (m_features.entityEspEnabled &&
+                    (!isTeammate || m_features.showTeammateBoxes)) {
+                    drawProjectedBox(background, snapshot.camera, displaySize, interpolated,
+                                     entityColor, label);
+                }
+                if (m_features.entityEspEnabled && isTeammate &&
+                    m_features.showTeammateArrows) {
                     const double centerX = (interpolated.minX + interpolated.maxX) * 0.5;
                     const double centerZ = (interpolated.minZ + interpolated.maxZ) * 0.5;
-                    const double topY = interpolated.maxY + 0.6;
+                    const double topY = interpolated.maxY + 0.95;
                     const ScreenPoint pt = projectPoint(snapshot.camera, displaySize, centerX, topY, centerZ);
                     if (pt.visible) {
-                        const float baseWidth = 14.0F * uiScale;
-                        const float arrowHeight = 16.0F * uiScale;
-                        background->AddTriangleFilled(
-                            ImVec2(pt.x, pt.y),
-                            ImVec2(pt.x - baseWidth * 0.5F, pt.y - arrowHeight),
-                            ImVec2(pt.x + baseWidth * 0.5F, pt.y - arrowHeight),
-                            IM_COL32(40, 255, 40, 230)
-                        );
-                        if (m_features.labelsEnabled && label[0] != '\0') {
-                            const ImVec2 textSize = ImGui::CalcTextSize(label);
-                            background->AddText(
-                                ImVec2(pt.x - textSize.x * 0.5F, pt.y - arrowHeight - textSize.y - 2.0F * uiScale),
-                                IM_COL32(40, 255, 40, 255), label);
+                        const char visualTeam = entity.armorTeam != 'u'
+                            ? entity.armorTeam : entity.teamColor;
+                        const ImVec4 teamAccentVector = teamColor(visualTeam);
+                        const ImU32 teamAccent = ImGui::ColorConvertFloat4ToU32(
+                            teamAccentVector);
+                        const float halfWidth = 11.0F * uiScale;
+                        const float height = halfWidth * 1.7320508F;
+                        const ImVec2 tip(pt.x, pt.y);
+                        const ImVec2 left(pt.x - halfWidth, pt.y - height);
+                        const ImVec2 right(pt.x + halfWidth, pt.y - height);
+                        drawRoundedTriangle(background,
+                            ImVec2(tip.x + 1.5F * uiScale, tip.y + 3.0F * uiScale),
+                            ImVec2(left.x + 1.5F * uiScale, left.y + 3.0F * uiScale),
+                            ImVec2(right.x + 1.5F * uiScale, right.y + 3.0F * uiScale),
+                            4.6F * uiScale, IM_COL32(0, 0, 0, 92));
+                        // The inner triangle is a similarity transform around
+                        // the equilateral triangle's centroid. Unlike manually
+                        // moving only its tip, this is exactly equivalent to
+                        // offsetting all three edges inward by the same amount,
+                        // so the white shell has uniform thickness everywhere.
+                        drawRoundedTriangle(background, tip, left, right,
+                                            4.6F * uiScale,
+                                            IM_COL32(255, 255, 255, 245));
+                        const float borderThickness = 2.8F * uiScale;
+                        const float inradius = height / 3.0F;
+                        const float innerScale = std::clamp(
+                            1.0F - borderThickness / inradius, 0.25F, 0.90F);
+                        const ImVec2 centroid(pt.x, pt.y - height * (2.0F / 3.0F));
+                        const auto insetVertex = [&](const ImVec2 vertex) noexcept {
+                            return ImVec2(
+                                centroid.x + (vertex.x - centroid.x) * innerScale,
+                                centroid.y + (vertex.y - centroid.y) * innerScale);
+                        };
+                        drawRoundedTriangle(
+                            background, insetVertex(tip), insetVertex(left),
+                            insetVertex(right), 3.2F * uiScale, teamAccent);
+                    }
+                }
+                const bool nametagAllowed = entity.player && entity.confirmedPlayer &&
+                    m_features.nametagEnabled && entity.playerName[0U] != '\0' &&
+                    (!isTeammate || m_features.showTeammateNametags) &&
+                    (isTeammate || !m_features.nametagNearbyEnemiesOnly ||
+                     entity.distance <= static_cast<double>(m_features.nametagRange));
+                if (nametagAllowed &&
+                    entity.playerName[0U] != '\0') {
+                    ImVec2 bodyMin{}, bodyMax{};
+                    if (projectedBoxBounds(snapshot.camera, displaySize, interpolated,
+                                           bodyMin, bodyMax)) {
+                        constexpr std::array<float, 4U> sizePresets{{
+                            0.86F, 1.0F, 1.16F, 1.34F}};
+                        const float tagScale = std::clamp(uiScale, 0.88F, 1.34F) *
+                            sizePresets[static_cast<std::size_t>(
+                                std::clamp(m_features.nametagSizeIndex, 0, 3))];
+                        const int potion = entity.heldItemDamage & 0x3FFF;
+                        const bool knownSpecial = entity.heldItemId == 388 ||
+                            entity.heldItemId == 264 || entity.heldItemId == 46 ||
+                            entity.heldItemId == 385 ||
+                            (entity.heldItemId == 373 &&
+                             (potion == 8206 || potion == 8270));
+                        const bool enemy = snapshot.ownTeam != 'u' && !isTeammate;
+                        const bool showSpecial = m_features.enemyItemIndicatorsEnabled &&
+                            enemy && knownSpecial;
+                        const float width = 184.0F * tagScale;
+                        const float height = (showSpecial ? 62.0F : 48.0F) * tagScale;
+                        float x = (bodyMin.x + bodyMax.x - width) * 0.5F;
+                        float y = bodyMin.y - height - 8.0F * tagScale;
+                        if (m_features.nametagSidePlacement) {
+                            const bool placeRight = (bodyMin.x + bodyMax.x) * 0.5F <
+                                                    displaySize.x * 0.5F;
+                            x = placeRight ? bodyMax.x + 9.0F * tagScale
+                                           : bodyMin.x - width - 9.0F * tagScale;
+                            y = (bodyMin.y + bodyMax.y - height) * 0.5F;
+                        }
+                        x = std::clamp(x, 4.0F,
+                            std::max(4.0F, displaySize.x - width - 4.0F));
+                        y = std::clamp(y, 4.0F,
+                            std::max(4.0F, displaySize.y - height - 4.0F));
+                        const ImVec2 minimum(x, y), maximum(x + width, y + height);
+                        background->AddRectFilled(
+                            ImVec2(x + 2.0F * tagScale, y + 4.0F * tagScale),
+                            ImVec2(maximum.x + 2.0F * tagScale,
+                                   maximum.y + 4.0F * tagScale),
+                            IM_COL32(0, 0, 0, 74), 11.0F * tagScale);
+                        background->AddRectFilled(minimum, maximum,
+                            packedRgbColor(m_features.nametagPanelColor,
+                                static_cast<int>(std::lround(static_cast<float>(
+                                    std::clamp(m_features.nametagPanelOpacity,
+                                               10, 100)) * 2.55F))),
+                            11.0F * tagScale);
+                        background->AddRect(minimum, maximum,
+                            IM_COL32(255, 255, 255, 34), 11.0F * tagScale);
+                        if (enemy && m_features.nametagTeamPulse) {
+                            const float pulse = 0.5F + 0.5F * static_cast<float>(
+                                std::sin(ImGui::GetTime() * 5.8));
+                            ImVec4 pulseColor = teamColor(entity.teamColor != 'u'
+                                ? entity.teamColor : entity.armorTeam);
+                            pulseColor.w = 0.42F + pulse * 0.50F;
+                            background->AddRect(
+                                ImVec2(minimum.x - (1.0F + pulse) * tagScale,
+                                       minimum.y - (1.0F + pulse) * tagScale),
+                                ImVec2(maximum.x + (1.0F + pulse) * tagScale,
+                                       maximum.y + (1.0F + pulse) * tagScale),
+                                ImGui::ColorConvertFloat4ToU32(pulseColor),
+                                12.0F * tagScale, 0,
+                                (1.2F + 1.3F * pulse) * tagScale);
+                        }
+
+                        const ImVec2 faceMin(x + 8.0F * tagScale,
+                                             y + 7.0F * tagScale);
+                        const ImVec2 faceMax(faceMin.x + 34.0F * tagScale,
+                                             faceMin.y + 34.0F * tagScale);
+                        background->AddRectFilled(faceMin, faceMax,
+                            IM_COL32(24, 23, 29, 255), 7.0F * tagScale);
+                        if (entity.skinTextureId != 0U) {
+                            const ImTextureID skin = reinterpret_cast<ImTextureID>(
+                                static_cast<std::uintptr_t>(entity.skinTextureId));
+                            background->AddImage(skin, faceMin, faceMax,
+                                ImVec2(8.0F / 64.0F, 8.0F / 64.0F),
+                                ImVec2(16.0F / 64.0F, 16.0F / 64.0F));
+                            background->AddImage(skin, faceMin, faceMax,
+                                ImVec2(40.0F / 64.0F, 8.0F / 64.0F),
+                                ImVec2(48.0F / 64.0F, 16.0F / 64.0F));
+                        }
+                        background->AddRect(faceMin, faceMax,
+                            IM_COL32(255, 255, 255, 42), 7.0F * tagScale);
+
+                        NametagAnimation* animation = nullptr;
+                        NametagAnimation* oldest = &m_nametagAnimations.front();
+                        const std::uint64_t now = static_cast<std::uint64_t>(::GetTickCount64());
+                        for (NametagAnimation& candidate : m_nametagAnimations) {
+                            if (candidate.entityId == entity.entityId) {
+                                animation = &candidate;
+                                break;
+                            }
+                            if (candidate.entityId < 0 ||
+                                candidate.lastSeenTick < oldest->lastSeenTick) oldest = &candidate;
+                        }
+                        if (animation == nullptr) {
+                            animation = oldest;
+                            *animation = {};
+                            animation->entityId = entity.entityId;
+                            animation->displayedHealth = entity.health;
+                        }
+                        animation->lastSeenTick = now;
+                        animation->displayedHealth +=
+                            (entity.health - animation->displayedHealth) *
+                            (1.0F - std::exp(-11.0F * delta));
+                        const float ratio = std::clamp(animation->displayedHealth /
+                            std::max(1.0F, entity.maxHealth), 0.0F, 1.0F);
+                        const std::size_t nametagFontIndex = static_cast<std::size_t>(
+                            std::clamp(m_features.nametagSizeIndex, 0, 3));
+                        ImFont* const font = m_boldFonts[nametagFontIndex] != nullptr
+                            ? m_boldFonts[nametagFontIndex] : ImGui::GetFont();
+                        const float fontSize = font->LegacySize;
+                        const ImU32 nameColor = ImGui::ColorConvertFloat4ToU32(
+                            teamColor(entity.teamColor != 'u'
+                                ? entity.teamColor : entity.armorTeam));
+                        background->AddText(font, fontSize,
+                            ImVec2(faceMax.x + 8.0F * tagScale,
+                                   y + 7.0F * tagScale), nameColor,
+                            entity.playerName.data());
+                        if (entity.protectionLevel > 0U) {
+                            char protection[16]{};
+                            std::snprintf(protection, sizeof(protection), "Prot %s",
+                                          protectionRoman(entity.protectionLevel));
+                            const ImVec2 size = font->CalcTextSizeA(
+                                fontSize * 0.76F, FLT_MAX, 0.0F, protection);
+                            background->AddText(font, fontSize * 0.76F,
+                                ImVec2(maximum.x - size.x - 7.0F * tagScale,
+                                       y + 8.0F * tagScale),
+                                IM_COL32(196, 176, 255, 245), protection);
+                        }
+                        char healthText[16]{};
+                        std::snprintf(healthText, sizeof(healthText), "%.1f",
+                                      animation->displayedHealth);
+                        const float healthFontSize = fontSize * 0.76F;
+                        const ImVec2 healthTextSize = font->CalcTextSizeA(
+                            healthFontSize, FLT_MAX, 0.0F, healthText);
+                        const ImVec2 barMin(faceMax.x + 8.0F * tagScale,
+                                            y + 29.0F * tagScale);
+                        const ImVec2 barMax(maximum.x - 13.0F * tagScale -
+                                                healthTextSize.x,
+                                            barMin.y + 7.0F * tagScale);
+                        background->AddRectFilled(barMin, barMax,
+                            IM_COL32(255, 255, 255, 28), 3.5F * tagScale);
+                        const ImU32 hpColor = ratio > 0.60F ? IM_COL32(78, 220, 121, 255)
+                            : (ratio > 0.30F ? IM_COL32(255, 190, 62, 255)
+                                             : IM_COL32(255, 76, 92, 255));
+                        background->AddRectFilled(barMin,
+                            ImVec2(barMin.x + (barMax.x - barMin.x) * ratio, barMax.y),
+                            hpColor, 3.5F * tagScale);
+                        background->AddText(font, healthFontSize,
+                            ImVec2(maximum.x - 7.0F * tagScale - healthTextSize.x,
+                                   barMin.y - (healthTextSize.y -
+                                               (barMax.y - barMin.y)) * 0.5F),
+                            hpColor, healthText);
+                        if (showSpecial) {
+                            const char* item = entity.heldItemId == 388 ? "EMERALD"
+                                : entity.heldItemId == 264 ? "DIAMOND"
+                                : entity.heldItemId == 46 ? "TNT"
+                                : entity.heldItemId == 385 ? "FIREBALL" : "INVIS";
+                            char itemText[32]{};
+                            std::snprintf(itemText, sizeof(itemText), "%s x%u", item,
+                                static_cast<unsigned>(std::max<std::uint8_t>(
+                                    1U, entity.heldItemCount)));
+                            background->AddText(font, fontSize * 0.76F,
+                                ImVec2(faceMax.x + 8.0F * tagScale,
+                                       y + 44.0F * tagScale),
+                                entity.heldItemId == 373
+                                    ? IM_COL32(255, 93, 113, 255)
+                                    : IM_COL32(105, 218, 240, 255), itemText);
                         }
                     }
-                } else {
-                    // Enemies or unknown threats
-                    drawProjectedBox(background, snapshot.camera, displaySize, interpolated,
-                                     IM_COL32(255, 0, 0, 255), label);
                 }
             }
         }
     }
 
-    // The configurable menu key opens the interactive state used here. The window
-    // eases down from above the viewport and uses a custom drag surface so it
-    // can remain borderless while still being repositionable.
+    // Modern two-pane Click GUI. The left rail exposes stable feature pages;
+    // each page owns its top-right master switch and all related detail
+    // settings. Categories are labels, never collapsing containers, so every
+    // function remains one click away.
+    constexpr float baseGuiWidth = 820.0F;
+    constexpr float baseGuiHeight = 580.0F;
+    constexpr float baseRailWidth = 198.0F;
+    const float guiWidth = baseGuiWidth * uiScale;
+    const float guiHeight = baseGuiHeight * uiScale;
     if (m_clickGuiX < -9000.0F) {
-        m_clickGuiX = std::max(18.0F * uiScale,
-                              (io.DisplaySize.x - 570.0F * uiScale) * 0.5F);
+        m_clickGuiX = std::max(8.0F, (io.DisplaySize.x - guiWidth) * 0.5F);
+        m_clickGuiY = std::max(8.0F, (io.DisplaySize.y - guiHeight) * 0.16F);
     }
-    if (m_clickGuiProgress > 0.01F) {
-        const float hiddenY = -230.0F * uiScale;
-        const float animatedY = hiddenY + (m_clickGuiY - hiddenY) * guiEase;
-        ImGui::SetNextWindowPos(ImVec2(m_clickGuiX, animatedY), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(570.0F * uiScale, 0.0F), ImGuiCond_Always);
-        ImGui::SetNextWindowBgAlpha(0.88F * guiEase);
-        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, guiEase);
+    m_clickGuiThemeProgress +=
+        ((m_features.clickGuiLightTheme ? 1.0F : 0.0F) - m_clickGuiThemeProgress) *
+        (1.0F - std::exp(-12.0F * delta));
+    const auto mixColor = [](const ImVec4& dark, const ImVec4& light,
+                             const float amount) noexcept {
+        return ImVec4(dark.x + (light.x - dark.x) * amount,
+                      dark.y + (light.y - dark.y) * amount,
+                      dark.z + (light.z - dark.z) * amount,
+                      dark.w + (light.w - dark.w) * amount);
+    };
+    const float theme = std::clamp(m_clickGuiThemeProgress, 0.0F, 1.0F);
+    const ImVec4 guiSurface = mixColor(ImVec4(0.075F, 0.068F, 0.096F, 0.98F),
+                                      ImVec4(0.965F, 0.956F, 0.975F, 0.98F), theme);
+    const ImVec4 guiRail = mixColor(ImVec4(0.055F, 0.050F, 0.073F, 1.0F),
+                                   ImVec4(0.918F, 0.906F, 0.938F, 1.0F), theme);
+    const ImVec4 guiText = mixColor(ImVec4(0.94F, 0.92F, 0.98F, 1.0F),
+                                   ImVec4(0.10F, 0.09F, 0.13F, 1.0F), theme);
+    const ImVec4 guiMuted = mixColor(ImVec4(0.59F, 0.56F, 0.65F, 1.0F),
+                                    ImVec4(0.39F, 0.36F, 0.44F, 1.0F), theme);
+    const ImVec4 guiFrame = mixColor(ImVec4(0.14F, 0.13F, 0.18F, 1.0F),
+                                    ImVec4(0.88F, 0.86F, 0.90F, 1.0F), theme);
+    const ImVec4 guiScrollbarTrack = mixColor(
+        ImVec4(0.065F, 0.058F, 0.082F, 0.72F),
+        ImVec4(0.91F, 0.895F, 0.925F, 0.82F), theme);
+    const ImVec4 guiScrollbarGrab = mixColor(
+        ImVec4(0.42F, 0.38F, 0.50F, 0.92F),
+        ImVec4(0.45F, 0.40F, 0.50F, 0.92F), theme);
+    const std::array<float, 3U> accentChannels = unpackRgb(
+        m_features.clickGuiAccentColor);
+    const ImVec4 guiAccent(accentChannels[0U], accentChannels[1U],
+                           accentChannels[2U], 1.0F);
+
+    if (m_clickGuiProgress > 0.008F) {
+        // iPadOS Spotlight-inspired materialization: the surface forms around
+        // its centre with a short decelerating scale/lensing motion and fully
+        // reversible opacity. Keeping every child inside this one transformed
+        // parent also prevents the navigation rail from surviving a close.
+        // Opacity/blur use the same temporal envelope as geometry. The former
+        // fourth-power decelerate reached near-opaque too early and made an
+        // otherwise longer motion still look abrupt.
+        const float spotlightEase = guiEase;
+        // Drive geometry directly from the spring, including its overshoot.
+        // A second eased/sine motion would rebound a fraction of a beat later.
+        const float spotlightScale = 1.26F - 0.26F * m_clickGuiProgress;
+        const ImVec2 guiCenter(m_clickGuiX + guiWidth * 0.5F,
+                               m_clickGuiY + guiHeight * 0.5F);
+        // Layout always uses the final rectangle. Once ImGui has generated the
+        // complete draw lists, they are transformed around guiCenter as one
+        // flat image. This removes every top-left layout origin from the visual
+        // path and makes all four directions perfectly symmetric.
+        ImGui::SetNextWindowPos(ImVec2(m_clickGuiX, m_clickGuiY), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(guiWidth, guiHeight), ImGuiCond_Always);
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, spotlightEase);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0F, 0.0F));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 20.0F * uiScale);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0F);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, guiSurface);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+        ImGui::PushStyleColor(ImGuiCol_Text, guiText);
+        ImGui::PushStyleColor(ImGuiCol_TextDisabled, guiMuted);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, guiFrame);
+        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,
+                              mixColor(ImVec4(0.19F, 0.17F, 0.24F, 1.0F),
+                                       ImVec4(0.82F, 0.79F, 0.85F, 1.0F), theme));
+        ImGui::PushStyleColor(ImGuiCol_SliderGrab, guiAccent);
+        ImGui::PushStyleColor(ImGuiCol_CheckMark, guiAccent);
+        ImGui::PushStyleColor(ImGuiCol_Button, guiFrame);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                              ImVec4(guiAccent.x, guiAccent.y, guiAccent.z, 0.76F));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, guiAccent);
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarBg, guiScrollbarTrack);
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, guiScrollbarGrab);
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered,
+                              mixColor(guiScrollbarGrab, guiAccent, 0.42F));
+        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive, guiAccent);
         const ImGuiWindowFlags clickFlags = ImGuiWindowFlags_NoTitleBar |
             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
-            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_AlwaysAutoResize;
+            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar;
         if (ImGui::Begin("##McOverlayClickGui", nullptr, clickFlags)) {
+            const FeatureSettings featuresBefore = m_features;
+            bool changed = false;
+            // ESP master is intentionally retired. Individual Player/Bed ESP
+            // pages are the authoritative switches.
+            if (!m_features.espEnabled) {
+                m_features.espEnabled = true;
+                changed = true;
+            }
+
             const ImVec2 windowPosition = ImGui::GetWindowPos();
             const ImVec2 windowSize = ImGui::GetWindowSize();
+            ImDrawList* const windowDraw = ImGui::GetWindowDrawList();
+            const int parentContentVertexStart = 0;
+            ImDrawList* settingsDraw = nullptr;
+            int settingsVertexStart = 0;
+            int settingsVertexEnd = 0;
             ImDrawList* const backgroundDraw = ImGui::GetBackgroundDrawList();
+            const int shadowVertexStart = backgroundDraw->VtxBuffer.Size;
+            const auto fadedGuiColor = [&](ImVec4 color) noexcept {
+                color.w *= spotlightEase;
+                return ImGui::ColorConvertFloat4ToU32(color);
+            };
+            windowDraw->PushClipRect(windowPosition,
+                ImVec2(windowPosition.x + windowSize.x,
+                       windowPosition.y + windowSize.y), true);
             for (int shadow = 4; shadow >= 1; --shadow) {
                 const float spread = static_cast<float>(shadow) * 4.0F * uiScale;
                 backgroundDraw->AddRectFilled(
-                    ImVec2(windowPosition.x - spread, windowPosition.y - spread + 5.0F * uiScale),
+                    ImVec2(windowPosition.x - spread,
+                           windowPosition.y - spread + 7.0F * uiScale),
                     ImVec2(windowPosition.x + windowSize.x + spread,
-                           windowPosition.y + windowSize.y + spread + 5.0F * uiScale),
-                    IM_COL32(7, 5, 12, static_cast<int>(12 * guiEase)),
-                    18.0F * uiScale + spread);
+                           windowPosition.y + windowSize.y + spread + 7.0F * uiScale),
+                    IM_COL32(4, 3, 8, static_cast<int>(14.0F * spotlightEase)),
+                    20.0F * uiScale + spread);
             }
-            ImGui::InvisibleButton("##dragSurface", ImVec2(-1.0F, 30.0F * uiScale));
-            const ImVec2 headerMin = ImGui::GetItemRectMin();
+            windowDraw->AddRectFilled(
+                windowPosition,
+                ImVec2(windowPosition.x + baseRailWidth * uiScale,
+                       windowPosition.y + windowSize.y),
+                fadedGuiColor(guiRail), 20.0F * uiScale,
+                ImDrawFlags_RoundCornersLeft);
+            windowDraw->AddLine(
+                ImVec2(windowPosition.x + baseRailWidth * uiScale,
+                       windowPosition.y + 18.0F * uiScale),
+                ImVec2(windowPosition.x + baseRailWidth * uiScale,
+                       windowPosition.y + windowSize.y - 18.0F * uiScale),
+                fadedGuiColor(mixColor(
+                    ImVec4(1, 1, 1, 0.08F), ImVec4(0, 0, 0, 0.10F), theme)));
+
+            // Header drag surface spans both panes without stealing controls.
+            ImGui::SetCursorScreenPos(ImVec2(windowPosition.x + 14.0F * uiScale,
+                                              windowPosition.y + 8.0F * uiScale));
+            ImGui::InvisibleButton("##clickGuiDrag",
+                                   ImVec2((baseGuiWidth - 150.0F) * uiScale,
+                                          34.0F * uiScale));
             if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
                 m_clickGuiX += io.MouseDelta.x;
                 m_clickGuiY += io.MouseDelta.y;
+                const float maxX = std::max(4.0F, io.DisplaySize.x - guiWidth - 4.0F);
+                const float maxY = std::max(4.0F, io.DisplaySize.y - guiHeight - 4.0F);
+                m_clickGuiX = std::clamp(m_clickGuiX, 4.0F, maxX);
+                m_clickGuiY = std::clamp(m_clickGuiY, 4.0F, maxY);
             }
-            ImDrawList* const windowDraw = ImGui::GetWindowDrawList();
-            windowDraw->AddText(ImVec2(headerMin.x, headerMin.y + 4.0F * uiScale),
-                                IM_COL32(240, 232, 255, 255), "MC OVERLAY  /  CLICK GUI");
-            ImGui::Separator();
-            ImGui::TextDisabled("Interface size");
-            constexpr std::array<const char*, 4U> sizeLabels{"S", "M", "L", "XL"};
-            for (int sizeIndex = 0; sizeIndex < 4; ++sizeIndex) {
-                if (sizeIndex != 0) ImGui::SameLine();
-                if (ImGui::RadioButton(sizeLabels[static_cast<std::size_t>(sizeIndex)],
-                                       m_guiScaleIndex == sizeIndex)) {
-                    m_guiScaleIndex = sizeIndex;
-                    m_guiScaleDirty = true;
+
+            ImFont* const boldFont = m_boldFonts[static_cast<std::size_t>(
+                std::clamp(m_guiScaleIndex, 0, 3))] != nullptr
+                ? m_boldFonts[static_cast<std::size_t>(
+                    std::clamp(m_guiScaleIndex, 0, 3))] : ImGui::GetFont();
+            windowDraw->AddText(boldFont, ImGui::GetFontSize(),
+                                ImVec2(windowPosition.x + 20.0F * uiScale,
+                                       windowPosition.y + 17.0F * uiScale),
+                                fadedGuiColor(guiText), "MC OVERLAY");
+            windowDraw->AddText(ImVec2(windowPosition.x + 20.0F * uiScale,
+                                       windowPosition.y + 38.0F * uiScale),
+                                fadedGuiColor(guiMuted),
+                                "Native workspace");
+
+            struct NavItem final { const char* label; int page; float y; };
+            constexpr std::array<NavItem, 14U> navItems{{
+                {"Player ESP", 0, 84.0F}, {"Bed ESP", 1, 109.0F},
+                {"Nametag", 2, 134.0F}, {"Bed Alert", 3, 180.0F},
+                {"Safewalk", 4, 226.0F}, {"Scaffold", 5, 251.0F},
+                {"Fly", 6, 276.0F}, {"BHop", 7, 301.0F},
+                {"Aim Assist", 8, 326.0F}, {"Player Stats", 9, 372.0F},
+                {"Debug", 10, 397.0F}, {"Blacklist", 11, 422.0F},
+                {"Text GUI", 12, 468.0F}, {"Interface", 13, 514.0F}}};
+            constexpr std::array<std::pair<const char*, float>, 6U> navGroups{{
+                {"ESP", 68.0F}, {"ALERT", 164.0F}, {"SAFE", 210.0F},
+                {"DATA", 356.0F}, {"HUD", 452.0F},
+                {"APPLICATION", 498.0F}}};
+            const float targetNavY = navItems[static_cast<std::size_t>(
+                std::clamp(m_clickGuiPage, 0, 13))].y;
+            if (m_clickGuiNavPosition <= 0.0F) m_clickGuiNavPosition = targetNavY;
+            m_clickGuiNavPosition += (targetNavY - m_clickGuiNavPosition) *
+                (1.0F - std::exp(-15.0F * delta));
+            windowDraw->AddRectFilled(
+                ImVec2(windowPosition.x + 10.0F * uiScale,
+                       windowPosition.y + (m_clickGuiNavPosition - 2.0F) * uiScale),
+                ImVec2(windowPosition.x + (baseRailWidth - 10.0F) * uiScale,
+                       windowPosition.y + (m_clickGuiNavPosition + 22.0F) * uiScale),
+                fadedGuiColor(ImVec4(
+                    guiAccent.x, guiAccent.y, guiAccent.z, 0.18F)),
+                10.0F * uiScale);
+            windowDraw->AddRectFilled(
+                ImVec2(windowPosition.x + 10.0F * uiScale,
+                       windowPosition.y + (m_clickGuiNavPosition + 5.0F) * uiScale),
+                ImVec2(windowPosition.x + 13.0F * uiScale,
+                       windowPosition.y + (m_clickGuiNavPosition + 20.0F) * uiScale),
+                fadedGuiColor(guiAccent), 1.5F * uiScale);
+            for (const auto& group : navGroups) {
+                windowDraw->AddText(boldFont, ImGui::GetFontSize() * 0.72F,
+                    ImVec2(windowPosition.x + 20.0F * uiScale,
+                           windowPosition.y + group.second * uiScale),
+                    fadedGuiColor(guiMuted), group.first);
+            }
+            for (const NavItem& item : navItems) {
+                ImGui::SetCursorScreenPos(ImVec2(
+                    windowPosition.x + 10.0F * uiScale,
+                    windowPosition.y + (item.y - 2.0F) * uiScale));
+                ImGui::PushID(item.page);
+                if (ImGui::InvisibleButton("##nav", ImVec2(
+                    (baseRailWidth - 20.0F) * uiScale, 24.0F * uiScale))) {
+                    if (m_clickGuiPage != item.page) {
+                        m_previousClickGuiPage = m_clickGuiPage;
+                        m_clickGuiPage = item.page;
+                        m_clickGuiPageProgress = 0.0F;
+                    }
                 }
+                const bool navSelected = m_clickGuiPage == item.page;
+                float& hoverProgress = m_clickGuiNavHover[static_cast<std::size_t>(item.page)];
+                const float hoverTarget = ImGui::IsItemHovered() && !navSelected ? 1.0F : 0.0F;
+                hoverProgress += (hoverTarget - hoverProgress) *
+                    (1.0F - std::exp(-18.0F * delta));
+                ImGui::PopID();
+                if (hoverProgress > 0.005F) {
+                    windowDraw->AddRectFilled(
+                        ImVec2(windowPosition.x + 10.0F * uiScale,
+                               windowPosition.y + (item.y - 2.0F) * uiScale),
+                        ImVec2(windowPosition.x + (baseRailWidth - 10.0F) * uiScale,
+                               windowPosition.y + (item.y + 22.0F) * uiScale),
+                        fadedGuiColor(ImVec4(
+                            guiAccent.x, guiAccent.y, guiAccent.z,
+                            0.10F * hoverProgress)), 10.0F * uiScale);
+                }
+                const ImU32 itemColor = fadedGuiColor(
+                    navSelected ? guiText : guiMuted);
+                windowDraw->AddText(
+                    navSelected ? boldFont : ImGui::GetFont(),
+                    ImGui::GetFontSize(),
+                    ImVec2(windowPosition.x + 25.0F * uiScale,
+                           windowPosition.y + (item.y + 2.0F) * uiScale),
+                    itemColor, item.label);
             }
-            ImGui::SameLine(0.0F, 22.0F * uiScale);
-            if (ImGui::Button(m_waitingForHotkey ? "Press a key..." : hotkeyName(m_menuHotkey))) {
+
+            // Bottom-left sun/moon control is vector drawn, so it remains crisp
+            // and does not depend on an icon font.
+            const ImVec2 themeButtonMin(windowPosition.x + 18.0F * uiScale,
+                                        windowPosition.y + (baseGuiHeight - 39.0F) * uiScale);
+            ImGui::SetCursorScreenPos(themeButtonMin);
+            if (ImGui::InvisibleButton("##themeToggle",
+                                       ImVec2(28.0F * uiScale, 26.0F * uiScale))) {
+                m_features.clickGuiLightTheme = !m_features.clickGuiLightTheme;
+                changed = true;
+            }
+            const ImVec2 iconCenter(themeButtonMin.x + 13.0F * uiScale,
+                                    themeButtonMin.y + 13.0F * uiScale);
+            const ImU32 iconColor = fadedGuiColor(guiText);
+            if (m_features.clickGuiLightTheme) {
+                windowDraw->AddCircleFilled(iconCenter, 3.5F * uiScale, iconColor, 20);
+                for (int ray = 0; ray < 8; ++ray) {
+                    const float angle = static_cast<float>(ray) * 3.14159265F / 4.0F;
+                    windowDraw->AddLine(
+                        ImVec2(iconCenter.x + std::cos(angle) * 6.0F * uiScale,
+                               iconCenter.y + std::sin(angle) * 6.0F * uiScale),
+                        ImVec2(iconCenter.x + std::cos(angle) * 8.0F * uiScale,
+                               iconCenter.y + std::sin(angle) * 8.0F * uiScale),
+                        iconColor, 1.25F * uiScale);
+                }
+            } else {
+                windowDraw->AddCircleFilled(iconCenter, 6.5F * uiScale, iconColor, 24);
+                windowDraw->AddCircleFilled(
+                    ImVec2(iconCenter.x + 3.0F * uiScale,
+                           iconCenter.y - 2.0F * uiScale),
+                    5.7F * uiScale, fadedGuiColor(guiRail), 24);
+            }
+
+            constexpr std::array<const char*, 14U> pageTitles{{
+                "Player ESP", "Bed ESP", "Nametag", "Bed Alert",
+                "Safewalk", "Scaffold", "Fly", "BHop", "Aim Assist",
+                "Player Stats", "Debug", "Blacklist", "Text GUI", "Interface"}};
+            constexpr std::array<const char*, 14U> pageDescriptions{{
+                "Player outlines and teammate presentation",
+                "Bed geometry and defense material card",
+                "Confirmed-player identity and live health cards",
+                "Persistent own-bed proximity warning",
+                "Edge-aware crouch assistance and release timing",
+                "Predictive hotbar block placement",
+                "Local movement flight controls",
+                "Air momentum and landing jump controls",
+                "Crosshair slowdown or smooth target assistance",
+                "Automatic TAB roster statistics",
+                "Local diagnostics visible only to you",
+                "UUID-based player records and encounter warnings",
+                "Draggable enabled-feature list",
+                "Appearance, scale and input binding"}};
+            const int page = std::clamp(m_clickGuiPage, 0, 13);
+            const float contentX = windowPosition.x + (baseRailWidth + 22.0F) * uiScale;
+            windowDraw->AddText(boldFont, ImGui::GetFontSize() * 1.16F,
+                ImVec2(contentX, windowPosition.y + 17.0F * uiScale),
+                fadedGuiColor(guiText),
+                pageTitles[static_cast<std::size_t>(page)]);
+            windowDraw->AddText(
+                ImVec2(contentX, windowPosition.y + 42.0F * uiScale),
+                fadedGuiColor(guiMuted),
+                pageDescriptions[static_cast<std::size_t>(page)]);
+            windowDraw->AddLine(
+                ImVec2(contentX, windowPosition.y + 66.0F * uiScale),
+                ImVec2(windowPosition.x + (baseGuiWidth - 20.0F) * uiScale,
+                       windowPosition.y + 66.0F * uiScale),
+                fadedGuiColor(mixColor(
+                    ImVec4(1, 1, 1, 0.09F), ImVec4(0, 0, 0, 0.10F), theme)));
+
+            bool* pageMaster = nullptr;
+            float* pageMasterAnimation = nullptr;
+            switch (page) {
+            case 0: pageMaster = &m_features.entityEspEnabled;
+                    pageMasterAnimation = &m_toggleAnimation[1]; break;
+            case 1: pageMaster = &m_features.bedEspEnabled;
+                    pageMasterAnimation = &m_toggleAnimation[2]; break;
+            case 2: pageMaster = &m_features.nametagEnabled;
+                    pageMasterAnimation = &m_toggleAnimation[16]; break;
+            case 3: pageMaster = &m_features.bedThreatAlertsEnabled;
+                    pageMasterAnimation = &m_toggleAnimation[5]; break;
+            case 4: pageMaster = &m_features.safewalkEnabled;
+                    pageMasterAnimation = &m_toggleAnimation[26]; break;
+            case 5: pageMaster = &m_features.scaffoldEnabled;
+                    pageMasterAnimation = &m_toggleAnimation[27]; break;
+            case 6: pageMaster = &m_features.flyEnabled;
+                    pageMasterAnimation = &m_toggleAnimation[28]; break;
+            case 7: pageMaster = &m_features.bhopEnabled;
+                    pageMasterAnimation = &m_toggleAnimation[29]; break;
+            case 8: pageMaster = &m_features.aimAssistEnabled;
+                    pageMasterAnimation = &m_toggleAnimation[30]; break;
+            case 9: pageMaster = &m_features.hypixelPanelEnabled;
+                    pageMasterAnimation = &m_toggleAnimation[4]; break;
+            case 10: pageMaster = &m_features.debugChatEnabled;
+                    pageMasterAnimation = &m_toggleAnimation[11]; break;
+            case 12: pageMaster = &m_features.textGuiEnabled;
+                     pageMasterAnimation = &m_toggleAnimation[31]; break;
+            default: break;
+            }
+            if (pageMaster != nullptr && pageMasterAnimation != nullptr) {
+                ImGui::SetCursorScreenPos(ImVec2(
+                    windowPosition.x + (baseGuiWidth - 126.0F) * uiScale,
+                    windowPosition.y + 20.0F * uiScale));
+                changed |= animatedToggle("Enabled", *pageMaster,
+                                          *pageMasterAnimation, uiScale);
+            } else {
+                windowDraw->AddText(boldFont, ImGui::GetFontSize() * 0.78F,
+                    ImVec2(windowPosition.x + (baseGuiWidth - 79.0F) * uiScale,
+                           windowPosition.y + 27.0F * uiScale),
+                    fadedGuiColor(guiAccent), page == 11 ? "RECORDS" : "SYSTEM");
+            }
+
+            auto beginHotkeyCapture = [&](const int target) noexcept {
                 m_waitingForHotkey = true;
+                m_hotkeyCaptureTarget = target;
                 m_hotkeyCaptureCooldownFrames = 2;
                 m_hotkeyCaptureArmed = false;
                 m_inputState->captureHotkey.store(false, std::memory_order_release);
                 m_inputState->capturedHotkey.store(0U, std::memory_order_release);
-            }
-            ImGui::SameLine();
-            ImGui::TextDisabled("Click GUI bind");
+            };
             if (m_waitingForHotkey) {
                 const unsigned captured = m_inputState->capturedHotkey.exchange(
                     0U, std::memory_order_acq_rel);
                 if (captured != 0U) {
                     if (captured != VK_ESCAPE) {
-                        setMenuHotkey(captured);
-                        m_menuHotkeyDirty = true;
+                        if (m_hotkeyCaptureTarget == 1) {
+                            setMenuHotkey(captured);
+                            m_menuHotkeyDirty = true;
+                        } else if (m_hotkeyCaptureTarget == 2) {
+                            m_features.bedDefenseHotkey = static_cast<int>(captured);
+                            changed = true;
+                        } else if (m_hotkeyCaptureTarget == 3) {
+                            m_features.hypixelPanelHotkey = static_cast<int>(captured);
+                            changed = true;
+                        } else if (m_hotkeyCaptureTarget == 4) {
+                            m_features.safewalkHotkey = static_cast<int>(captured);
+                            changed = true;
+                        }
                     }
                     m_waitingForHotkey = false;
+                    m_hotkeyCaptureTarget = 0;
                     m_hotkeyCaptureArmed = false;
                     m_inputState->captureHotkey.store(false, std::memory_order_release);
-                }
-                if (captured == 0U) {
+                } else {
                     const bool mouseHeld = (::GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 ||
                         (::GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0 ||
                         (::GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0 ||
                         (::GetAsyncKeyState(VK_XBUTTON1) & 0x8000) != 0 ||
                         (::GetAsyncKeyState(VK_XBUTTON2) & 0x8000) != 0;
                     if (mouseHeld) {
-                        // The click which opened capture must be fully released;
-                        // it can never become a bind or retrigger this button.
                         m_hotkeyCaptureArmed = false;
                         m_hotkeyCaptureCooldownFrames = 2;
                     } else if (m_hotkeyCaptureCooldownFrames > 0) {
@@ -1485,186 +2602,1580 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     }
                 }
             }
-            ImGui::Separator();
-            ImGui::TextDisabled("Single-player diagnostics");
-            const FeatureSettings featuresBefore = m_features;
-            bool changed = false;
-            changed |= animatedToggle("ESP master", m_features.espEnabled,
-                                      m_toggleAnimation[0], uiScale);
-            changed |= animatedToggle("3D living hitboxes", m_features.entityEspEnabled,
-                                      m_toggleAnimation[1], uiScale);
-            if (m_features.entityEspEnabled) {
-                ImGui::SameLine(0.0F, 18.0F * uiScale);
-                changed |= animatedToggle("Players only", m_features.entityEspPlayersOnly,
-                                          m_toggleAnimation[8], uiScale);
-            }
-            changed |= animatedToggle("Bed ESP", m_features.bedEspEnabled,
-                                      m_toggleAnimation[2], uiScale);
-            ImGui::SameLine(0.0F, 18.0F * uiScale);
-            changed |= animatedToggle("Auto-refresh", m_features.bedAutoRefreshEnabled,
-                                      m_toggleAnimation[7], uiScale);
-            ImGui::SameLine(0.0F, 18.0F * uiScale);
-            if (ImGui::Button("Refresh beds now")) {
-                m_bedRescanPending = true;
-            }
-            changed |= animatedToggle("World labels", m_features.labelsEnabled,
-                                      m_toggleAnimation[3], uiScale);
-            changed |= animatedToggle("Bed proximity alerts",
-                                      m_features.bedThreatAlertsEnabled,
-                                      m_toggleAnimation[5], uiScale);
-            changed |= animatedToggle("Bed defense material panel",
-                                      m_features.bedDefensePanelEnabled,
-                                      m_toggleAnimation[6], uiScale);
-            ImGui::TextDisabled("Defense material radius (bed level and above)");
-            for (int radius = 3; radius <= 10; ++radius) {
-                if (radius != 3) ImGui::SameLine();
-                ImGui::PushID(radius);
-                const bool isCurrentRadius = (radius == m_features.bedDefenseRadius);
-                if (isCurrentRadius) {
-                    ImGui::PushStyleColor(ImGuiCol_Button,
-                                          ImVec4(0.58F, 0.44F, 0.92F, 1.0F));
-                }
-                char radiusLabel[4]{};
-                std::snprintf(radiusLabel, sizeof(radiusLabel), "%d", radius);
-                if (ImGui::Button(radiusLabel, ImVec2(42.0F * uiScale, 0.0F)) &&
-                    !isCurrentRadius) {
-                    m_features.bedDefenseRadius = radius;
+
+            m_clickGuiPageProgress += (1.0F - m_clickGuiPageProgress) *
+                (1.0F - std::exp(-14.0F * delta));
+            const float pageEase = std::clamp(m_clickGuiPageProgress, 0.0F, 1.0F);
+            const ImVec2 childPos(contentX + (1.0F - pageEase) * 14.0F * uiScale,
+                                  windowPosition.y + 79.0F * uiScale);
+            ImGui::SetCursorScreenPos(childPos);
+            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, guiEase * pageEase);
+            ImGui::BeginChild("##settingsPage",
+                ImVec2((baseGuiWidth - baseRailWidth - 38.0F) * uiScale,
+                       (baseGuiHeight - 96.0F) * uiScale), false,
+                ImGuiWindowFlags_AlwaysVerticalScrollbar);
+            settingsDraw = ImGui::GetWindowDrawList();
+            settingsVertexStart = 0;
+            const auto sectionTitle = [&](const char* text) noexcept {
+                ImGui::Spacing();
+                ImGui::PushFont(boldFont);
+                ImGui::TextColored(guiAccent, "%s", text);
+                ImGui::PopFont();
+                ImGui::Spacing();
+            };
+            const auto hotkeyControl = [&](const char* label, const int target,
+                                           const unsigned key) noexcept {
+                ImGui::TextDisabled("%s", label);
+                ImGui::SameLine(0.0F, 14.0F * uiScale);
+                const char* buttonText = m_waitingForHotkey &&
+                    m_hotkeyCaptureTarget == target ? "Press a key..." : hotkeyName(key);
+                if (ImGui::Button(buttonText, ImVec2(126.0F * uiScale, 0.0F)))
+                    beginHotkeyCapture(target);
+            };
+
+            if (page == 0) {
+                sectionTitle("TARGETS");
+                changed |= animatedToggle("Players only",
+                    m_features.entityEspPlayersOnly, m_toggleAnimation[8], uiScale);
+                changed |= animatedToggle("Show teammate boxes",
+                    m_features.showTeammateBoxes, m_toggleAnimation[12], uiScale);
+                changed |= animatedToggle("Show teammate arrows",
+                    m_features.showTeammateArrows, m_toggleAnimation[25], uiScale);
+                changed |= animatedToggle("World labels",
+                    m_features.labelsEnabled, m_toggleAnimation[3], uiScale);
+                sectionTitle("APPEARANCE");
+                std::array<float, 3U> playerColor = unpackRgb(m_features.playerEspColor);
+                ImGui::SetNextItemWidth(220.0F * uiScale);
+                if (ImGui::ColorEdit3("Player box color", playerColor.data(),
+                        ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_DisplayRGB)) {
+                    m_features.playerEspColor = packRgb(playerColor);
                     changed = true;
                 }
-                if (isCurrentRadius) ImGui::PopStyleColor();
-                ImGui::PopID();
-            }
-            ImGui::SeparatorText("Hypixel player panel");
-            changed |= animatedToggle("Show statistics panel",
-                                      m_features.hypixelPanelEnabled,
-                                      m_toggleAnimation[4], uiScale);
-            ImGui::SetNextItemWidth(370.0F * uiScale);
-            ImGui::InputTextWithHint("##hypixelPlayer", "Minecraft player ID / name",
-                                     m_hypixelInput.data(), m_hypixelInput.size());
-            ImGui::SameLine();
-            if (ImGui::Button("Query", ImVec2(110.0F * uiScale, 0.0F))) {
-                const std::string_view playerId(m_hypixelInput.data());
-                const bool valid = !playerId.empty() && playerId.size() <= 16U &&
-                    std::all_of(playerId.begin(), playerId.end(), [](const char c) noexcept {
-                        return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                               (c >= '0' && c <= '9') || c == '_';
-                    });
-                if (valid) {
-                    m_hypixelQuery.fill('\0');
-                    std::copy(playerId.begin(), playerId.end(), m_hypixelQuery.begin());
-                    m_hypixelQueryPending = true;
+            } else if (page == 1) {
+                sectionTitle("BED GEOMETRY");
+                changed |= animatedToggle("Automatic bed refresh",
+                    m_features.bedAutoRefreshEnabled, m_toggleAnimation[7], uiScale);
+                changed |= animatedToggle("Semi-transparent box fill",
+                    m_features.bedEspFilled, m_toggleAnimation[9], uiScale);
+                std::array<float, 3U> bedColor = unpackRgb(m_features.bedEspColor);
+                ImGui::SetNextItemWidth(220.0F * uiScale);
+                if (ImGui::ColorEdit3("Bed box color", bedColor.data(),
+                        ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_DisplayRGB)) {
+                    m_features.bedEspColor = packRgb(bedColor);
+                    changed = true;
                 }
+                if (ImGui::Button("Refresh loaded beds now",
+                                  ImVec2(210.0F * uiScale, 0.0F)))
+                    m_bedRescanPending = true;
+                sectionTitle("DEFENSE MATERIAL CARD");
+                changed |= animatedToggle("Show defense material card",
+                    m_features.bedDefensePanelEnabled, m_toggleAnimation[6], uiScale);
+                changed |= animatedToggle("Include own bed",
+                    m_features.showOwnBedDefenseInfo, m_toggleAnimation[10], uiScale);
+                changed |= animatedToggle("Hold key to show",
+                    m_features.bedDefenseHoldToShow, m_toggleAnimation[13], uiScale);
+                hotkeyControl("Hold bind", 2,
+                    static_cast<unsigned>(m_features.bedDefenseHotkey));
+                changed |= animatedToggle("Distance-scaled card",
+                    m_features.bedDefensePerspectiveScale, m_toggleAnimation[14], uiScale);
+                ImGui::TextDisabled("Block radius (bed level and above)");
+                for (int radius = 3; radius <= 10; ++radius) {
+                    if (radius != 3) ImGui::SameLine();
+                    ImGui::PushID(radius);
+                    const bool selected = radius == m_features.bedDefenseRadius;
+                    if (selected) ImGui::PushStyleColor(ImGuiCol_Button, guiAccent);
+                    char label[4]{};
+                    std::snprintf(label, sizeof(label), "%d", radius);
+                    if (ImGui::Button(label, ImVec2(38.0F * uiScale, 0.0F)) && !selected) {
+                        m_features.bedDefenseRadius = radius;
+                        changed = true;
+                    }
+                    if (selected) ImGui::PopStyleColor();
+                    ImGui::PopID();
+                }
+                std::array<float, 3U> cardColor = unpackRgb(
+                    m_features.bedDefensePanelColor);
+                ImGui::SetNextItemWidth(220.0F * uiScale);
+                if (ImGui::ColorEdit3("Card background", cardColor.data(),
+                        ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_DisplayRGB)) {
+                    m_features.bedDefensePanelColor = packRgb(cardColor);
+                    changed = true;
+                }
+                ImGui::SetNextItemWidth(300.0F * uiScale);
+                changed |= ImGui::SliderInt("Card opacity",
+                    &m_features.bedDefensePanelOpacity, 0, 100, "%d%%",
+                    ImGuiSliderFlags_AlwaysClamp);
+            } else if (page == 2) {
+                sectionTitle("PLAYER FILTER");
+                changed |= animatedToggle("Show teammate nametags",
+                    m_features.showTeammateNametags, m_toggleAnimation[19], uiScale);
+                changed |= animatedToggle("Only nearby enemies",
+                    m_features.nametagNearbyEnemiesOnly, m_toggleAnimation[20], uiScale);
+                if (m_features.nametagNearbyEnemiesOnly) {
+                    ImGui::SetNextItemWidth(320.0F * uiScale);
+                    changed |= ImGui::SliderInt("Enemy range", &m_features.nametagRange,
+                        4, 128, "%d blocks", ImGuiSliderFlags_AlwaysClamp);
+                }
+                ImGui::TextDisabled("Only colour-validated TAB players are shown; shop NPCs are excluded.");
+                sectionTitle("LAYOUT & SIZE");
+                changed |= animatedToggle("Smart side placement",
+                    m_features.nametagSidePlacement, m_toggleAnimation[17], uiScale);
+                changed |= animatedToggle("Enemy team pulse",
+                    m_features.nametagTeamPulse, m_toggleAnimation[21], uiScale);
+                constexpr std::array<const char*, 4U> nametagSizes{{"S", "M", "L", "XL"}};
+                ImGui::TextDisabled("Card size");
+                for (int sizeIndex = 0; sizeIndex < 4; ++sizeIndex) {
+                    if (sizeIndex != 0) ImGui::SameLine();
+                    const bool selected = sizeIndex == m_features.nametagSizeIndex;
+                    if (selected) ImGui::PushStyleColor(ImGuiCol_Button, guiAccent);
+                    if (ImGui::Button(nametagSizes[static_cast<std::size_t>(sizeIndex)],
+                        ImVec2(62.0F * uiScale, 0.0F)) && !selected) {
+                        m_features.nametagSizeIndex = sizeIndex;
+                        changed = true;
+                    }
+                    if (selected) ImGui::PopStyleColor();
+                }
+                sectionTitle("SURFACE");
+                std::array<float, 3U> nametagColor = unpackRgb(
+                    m_features.nametagPanelColor);
+                ImGui::SetNextItemWidth(220.0F * uiScale);
+                if (ImGui::ColorEdit3("Nametag background", nametagColor.data(),
+                        ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_DisplayRGB)) {
+                    m_features.nametagPanelColor = packRgb(nametagColor);
+                    changed = true;
+                }
+                ImGui::SetNextItemWidth(300.0F * uiScale);
+                changed |= ImGui::SliderInt("Nametag opacity",
+                    &m_features.nametagPanelOpacity, 10, 100, "%d%%",
+                    ImGuiSliderFlags_AlwaysClamp);
+                sectionTitle("OBSERVED EQUIPMENT");
+                changed |= animatedToggle("Show held special item",
+                    m_features.enemyItemIndicatorsEnabled, m_toggleAnimation[18], uiScale);
+                ImGui::TextWrapped("Minecraft servers do not send another player's private inventory. Fireballs, TNT, diamonds, emeralds and invisibility potions can only be reported while visibly held.");
+            } else if (page == 3) {
+                sectionTitle("THREAT RULE");
+                ImGui::TextWrapped("Track confirmed enemy roster members around your locked own bed.");
+                ImGui::Spacing();
+                ImGui::SetNextItemWidth(320.0F * uiScale);
+                changed |= ImGui::SliderInt("Warning range",
+                    &m_features.bedThreatRadius, 3, 32, "%d blocks",
+                    ImGuiSliderFlags_AlwaysClamp);
+                ImGui::Spacing();
+                ImGui::TextDisabled("The warning remains visible while a tracked enemy stays inside the range.");
+            } else if (page == 4) {
+                sectionTitle("EDGE ASSIST");
+                ImGui::TextWrapped(
+                    "Crouch near an air edge while preserving Minecraft's physical sneak key state.");
+                hotkeyControl("Toggle bind", 4,
+                    static_cast<unsigned>(m_features.safewalkHotkey));
+                ImGui::Spacing();
+                ImGui::SetNextItemWidth(320.0F * uiScale);
+                changed |= ImGui::SliderInt("Late-edge sensitivity",
+                    &m_features.safewalkEdgeSensitivity, 0, 95, "%d%%",
+                    ImGuiSliderFlags_AlwaysClamp);
+                ImGui::SetNextItemWidth(320.0F * uiScale);
+                changed |= ImGui::SliderInt("Minimum look pitch",
+                    &m_features.safewalkMinimumPitch, -90, 90, "%d deg",
+                    ImGuiSliderFlags_AlwaysClamp);
+                ImGui::SetNextItemWidth(320.0F * uiScale);
+                changed |= ImGui::SliderInt("Stand delay after placement",
+                    &m_features.safewalkReleaseDelayMs, 0, 750, "%d ms",
+                    ImGuiSliderFlags_AlwaysClamp);
+                ImGui::TextDisabled(
+                    "Higher sensitivity waits until more of your footprint passes the edge.");
+            } else if (page == 5) {
+                sectionTitle("AUTOMATIC PLACEMENT");
+                ImGui::TextWrapped(
+                    "Places a real hotbar block below/predictively ahead of your movement. Wool, planks, sandstone and stable building blocks are accepted; sand and gravel are always excluded.");
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(1.0F, 0.42F, 0.34F, 1.0F),
+                    "WARNING: Do not use this on a server. It can cause a ban.");
+                ImGui::TextDisabled("Placement still requires a reachable solid neighbour.");
+            } else if (page == 6) {
+                sectionTitle("FLIGHT SPEED");
+                ImGui::SetNextItemWidth(320.0F * uiScale);
+                changed |= ImGui::SliderInt("Speed", &m_features.flySpeedPercent,
+                    10, 500, "%d%%", ImGuiSliderFlags_AlwaysClamp);
+                ImGui::TextColored(ImVec4(1.0F, 0.42F, 0.34F, 1.0F),
+                    "WARNING: Do not use this on a server. It can cause a ban.");
+                ImGui::TextDisabled("This is local motion control and contains no server-correction bypass.");
+            } else if (page == 7) {
+                sectionTitle("AIR CONTROL");
+                changed |= animatedToggle("Auto-jump on landing",
+                    m_features.bhopAutoJump, m_toggleAnimation[32], uiScale);
+                ImGui::TextColored(ImVec4(1.0F, 0.42F, 0.34F, 1.0F),
+                    "WARNING: Do not use this on a server. It can cause a ban.");
+                ImGui::TextDisabled("Airborne horizontal velocity follows current movement input.");
+            } else if (page == 8) {
+                sectionTitle("MODE");
+                const bool slowdown = m_features.aimSlowdownMode;
+                if (slowdown) ImGui::PushStyleColor(ImGuiCol_Button, guiAccent);
+                if (ImGui::Button("Crosshair slowdown", ImVec2(180.0F * uiScale, 0.0F)) &&
+                    !slowdown) { m_features.aimSlowdownMode = true; changed = true; }
+                if (slowdown) ImGui::PopStyleColor();
+                ImGui::SameLine();
+                if (!slowdown) ImGui::PushStyleColor(ImGuiCol_Button, guiAccent);
+                if (ImGui::Button("Smooth assist", ImVec2(150.0F * uiScale, 0.0F)) &&
+                    slowdown) { m_features.aimSlowdownMode = false; changed = true; }
+                if (!slowdown) ImGui::PopStyleColor();
+                sectionTitle("RESPONSE");
+                ImGui::SetNextItemWidth(320.0F * uiScale);
+                if (m_features.aimSlowdownMode)
+                    changed |= ImGui::SliderInt("Sensitivity coefficient",
+                        &m_features.aimSlowdownPercent, 5, 95, "%d%%",
+                        ImGuiSliderFlags_AlwaysClamp);
+                else
+                    changed |= ImGui::SliderInt("Aim speed",
+                        &m_features.aimSpeedPercent, 1, 100, "%d%%",
+                        ImGuiSliderFlags_AlwaysClamp);
+                ImGui::TextDisabled("Only colour-validated enemy TAB players are eligible targets.");
+            } else if (page == 9) {
+                sectionTitle("VISIBILITY");
+                changed |= animatedToggle("Hold key to show roster",
+                    m_features.hypixelPanelHoldToShow, m_toggleAnimation[15], uiScale);
+                hotkeyControl("Panel bind", 3,
+                    static_cast<unsigned>(m_features.hypixelPanelHotkey));
+                sectionTitle("CARD SURFACE");
+                ImGui::TextDisabled("Background");
+                const bool black = m_features.hypixelPanelColor != 0xFFFFFFU;
+                if (black) ImGui::PushStyleColor(ImGuiCol_Button, guiAccent);
+                if (ImGui::Button("Black", ImVec2(104.0F * uiScale, 0.0F)) && !black) {
+                    m_features.hypixelPanelColor = 0x000000U;
+                    changed = true;
+                }
+                if (black) ImGui::PopStyleColor();
+                ImGui::SameLine();
+                if (!black) ImGui::PushStyleColor(ImGuiCol_Button, guiAccent);
+                if (ImGui::Button("White", ImVec2(104.0F * uiScale, 0.0F)) && black) {
+                    m_features.hypixelPanelColor = 0xFFFFFFU;
+                    changed = true;
+                }
+                if (!black) ImGui::PopStyleColor();
+                ImGui::SetNextItemWidth(300.0F * uiScale);
+                changed |= ImGui::SliderInt("Panel opacity",
+                    &m_features.hypixelPanelOpacity, 0, 100, "%d%%",
+                    ImGuiSliderFlags_AlwaysClamp);
+                std::array<float, 3U> statsRailColor = unpackRgb(
+                    m_features.hypixelRailColor);
+                ImGui::SetNextItemWidth(220.0F * uiScale);
+                if (ImGui::ColorEdit3("STATS rail", statsRailColor.data(),
+                        ImGuiColorEditFlags_NoInputs |
+                        ImGuiColorEditFlags_DisplayRGB)) {
+                    m_features.hypixelRailColor = packRgb(statsRailColor);
+                    changed = true;
+                }
+                ImGui::SetNextItemWidth(300.0F * uiScale);
+                changed |= ImGui::SliderInt("Rail opacity",
+                    &m_features.hypixelRailOpacity, 0, 100, "%d%%",
+                    ImGuiSliderFlags_AlwaysClamp);
+                ImGui::TextDisabled("Font size");
+                constexpr std::array<const char*, 4U> statsFonts{{"S", "M", "L", "XL"}};
+                for (int fontIndex = 0; fontIndex < 4; ++fontIndex) {
+                    if (fontIndex != 0) ImGui::SameLine();
+                    const bool selected = fontIndex == m_features.hypixelPanelFontIndex;
+                    if (selected) ImGui::PushStyleColor(ImGuiCol_Button, guiAccent);
+                    if (ImGui::Button(statsFonts[static_cast<std::size_t>(fontIndex)],
+                        ImVec2(62.0F * uiScale, 0.0F)) && !selected) {
+                        m_features.hypixelPanelFontIndex = fontIndex;
+                        changed = true;
+                    }
+                    if (selected) ImGui::PopStyleColor();
+                }
+                ImGui::Text("Panel size: %d%% W  /  %d%% H",
+                            m_features.hypixelPanelScale,
+                            m_features.hypixelPanelHeight);
+                ImGui::SameLine(0.0F, 16.0F * uiScale);
+                if (ImGui::Button("Reset position & size")) {
+                    m_features.hypixelPanelScale = 100;
+                    m_features.hypixelPanelHeight = 100;
+                    m_features.hypixelPanelX = -1;
+                    m_features.hypixelPanelY = -1;
+                    changed = true;
+                }
+                ImGui::TextDisabled("Open the GUI, drag the column header to move, or drag the lower-right handle to resize.");
+                sectionTitle("MANUAL LOOKUP");
+                ImGui::SetNextItemWidth(280.0F * uiScale);
+                ImGui::InputTextWithHint("##hypixelPlayer", "Minecraft player name",
+                    m_hypixelInput.data(), m_hypixelInput.size());
+                ImGui::SameLine();
+                if (ImGui::Button("Query", ImVec2(90.0F * uiScale, 0.0F))) {
+                    const std::string_view playerId(m_hypixelInput.data());
+                    const bool valid = !playerId.empty() && playerId.size() <= 16U &&
+                        std::all_of(playerId.begin(), playerId.end(), [](const char c) noexcept {
+                            return (c >= 'A' && c <= 'Z') ||
+                                   (c >= 'a' && c <= 'z') ||
+                                   (c >= '0' && c <= '9') || c == '_';
+                        });
+                    if (valid) {
+                        m_hypixelQuery.fill('\0');
+                        std::copy(playerId.begin(), playerId.end(), m_hypixelQuery.begin());
+                        m_hypixelQueryPending = true;
+                    }
+                }
+            } else if (page == 10) {
+                sectionTitle("LOCAL CHAT");
+                ImGui::TextWrapped("Match probes, roster teams, teammate decisions, own-bed ownership and automatic statistics requests are written only to your local chat.");
+                ImGui::Spacing();
+                ImGui::TextDisabled("Disable the page switch above for a clean normal session.");
+            } else if (page == 11) {
+                const auto publishBlacklistSettings = [&]() noexcept {
+                    m_blacklistAction = {};
+                    m_blacklistAction.type = BlacklistAction::Type::Settings;
+                    m_blacklistAction.panelEnabled = m_blacklist.panelEnabled;
+                    m_blacklistAction.matchAlertsEnabled = m_blacklist.matchAlertsEnabled;
+                    m_blacklistAction.allowIdOnlyNicks = m_blacklist.allowIdOnlyNicks;
+                    m_blacklistAction.showWithClickGui = m_blacklist.showWithClickGui;
+                    m_blacklistAction.collapsed = m_blacklist.collapsed;
+                    m_blacklistAction.panelOpacity = m_blacklist.panelOpacity;
+                    m_blacklistAction.panelColor = m_blacklist.panelColor;
+                    m_blacklistActionDirty = true;
+                };
+                sectionTitle("ENCOUNTER POLICY");
+                bool blacklistSettingsChanged = false;
+                blacklistSettingsChanged |= animatedToggle(
+                    "Warn once when a match starts", m_blacklist.matchAlertsEnabled,
+                    m_toggleAnimation[23], uiScale);
+                blacklistSettingsChanged |= animatedToggle(
+                    "Allow ID-only records for nicks", m_blacklist.allowIdOnlyNicks,
+                    m_toggleAnimation[24], uiScale);
+                sectionTitle("PANEL SURFACE");
+                blacklistSettingsChanged |= animatedToggle(
+                    "Show panel in game", m_blacklist.panelEnabled,
+                    m_toggleAnimation[22], uiScale);
+                blacklistSettingsChanged |= animatedToggle(
+                    "Show together with Click GUI", m_blacklist.showWithClickGui,
+                    m_toggleAnimation[33], uiScale);
+                ImGui::TextDisabled(
+                    "When disabled, records remain available on this page after opening the Click GUI.");
+                std::array<float, 3U> blacklistColor = unpackRgb(m_blacklist.panelColor);
+                ImGui::SetNextItemWidth(220.0F * uiScale);
+                if (ImGui::ColorEdit3("Panel background", blacklistColor.data(),
+                        ImGuiColorEditFlags_NoInputs |
+                        ImGuiColorEditFlags_DisplayRGB)) {
+                    m_blacklist.panelColor = packRgb(blacklistColor);
+                    blacklistSettingsChanged = true;
+                }
+                ImGui::SetNextItemWidth(300.0F * uiScale);
+                blacklistSettingsChanged |= ImGui::SliderInt(
+                    "Panel opacity", &m_blacklist.panelOpacity, 0, 100, "%d%%",
+                    ImGuiSliderFlags_AlwaysClamp);
+                if (blacklistSettingsChanged) publishBlacklistSettings();
+
+                sectionTitle("ADD RECENT PLAYER");
+                if (ImGui::Button(m_blacklistAddOpen ? "Close" : "+ Add player",
+                                  ImVec2(130.0F * uiScale, 0.0F))) {
+                    m_blacklistAddOpen = !m_blacklistAddOpen;
+                    if (!m_blacklistAddOpen) m_blacklistSelectedPlayer = -1;
+                }
+                if (m_blacklistAddOpen) {
+                    const char* preview = "Select a recent player";
+                    if (m_blacklistSelectedPlayer >= 0 &&
+                        static_cast<std::uint32_t>(m_blacklistSelectedPlayer) <
+                            snapshot.playerCount) {
+                        preview = snapshot.players[static_cast<std::size_t>(
+                            m_blacklistSelectedPlayer)].name.data();
+                    }
+                    ImGui::SetNextItemWidth(300.0F * uiScale);
+                    if (ImGui::BeginCombo("##blacklistRecent", preview)) {
+                        for (std::uint32_t index = 0U; index < snapshot.playerCount; ++index) {
+                            const PlayerIdentity& identity = snapshot.players[index];
+                            const bool selected = static_cast<int>(index) ==
+                                m_blacklistSelectedPlayer;
+                            char label[64]{};
+                            std::snprintf(label, sizeof(label), "%s%s",
+                                identity.name.data(),
+                                identity.uuid[0U] == '\0' ? "  (nick / no UUID)" : "");
+                            if (ImGui::Selectable(label, selected)) {
+                                m_blacklistSelectedPlayer = static_cast<int>(index);
+                                m_blacklistIdOnlyNick = identity.uuid[0U] == '\0';
+                            }
+                        }
+                        ImGui::EndCombo();
+                    }
+                    ImGui::SetNextItemWidth(360.0F * uiScale);
+                    ImGui::InputTextWithHint("##blacklistReason", "Reason",
+                        m_blacklistReasonInput.data(), m_blacklistReasonInput.size());
+                    if (m_blacklist.presetCount > 0U) {
+                        ImGui::TextDisabled("Reason presets");
+                        for (std::uint32_t index = 0U;
+                             index < m_blacklist.presetCount; ++index) {
+                            if (index != 0U) ImGui::SameLine();
+                            ImGui::PushID(static_cast<int>(index));
+                            if (ImGui::SmallButton(m_blacklist.presets[index].data()))
+                                std::snprintf(m_blacklistReasonInput.data(),
+                                    m_blacklistReasonInput.size(), "%s",
+                                    m_blacklist.presets[index].data());
+                            ImGui::PopID();
+                        }
+                    }
+                    if (m_blacklist.allowIdOnlyNicks)
+                        ImGui::Checkbox("Store ID only when UUID is unavailable",
+                                        &m_blacklistIdOnlyNick);
+                    ImGui::Checkbox("Warn on encounter", &m_blacklistWarnOnEncounter);
+                    const bool selectionValid = m_blacklistSelectedPlayer >= 0 &&
+                        static_cast<std::uint32_t>(m_blacklistSelectedPlayer) <
+                            snapshot.playerCount;
+                    if (!selectionValid) ImGui::BeginDisabled();
+                    if (ImGui::Button("Add to blacklist",
+                                      ImVec2(170.0F * uiScale, 0.0F)) &&
+                        selectionValid) {
+                        const PlayerIdentity& identity = snapshot.players[
+                            static_cast<std::size_t>(m_blacklistSelectedPlayer)];
+                        m_blacklistAction = {};
+                        m_blacklistAction.type = BlacklistAction::Type::Add;
+                        std::snprintf(m_blacklistAction.name.data(),
+                            m_blacklistAction.name.size(), "%s", identity.name.data());
+                        std::snprintf(m_blacklistAction.uuid.data(),
+                            m_blacklistAction.uuid.size(), "%s", identity.uuid.data());
+                        std::snprintf(m_blacklistAction.reason.data(),
+                            m_blacklistAction.reason.size(), "%s",
+                            m_blacklistReasonInput[0U] == '\0'
+                                ? "No reason supplied" : m_blacklistReasonInput.data());
+                        m_blacklistAction.idOnlyNick = m_blacklistIdOnlyNick;
+                        m_blacklistAction.warnOnEncounter = m_blacklistWarnOnEncounter;
+                        m_blacklistActionDirty = true;
+                        m_blacklistAddOpen = false;
+                        m_blacklistSelectedPlayer = -1;
+                        m_blacklistReasonInput.fill('\0');
+                    }
+                    if (!selectionValid) ImGui::EndDisabled();
+                }
+
+                sectionTitle("SAVED PLAYERS");
+                ImGui::BeginChild("##blacklistEntries", ImVec2(0.0F, 190.0F * uiScale),
+                                  false, ImGuiWindowFlags_AlwaysVerticalScrollbar);
+                for (std::uint32_t index = 0U; index < m_blacklist.count; ++index) {
+                    const BlacklistEntry& entry = m_blacklist.entries[index];
+                    ImGui::PushID(static_cast<int>(index));
+                    ImGui::PushFont(boldFont);
+                    ImGui::TextUnformatted(entry.name.data());
+                    ImGui::PopFont();
+                    if (entry.nick) {
+                        ImGui::SameLine();
+                        ImGui::TextColored(ImVec4(0.84F, 0.48F, 1.0F, 1.0F), "NICK");
+                    }
+                    ImGui::TextWrapped("%s", entry.reason.data());
+                    bool warning = entry.warnOnEncounter;
+                    if (ImGui::Checkbox("Encounter warning", &warning)) {
+                        m_blacklistAction = {};
+                        m_blacklistAction.type = BlacklistAction::Type::Warning;
+                        std::snprintf(m_blacklistAction.key.data(),
+                            m_blacklistAction.key.size(), "%s", entry.key.data());
+                        m_blacklistAction.warnOnEncounter = warning;
+                        m_blacklistActionDirty = true;
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Delete")) {
+                        m_blacklistAction = {};
+                        m_blacklistAction.type = BlacklistAction::Type::Remove;
+                        std::snprintf(m_blacklistAction.key.data(),
+                            m_blacklistAction.key.size(), "%s", entry.key.data());
+                        m_blacklistActionDirty = true;
+                    }
+                    ImGui::Separator();
+                    ImGui::PopID();
+                }
+                ImGui::EndChild();
+            } else if (page == 12) {
+                sectionTitle("ENABLED MODULE LIST");
+                ImGui::TextWrapped(
+                    "Shows enabled modules as animated text without a background. Drag the list while the Click GUI is open.");
+                std::array<float, 3U> textColor = unpackRgb(m_features.textGuiColor);
+                ImGui::SetNextItemWidth(220.0F * uiScale);
+                if (ImGui::ColorEdit3("Flow base color", textColor.data(),
+                        ImGuiColorEditFlags_NoInputs |
+                        ImGuiColorEditFlags_DisplayRGB)) {
+                    m_features.textGuiColor = packRgb(textColor);
+                    changed = true;
+                }
+                if (ImGui::Button("Reset text position",
+                                  ImVec2(180.0F * uiScale, 0.0F))) {
+                    m_features.textGuiX = -1;
+                    m_features.textGuiY = -1;
+                    changed = true;
+                }
+            } else {
+                sectionTitle("INTERFACE SIZE");
+                constexpr std::array<const char*, 4U> sizeLabels{"S", "M", "L", "XL"};
+                for (int sizeIndex = 0; sizeIndex < 4; ++sizeIndex) {
+                    if (sizeIndex != 0) ImGui::SameLine();
+                    const bool selected = m_guiScaleIndex == sizeIndex;
+                    if (selected) ImGui::PushStyleColor(ImGuiCol_Button, guiAccent);
+                    if (ImGui::Button(sizeLabels[static_cast<std::size_t>(sizeIndex)],
+                        ImVec2(64.0F * uiScale, 0.0F)) && !selected) {
+                        m_guiScaleIndex = sizeIndex;
+                        m_guiScaleDirty = true;
+                    }
+                    if (selected) ImGui::PopStyleColor();
+                }
+                sectionTitle("INPUT");
+                hotkeyControl("Open Click GUI", 1, m_menuHotkey);
+                ImGui::TextDisabled("ESC closes the GUI and restores Minecraft mouse capture.");
+                sectionTitle("THEME");
+                ImGui::TextWrapped("Use the sun/moon button at the bottom-left to switch between the light and dark interface.");
+                std::array<float, 3U> accentColor = unpackRgb(
+                    m_features.clickGuiAccentColor);
+                ImGui::SetNextItemWidth(240.0F * uiScale);
+                if (ImGui::ColorEdit3("Theme accent", accentColor.data(),
+                        ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_DisplayRGB)) {
+                    m_features.clickGuiAccentColor = packRgb(accentColor);
+                    changed = true;
+                }
+                sectionTitle("SERVER SAFETY");
+                changed |= animatedToggle(
+                    "Allow movement modules on Hypixel",
+                    m_features.allowHypixelMovement,
+                    m_toggleAnimation[34], uiScale);
+                ImGui::TextColored(ImVec4(1.0F, 0.34F, 0.28F, 1.0F),
+                    "DANGER: Fly, BHop and Scaffold can cause a server ban.");
+                ImGui::TextWrapped(
+                    "By default these three modules are force-disabled whenever the current server address is Hypixel. Enable this exception only if you explicitly accept that risk.");
             }
-            ImGui::TextDisabled("Press the configured bind again to restore Minecraft mouse grab");
+            settingsVertexEnd = settingsDraw != nullptr
+                ? settingsDraw->VtxBuffer.Size : settingsVertexStart;
+            ImGui::EndChild();
+            ImGui::PopStyleVar();
+
+            // The renderer applies the same guard as AgentRuntime so a click
+            // cannot leave a high-risk module enabled for even one rendered
+            // frame before the next runtime snapshot arrives.
+            if (snapshot.hypixelServer && !m_features.allowHypixelMovement &&
+                (m_features.scaffoldEnabled || m_features.flyEnabled ||
+                 m_features.bhopEnabled)) {
+                if (m_features.scaffoldEnabled && !featuresBefore.scaffoldEnabled)
+                    enqueueMessage(
+                        "WARNING: Scaffold can cause a server ban. Use only offline.",
+                        false);
+                if (m_features.flyEnabled && !featuresBefore.flyEnabled)
+                    enqueueMessage(
+                        "WARNING: Fly can cause a server ban. Use only offline.",
+                        false);
+                if (m_features.bhopEnabled && !featuresBefore.bhopEnabled)
+                    enqueueMessage(
+                        "WARNING: BHop can cause a server ban. Use only offline.",
+                        false);
+                m_features.scaffoldEnabled = false;
+                m_features.flyEnabled = false;
+                m_features.bhopEnabled = false;
+                enqueueMessage(
+                    "BLOCKED: movement module disabled on Hypixel. See Interface / Server Safety.",
+                    false);
+                changed = true;
+            }
             m_featureSettingsDirty = m_featureSettingsDirty || changed;
             if (changed) enqueueFeatureToasts(featuresBefore, m_features);
+            windowDraw->PopClipRect();
+
+            // Treat all generated GUI content as one flat layer. Scaling its
+            // vertices once around the window centre makes the rail, header and
+            // controls gather/scatter radially instead of appearing to travel
+            // from the top-left. This is O(number of GUI vertices), requires no
+            // per-widget animation state and leaves the final layout untouched.
+            const float contentScale = spotlightScale;
+            const ImVec2 contentCenter(windowPosition.x + windowSize.x * 0.5F,
+                                       windowPosition.y + windowSize.y * 0.5F);
+            const auto transformContent = [&](ImDrawList* const drawList,
+                                              int begin, int end,
+                                              const bool transformClips) noexcept {
+                if (drawList == nullptr || std::abs(contentScale - 1.0F) < 0.0001F)
+                    return;
+                begin = std::clamp(begin, 0, drawList->VtxBuffer.Size);
+                end = std::clamp(end, begin, drawList->VtxBuffer.Size);
+                for (int vertexIndex = begin; vertexIndex < end; ++vertexIndex) {
+                    ImVec2& position = drawList->VtxBuffer[vertexIndex].pos;
+                    position.x = contentCenter.x +
+                        (position.x - contentCenter.x) * contentScale;
+                    position.y = contentCenter.y +
+                        (position.y - contentCenter.y) * contentScale;
+                }
+                if (transformClips) {
+                    for (ImDrawCmd& command : drawList->CmdBuffer) {
+                        command.ClipRect.x = contentCenter.x +
+                            (command.ClipRect.x - contentCenter.x) * contentScale;
+                        command.ClipRect.y = contentCenter.y +
+                            (command.ClipRect.y - contentCenter.y) * contentScale;
+                        command.ClipRect.z = contentCenter.x +
+                            (command.ClipRect.z - contentCenter.x) * contentScale;
+                        command.ClipRect.w = contentCenter.y +
+                            (command.ClipRect.w - contentCenter.y) * contentScale;
+                    }
+                }
+            };
+            const int parentContentVertexEnd = windowDraw->VtxBuffer.Size;
+            transformContent(windowDraw, parentContentVertexStart,
+                             parentContentVertexEnd, true);
+            if (settingsDraw != windowDraw)
+                transformContent(settingsDraw, settingsVertexStart,
+                                 settingsVertexEnd, true);
+            transformContent(backgroundDraw, shadowVertexStart,
+                             backgroundDraw->VtxBuffer.Size, false);
         }
         ImGui::End();
-        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(15);
+        ImGui::PopStyleVar(4);
     }
 
-    if (m_features.hypixelPanelEnabled) {
-        ImGui::SetNextWindowPos(ImVec2(22.0F * uiScale, 22.0F * uiScale),
-                                ImGuiCond_FirstUseEver);
-        ImGui::SetNextWindowSize(ImVec2(300.0F * uiScale, 0.0F), ImGuiCond_FirstUseEver);
-        ImGuiWindowFlags hypixelFlags = ImGuiWindowFlags_NoCollapse |
-                                       ImGuiWindowFlags_AlwaysAutoResize;
-        if (!interactive) hypixelFlags |= ImGuiWindowFlags_NoInputs;
-        if (ImGui::Begin("Hypixel Bed Wars", nullptr, hypixelFlags)) {
-            ImGui::Text("State: %s", hypixelStateText(m_hypixel.state));
-            if (m_hypixel.displayName[0] != '\0') {
-                ImGui::Text("Player: %s", m_hypixel.displayName.data());
-            }
-            if (m_hypixel.state == HypixelOverlaySnapshot::State::Ready) {
-                ImGui::Text("W/L  %lld / %lld    ratio %.2f",
-                            static_cast<long long>(m_hypixel.wins),
-                            static_cast<long long>(m_hypixel.losses), m_hypixel.winRate);
-                ImGui::Text("Final K/D  %lld / %lld    FKDR %.2f",
-                            static_cast<long long>(m_hypixel.finalKills),
-                            static_cast<long long>(m_hypixel.finalDeaths), m_hypixel.fkdr);
-                ImGui::Text("Beds broken/lost  %lld / %lld",
-                            static_cast<long long>(m_hypixel.bedsBroken),
-                            static_cast<long long>(m_hypixel.bedsLost));
-            }
-            if (m_hypixel.status[0] != '\0') ImGui::TextWrapped("%s", m_hypixel.status.data());
+    // Text GUI is deliberately a text-only HUD: no window surface is drawn.
+    // A single invisible hit target owns dragging while the Click GUI is open,
+    // avoiding competing per-row hover/cursor state.
+    if (m_features.textGuiEnabled) {
+        struct TextModule { const char* name; bool enabled; };
+        const std::array<TextModule, 12U> modules{{
+            {"Player ESP", m_features.entityEspEnabled},
+            {"Bed ESP", m_features.bedEspEnabled},
+            {"Nametag", m_features.nametagEnabled},
+            {"Bed Alert", m_features.bedThreatAlertsEnabled},
+            {"Safewalk", m_features.safewalkEnabled},
+            {"Scaffold", m_features.scaffoldEnabled},
+            {"Fly", m_features.flyEnabled},
+            {"BHop", m_features.bhopEnabled},
+            {"Aim Assist", m_features.aimAssistEnabled},
+            {"Player Stats", m_features.hypixelPanelEnabled},
+            {"Debug", m_features.debugChatEnabled},
+            {"Blacklist", m_blacklist.panelEnabled}}};
+        int visibleCount = 0;
+        float maximumTextWidth = 0.0F;
+        for (const TextModule& module : modules) {
+            if (!module.enabled) continue;
+            ++visibleCount;
+            maximumTextWidth = std::max(maximumTextWidth,
+                                        ImGui::CalcTextSize(module.name).x);
         }
-        ImGui::End();
-
-        if (m_playerStats.count > 0U) {
-            ImGui::SetNextWindowPos(
-                ImVec2(std::max(18.0F, io.DisplaySize.x - 390.0F * uiScale),
-                       22.0F * uiScale), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(430.0F * uiScale, 0.0F), ImGuiCond_FirstUseEver);
-            ImGuiWindowFlags boardFlags = ImGuiWindowFlags_NoCollapse |
-                                          ImGuiWindowFlags_AlwaysAutoResize;
-            if (!interactive) boardFlags |= ImGuiWindowFlags_NoInputs;
-            if (ImGui::Begin("Live Bed Wars Players", nullptr, boardFlags)) {
-                ImGui::TextDisabled("Automatic roster lookup  /  active matches only");
-                ImGui::Spacing();
-                std::array<std::uint32_t, PlayerStatsOverlaySnapshot::Capacity> order{};
-                for (std::uint32_t index = 0U; index < m_playerStats.count; ++index) {
-                    order[index] = index;
+        if (visibleCount > 0) {
+            const float width = maximumTextWidth + 20.0F * uiScale;
+            const float lineHeight = ImGui::GetTextLineHeight() + 3.0F * uiScale;
+            const float height = lineHeight * static_cast<float>(visibleCount) +
+                                 8.0F * uiScale;
+            const float defaultX = std::max(5.0F, io.DisplaySize.x - width - 16.0F);
+            const float defaultY = std::max(5.0F, io.DisplaySize.y * 0.18F);
+            float textX = m_features.textGuiX < 0 ? defaultX
+                : io.DisplaySize.x * static_cast<float>(m_features.textGuiX) / 1000.0F;
+            float textY = m_features.textGuiY < 0 ? defaultY
+                : io.DisplaySize.y * static_cast<float>(m_features.textGuiY) / 1000.0F;
+            textX = std::clamp(textX, 4.0F,
+                std::max(4.0F, io.DisplaySize.x - width - 4.0F));
+            textY = std::clamp(textY, 4.0F,
+                std::max(4.0F, io.DisplaySize.y - height - 4.0F));
+            ImGui::SetNextWindowPos(ImVec2(textX, textY), ImGuiCond_Always);
+            ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.0F);
+            ImGuiWindowFlags textFlags = ImGuiWindowFlags_NoTitleBar |
+                ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+                ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground |
+                ImGuiWindowFlags_NoScrollbar;
+            if (!interactive) textFlags |= ImGuiWindowFlags_NoInputs;
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+            if (ImGui::Begin("##TextGuiHud", nullptr, textFlags)) {
+                ImGui::InvisibleButton("##TextGuiDrag", ImVec2(width, height));
+                if (interactive && ImGui::IsItemActive() &&
+                    ImGui::IsMouseDragging(ImGuiMouseButton_Left, 0.0F)) {
+                    textX = std::clamp(textX + io.MouseDelta.x, 4.0F,
+                        std::max(4.0F, io.DisplaySize.x - width - 4.0F));
+                    textY = std::clamp(textY + io.MouseDelta.y, 4.0F,
+                        std::max(4.0F, io.DisplaySize.y - height - 4.0F));
+                    m_features.textGuiX = std::clamp(static_cast<int>(std::lround(
+                        textX / std::max(1.0F, io.DisplaySize.x) * 1000.0F)), 0, 1000);
+                    m_features.textGuiY = std::clamp(static_cast<int>(std::lround(
+                        textY / std::max(1.0F, io.DisplaySize.y) * 1000.0F)), 0, 1000);
+                    m_featureSettingsDirty = true;
                 }
-                const auto colorCode = [&](const PlayerStatsEntry& entry) noexcept {
-                    return entry.teamPrefix[0U] == static_cast<char>(0xC2) &&
-                           entry.teamPrefix[1U] == static_cast<char>(0xA7)
-                        ? entry.teamPrefix[2U] : 'f';
-                };
-                std::sort(order.begin(), order.begin() + m_playerStats.count,
-                          [&](const std::uint32_t first, const std::uint32_t second) noexcept {
-                              const PlayerStatsEntry& a = m_playerStats.entries[first];
-                              const PlayerStatsEntry& b = m_playerStats.entries[second];
-                              const char ac = colorCode(a);
-                              const char bc = colorCode(b);
-                              return ac != bc ? ac < bc : std::strcmp(a.name.data(), b.name.data()) < 0;
-                          });
-                ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8.0F * uiScale, 8.0F * uiScale));
-                ImGui::BeginChild("##liveRosterCards", ImVec2(0, 0), false, ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_AlwaysAutoResize);
-                char currentTeam = '\0';
-                for (std::uint32_t ordered = 0U; ordered < m_playerStats.count; ++ordered) {
-                    const PlayerStatsEntry& player = m_playerStats.entries[order[ordered]];
-                    const char code = colorCode(player);
-                    if (code != currentTeam) {
-                        if (ordered > 0) ImGui::EndGroup();
-                        if (ordered > 0) ImGui::SameLine(0.0F, 16.0F * uiScale);
-                        currentTeam = code;
-                        ImGui::BeginGroup();
-                        ImGui::TextColored(teamColor(code), "TEAM %c", static_cast<char>(std::toupper(static_cast<unsigned char>(code))));
-                        ImGui::Spacing();
-                    }
-                    
-                    ImVec2 pos = ImGui::GetCursorScreenPos();
-                    ImVec2 size(140.0F * uiScale, 64.0F * uiScale);
-                    ImDrawList* drawList = ImGui::GetWindowDrawList();
-                    
-                    drawList->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), IM_COL32(35, 35, 45, 255), 8.0F * uiScale);
-                    drawList->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), IM_COL32(60, 60, 75, 255), 8.0F * uiScale, 0, 1.5F * uiScale);
-                    
-                    ImGui::PushClipRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), true);
-                    drawList->AddText(m_fonts[m_appliedGuiScaleIndex], 16.0F * uiScale, ImVec2(pos.x + 8.0F * uiScale, pos.y + 6.0F * uiScale), ImGui::ColorConvertFloat4ToU32(teamColor(code)), player.name.data());
-                    
-                    const ImU32 fkdrColor = player.fkdr >= 3.0 ? IM_COL32(89, 235, 122, 255) : (player.fkdr >= 1.0 ? IM_COL32(255, 214, 82, 255) : IM_COL32(255, 97, 107, 255));
-                    char fkdrText[32];
-                    std::snprintf(fkdrText, sizeof(fkdrText), "FKDR: %.2f", player.fkdr);
-                    drawList->AddText(m_fonts[m_appliedGuiScaleIndex], 14.0F * uiScale, ImVec2(pos.x + 8.0F * uiScale, pos.y + 26.0F * uiScale), fkdrColor, fkdrText);
-                    
-                    char starText[32];
-                    std::snprintf(starText, sizeof(starText), "%d Stars | Lvl %d", player.stars, player.level);
-                    drawList->AddText(m_fonts[m_appliedGuiScaleIndex], 14.0F * uiScale, ImVec2(pos.x + 8.0F * uiScale, pos.y + 42.0F * uiScale), IM_COL32(180, 180, 180, 255), starText);
-                    
-                    ImGui::PopClipRect();
-                    ImGui::Dummy(size);
+                ImDrawList* const textDraw = ImGui::GetWindowDrawList();
+                const std::array<float, 3U> baseRgb =
+                    unpackRgb(m_features.textGuiColor);
+                const ImVec4 base(baseRgb[0U], baseRgb[1U], baseRgb[2U], 1.0F);
+                int row = 0;
+                for (const TextModule& module : modules) {
+                    if (!module.enabled) continue;
+                    const float wave = 0.5F + 0.5F * std::sin(
+                        static_cast<float>(ImGui::GetTime()) * 2.2F +
+                        static_cast<float>(row) * 0.62F);
+                    const ImVec4 flowing(
+                        base.x + (1.0F - base.x) * wave * 0.34F,
+                        base.y + (1.0F - base.y) * wave * 0.34F,
+                        base.z + (1.0F - base.z) * wave * 0.34F, 1.0F);
+                    const ImVec2 textSize = ImGui::CalcTextSize(module.name);
+                    textDraw->AddText(
+                        ImVec2(textX + width - textSize.x - 4.0F * uiScale,
+                               textY + 4.0F * uiScale + lineHeight * row),
+                        ImGui::ColorConvertFloat4ToU32(flowing), module.name);
+                    ++row;
                 }
-                if (m_playerStats.count > 0) ImGui::EndGroup();
-                ImGui::EndChild();
-                ImGui::PopStyleVar();
             }
             ImGui::End();
+            ImGui::PopStyleVar();
         }
+    }
+
+    const bool statsHotkeyDown =
+        (::GetAsyncKeyState(m_features.hypixelPanelHotkey) & 0x8000) != 0;
+    const bool statsPanelTarget = m_features.hypixelPanelEnabled &&
+        snapshot.matchActive && snapshot.playerCount > 0U &&
+        (!m_features.hypixelPanelHoldToShow || statsHotkeyDown || interactive);
+    advancePresentationSpring(m_statsPanelProgress, m_statsPanelVelocity,
+                              statsPanelTarget ? 1.0F : 0.0F, delta);
+
+    if (m_statsPanelProgress > 0.005F) {
+            const float panelLinear = std::clamp(m_statsPanelProgress, 0.0F, 1.0F);
+            const float panelEase = panelLinear * panelLinear *
+                                    (3.0F - 2.0F * panelLinear);
+            const float panelPresentationScale =
+                1.26F - 0.26F * m_statsPanelProgress;
+            const float panelWidthScale = static_cast<float>(std::clamp(
+                m_features.hypixelPanelScale, 70, 160)) / 100.0F;
+            const float panelHeightScale = static_cast<float>(std::clamp(
+                m_features.hypixelPanelHeight, 60, 400)) / 100.0F;
+            const float panelWidth = std::clamp(
+                448.0F * panelWidthScale, 420.0F,
+                std::max(420.0F, io.DisplaySize.x * 0.92F));
+            const float panelHeight = std::clamp(
+                230.0F * panelHeightScale, 138.0F,
+                std::max(138.0F, io.DisplaySize.y - 8.0F));
+            const float defaultPanelX = std::max(6.0F,
+                io.DisplaySize.x - panelWidth - 12.0F);
+            const float storedPanelX = m_features.hypixelPanelX < 0
+                ? defaultPanelX
+                : io.DisplaySize.x * static_cast<float>(m_features.hypixelPanelX) / 1000.0F;
+            const float storedPanelY = m_features.hypixelPanelY < 0
+                ? 12.0F
+                : io.DisplaySize.y * static_cast<float>(m_features.hypixelPanelY) / 1000.0F;
+            const float targetPanelX = std::clamp(storedPanelX, 4.0F,
+                std::max(4.0F, io.DisplaySize.x - panelWidth - 4.0F));
+            const float targetPanelY = std::clamp(storedPanelY, 4.0F,
+                std::max(4.0F, io.DisplaySize.y - panelHeight - 4.0F));
+            ImGui::SetNextWindowPos(ImVec2(targetPanelX, targetPanelY),
+                                    ImGuiCond_Always);
+            ImGui::SetNextWindowSize(
+                ImVec2(panelWidth, panelHeight), ImGuiCond_Always);
+            ImGui::SetNextWindowBgAlpha(0.0F);
+            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, panelEase);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                                ImVec2(0.0F, 0.0F));
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0F);
+            ImGuiWindowFlags boardFlags = ImGuiWindowFlags_NoTitleBar |
+                ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBackground;
+            if (!interactive) boardFlags |= ImGuiWindowFlags_NoInputs;
+            ImDrawList* statsCardDraw = nullptr;
+            ImDrawList* statsRowsDraw = nullptr;
+            int statsCardVertexStart = 0;
+            int statsCardVertexEnd = 0;
+            int statsRowsVertexStart = 0;
+            int statsRowsVertexEnd = 0;
+            if (ImGui::Begin("##LiveBedWarsPlayers", nullptr, boardFlags)) {
+                ImDrawList* const cardDraw = ImGui::GetWindowDrawList();
+                statsCardDraw = cardDraw;
+                statsCardVertexStart = cardDraw->VtxBuffer.Size;
+                const ImVec2 cardMin = ImGui::GetWindowPos();
+                const ImVec2 cardMax(cardMin.x + ImGui::GetWindowWidth(),
+                                     cardMin.y + ImGui::GetWindowHeight());
+                cardDraw->AddRectFilled(
+                    ImVec2(cardMin.x + 3.0F, cardMin.y + 5.0F),
+                    ImVec2(cardMax.x + 3.0F, cardMax.y + 5.0F),
+                    IM_COL32(0, 0, 0, 72), 12.0F);
+                const int statsPanelAlpha = static_cast<int>(std::lround(
+                    std::clamp(m_features.hypixelPanelOpacity, 0, 100) * 2.55));
+                const bool whitePanel = m_features.hypixelPanelColor == 0xFFFFFFU;
+                const ImU32 primaryText = whitePanel
+                    ? IM_COL32(14, 14, 18, 255) : IM_COL32(248, 248, 250, 255);
+                const ImU32 secondaryText = whitePanel
+                    ? IM_COL32(55, 55, 62, 255) : IM_COL32(210, 210, 218, 255);
+                if (statsPanelAlpha < 250) {
+                    captureBackdropTexture();
+                    if (m_blurTexture != 0U) {
+                        // 13-tap separable-Gaussian approximation. The former
+                        // five equal acrylic samples preserved hard edges;
+                        // weighted centre/axis/diagonal taps produce a softer
+                        // Gaussian backdrop without allocating another FBO.
+                        struct BlurTap final { ImVec2 offset; int alpha; };
+                        constexpr std::array<BlurTap, 13U> blurTaps{{
+                            {ImVec2(0, 0), 54},
+                            {ImVec2(-2, 0), 40}, {ImVec2(2, 0), 40},
+                            {ImVec2(0, -2), 40}, {ImVec2(0, 2), 40},
+                            {ImVec2(-2, -2), 26}, {ImVec2(2, -2), 26},
+                            {ImVec2(-2, 2), 26}, {ImVec2(2, 2), 26},
+                            {ImVec2(-5, 0), 17}, {ImVec2(5, 0), 17},
+                            {ImVec2(0, -5), 17}, {ImVec2(0, 5), 17}}};
+                        const float exitBlurSpread = 1.0F +
+                            (1.0F - panelLinear) * 2.8F;
+                        for (const BlurTap& tap : blurTaps) {
+                            const float left = std::clamp(cardMin.x +
+                                                          tap.offset.x * exitBlurSpread,
+                                                          0.0F, io.DisplaySize.x);
+                            const float top = std::clamp(cardMin.y +
+                                                         tap.offset.y * exitBlurSpread,
+                                                         0.0F, io.DisplaySize.y);
+                            const float right = std::clamp(cardMax.x +
+                                                           tap.offset.x * exitBlurSpread,
+                                                           0.0F, io.DisplaySize.x);
+                            const float bottom = std::clamp(cardMax.y +
+                                                            tap.offset.y * exitBlurSpread,
+                                                            0.0F, io.DisplaySize.y);
+                            cardDraw->AddImageRounded(
+                                reinterpret_cast<ImTextureID>(
+                                    static_cast<std::uintptr_t>(m_blurTexture)),
+                                cardMin, cardMax,
+                                ImVec2(left / io.DisplaySize.x,
+                                       1.0F - top / io.DisplaySize.y),
+                                ImVec2(right / io.DisplaySize.x,
+                                       1.0F - bottom / io.DisplaySize.y),
+                                IM_COL32(255, 255, 255, static_cast<int>(
+                                    std::lround(static_cast<float>(tap.alpha) * panelEase))),
+                                12.0F);
+                        }
+                    }
+                }
+                cardDraw->AddRectFilled(cardMin, cardMax,
+                    packedRgbColor(whitePanel ? 0xFFFFFFU : 0x000000U, statsPanelAlpha),
+                    12.0F);
+                cardDraw->AddRect(cardMin, cardMax,
+                    whitePanel ? IM_COL32(0, 0, 0, 52) : IM_COL32(255, 255, 255, 48),
+                    12.0F, 0, 1.0F);
+                const int statsRailAlpha = static_cast<int>(std::lround(
+                    std::clamp(m_features.hypixelRailOpacity, 0, 100) * 2.55));
+                cardDraw->AddRectFilled(
+                    cardMin, ImVec2(cardMin.x + 24.0F, cardMax.y),
+                    packedRgbColor(m_features.hypixelRailColor, statsRailAlpha),
+                    12.0F,
+                    ImDrawFlags_RoundCornersLeft);
+                const std::size_t statsFontIndex = static_cast<std::size_t>(
+                    std::clamp(m_features.hypixelPanelFontIndex, 0, 3));
+                ImFont* const panelFont = m_fonts[statsFontIndex] != nullptr
+                    ? m_fonts[statsFontIndex] : ImGui::GetFont();
+                ImFont* const panelBold = m_boldFonts[statsFontIndex] != nullptr
+                    ? m_boldFonts[statsFontIndex] : panelFont;
+                // Independent geometry: resizing the card never stretches the
+                // rasterized font or row pitch. This keeps every row legible at
+                // all GUI size presets and prevents baseline overlap.
+                const float panelFontSize = panelFont->LegacySize;
+                const float panelBoldSize = panelBold->LegacySize;
+                const float rowHeight = std::ceil(std::max(20.0F,
+                                                          panelFontSize + 5.0F));
+                constexpr float railWidth = 24.0F;
+                const float headerHeight = std::ceil(panelBoldSize + 11.0F);
+                if (interactive && panelLinear > 0.985F) {
+                    const ImVec2 resizeMin(cardMax.x - 22.0F,
+                                           cardMax.y - 22.0F);
+                    const bool resizeHovered = ImGui::IsMouseHoveringRect(
+                        resizeMin, cardMax, false);
+                    const bool headerHovered = ImGui::IsMouseHoveringRect(
+                        cardMin,
+                        ImVec2(cardMax.x - 22.0F,
+                               cardMin.y + headerHeight), false);
+                    const bool railHovered = ImGui::IsMouseHoveringRect(
+                        cardMin,
+                        ImVec2(cardMin.x + railWidth, cardMax.y), false);
+                    if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                        if (resizeHovered) {
+                            m_statsPanelResizing = true;
+                            m_statsPanelDragging = false;
+                            m_statsPanelResizeStartX = io.MousePos.x;
+                            m_statsPanelResizeStartY = io.MousePos.y;
+                            m_statsPanelResizeStartScale = m_features.hypixelPanelScale;
+                            m_statsPanelResizeStartHeight = m_features.hypixelPanelHeight;
+                        } else if (headerHovered || railHovered) {
+                            m_statsPanelDragging = true;
+                            m_statsPanelResizing = false;
+                            m_statsPanelDragStartMouseX = io.MousePos.x;
+                            m_statsPanelDragStartMouseY = io.MousePos.y;
+                            m_statsPanelDragStartPanelX = targetPanelX;
+                            m_statsPanelDragStartPanelY = targetPanelY;
+                        }
+                    }
+                    if (m_statsPanelResizing && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                        const float dragX = io.MousePos.x - m_statsPanelResizeStartX;
+                        const float dragY = io.MousePos.y - m_statsPanelResizeStartY;
+                        const int resizedWidth = std::clamp(
+                            m_statsPanelResizeStartScale + static_cast<int>(std::lround(
+                                dragX * 100.0F / 448.0F)), 70, 160);
+                        const int resizedHeight = std::clamp(
+                            m_statsPanelResizeStartHeight + static_cast<int>(std::lround(
+                                dragY * 100.0F / 230.0F)), 60, 400);
+                        if (resizedWidth != m_features.hypixelPanelScale ||
+                            resizedHeight != m_features.hypixelPanelHeight) {
+                            m_features.hypixelPanelScale = resizedWidth;
+                            m_features.hypixelPanelHeight = resizedHeight;
+                            m_statsPanelTransformDirty = true;
+                        }
+                        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
+                    } else if (m_statsPanelDragging &&
+                               ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                        // Calculate from the immutable press origin. Accumulating
+                        // MouseDelta into a normalized/rounded position caused
+                        // quantization feedback, lag and cursor-shape flicker.
+                        const float movedX = m_statsPanelDragStartPanelX +
+                            (io.MousePos.x - m_statsPanelDragStartMouseX);
+                        const float movedY = m_statsPanelDragStartPanelY +
+                            (io.MousePos.y - m_statsPanelDragStartMouseY);
+                        m_features.hypixelPanelX = std::clamp(static_cast<int>(std::lround(
+                            movedX / std::max(1.0F, io.DisplaySize.x) * 1000.0F)), 0, 1000);
+                        m_features.hypixelPanelY = std::clamp(static_cast<int>(std::lround(
+                            movedY / std::max(1.0F, io.DisplaySize.y) * 1000.0F)), 0, 1000);
+                        m_statsPanelTransformDirty = true;
+                        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+                    } else if (resizeHovered) {
+                        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
+                    } else if (headerHovered || railHovered) {
+                        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+                    }
+                    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+                        (m_statsPanelDragging || m_statsPanelResizing)) {
+                        if (m_statsPanelTransformDirty) m_featureSettingsDirty = true;
+                        m_statsPanelTransformDirty = false;
+                        m_statsPanelDragging = false;
+                        m_statsPanelResizing = false;
+                    }
+                }
+                constexpr std::array<char, 5U> verticalLabel{'S', 'T', 'A', 'T', 'S'};
+                const float labelAdvance = std::max(13.0F, panelBoldSize * 0.84F);
+                const float labelHeight = panelBoldSize +
+                    labelAdvance * static_cast<float>(verticalLabel.size() - 1U);
+                const float labelStartY = cardMin.y +
+                    std::max(0.0F, (panelHeight - labelHeight) * 0.5F);
+                for (std::size_t letter = 0U; letter < verticalLabel.size(); ++letter) {
+                    const char text[2]{verticalLabel[letter], '\0'};
+                    const ImVec2 textSize = panelBold->CalcTextSizeA(
+                        panelBoldSize, FLT_MAX, 0.0F, text);
+                    cardDraw->AddText(panelBold, panelBoldSize,
+                        ImVec2(cardMin.x + (railWidth - textSize.x) * 0.5F,
+                               labelStartY + static_cast<float>(letter) * labelAdvance),
+                        contrastingTextColor(m_features.hypixelRailColor), text);
+                }
+                const ImVec2 columnHeader(cardMin.x + railWidth + 4.0F,
+                                          cardMin.y + 6.0F);
+                const float contentWidth = std::max(360.0F, panelWidth - railWidth - 8.0F);
+                const std::array<float, 8U> columns{{
+                    4.0F, contentWidth * 0.335F, contentWidth * 0.445F,
+                    contentWidth * 0.555F, contentWidth * 0.655F,
+                    contentWidth * 0.755F, contentWidth * 0.865F,
+                    contentWidth * 0.955F}};
+                const ImU32 headerColor = primaryText;
+                const auto header = [&](const float x, const char* text) noexcept {
+                    cardDraw->AddText(panelBold, panelBoldSize,
+                        ImVec2(columnHeader.x + x, columnHeader.y),
+                        headerColor, text);
+                };
+                constexpr std::array<const char*, 8U> headers{{
+                    "PLAYER", "STAR", "FKDR", "WLR", "BBLR", "FINALS", "WINS", "WS"}};
+                for (std::size_t column = 0U; column < headers.size(); ++column)
+                    header(columns[column], headers[column]);
+                ImGui::SetCursorScreenPos(ImVec2(columnHeader.x,
+                                                  cardMin.y + headerHeight));
+                std::array<std::uint32_t, GameSnapshot::MaxDiscoveredPlayers> order{};
+                for (std::uint32_t index = 0U; index < snapshot.playerCount; ++index) {
+                    order[index] = index;
+                }
+                const auto teamRank = [](const char code) noexcept {
+                    constexpr std::array<char, 8U> orderCodes{
+                        'c', '9', 'a', 'e', 'b', 'f', 'd', '7'};
+                    const auto found = std::find(orderCodes.begin(), orderCodes.end(), code);
+                    return found == orderCodes.end()
+                        ? 8 : static_cast<int>(found - orderCodes.begin());
+                };
+                const auto teamLetter = [](const char code) noexcept {
+                    switch (code) {
+                    case 'c': return 'R';
+                    case '9': return 'B';
+                    case 'a': return 'G';
+                    case 'e': return 'Y';
+                    case 'b': return 'A';
+                    case 'f': return 'W';
+                    case 'd': return 'P';
+                    case '7': return 'S';
+                    default: return '?';
+                    }
+                };
+                std::sort(order.begin(), order.begin() + snapshot.playerCount,
+                          [&](const std::uint32_t first, const std::uint32_t second) noexcept {
+                              const PlayerIdentity& a = snapshot.players[first];
+                              const PlayerIdentity& b = snapshot.players[second];
+                              const int ar = teamRank(a.teamColor);
+                              const int br = teamRank(b.teamColor);
+                              return ar != br ? ar < br
+                                  : std::strcmp(a.name.data(), b.name.data()) < 0;
+                          });
+                ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0F, 0.0F));
+                ImGui::BeginChild("##liveRosterRows",
+                    ImVec2(panelWidth - railWidth - 8.0F,
+                           panelHeight - headerHeight - 4.0F),
+                    false, ImGuiWindowFlags_NoBackground);
+                statsRowsDraw = ImGui::GetWindowDrawList();
+                statsRowsVertexStart = statsRowsDraw != nullptr
+                    ? statsRowsDraw->VtxBuffer.Size : 0;
+                for (std::uint32_t ordered = 0U; ordered < snapshot.playerCount; ++ordered) {
+                    const PlayerIdentity& identity = snapshot.players[order[ordered]];
+                    const char code = identity.teamColor;
+                    const PlayerStatsEntry* stats = nullptr;
+                    for (std::uint32_t statsIndex = 0U;
+                         statsIndex < m_playerStats.count; ++statsIndex) {
+                        if (std::strcmp(m_playerStats.entries[statsIndex].name.data(),
+                                        identity.name.data()) == 0) {
+                            stats = &m_playerStats.entries[statsIndex];
+                            break;
+                        }
+                    }
+                    const ImVec2 pos = ImGui::GetCursorScreenPos();
+                    const ImVec2 size(ImGui::GetContentRegionAvail().x,
+                                      rowHeight);
+                    ImDrawList* drawList = ImGui::GetWindowDrawList();
+                    const int rowAlpha = (ordered & 1U) != 0U ? 18 : 10;
+                    drawList->AddRectFilled(pos,
+                        ImVec2(pos.x + size.x, pos.y + size.y),
+                        whitePanel ? IM_COL32(0, 0, 0, rowAlpha)
+                                   : IM_COL32(255, 255, 255, rowAlpha),
+                        0.0F);
+                    const float textY = pos.y + (rowHeight - panelFontSize) * 0.5F;
+                    const char teamTag[4]{'[', teamLetter(code), ']', '\0'};
+                    drawList->AddText(panelBold, panelBoldSize,
+                        ImVec2(pos.x + columns[0U], textY),
+                        ImGui::ColorConvertFloat4ToU32(teamColor(code)), teamTag);
+                    const ImVec4 nameClip(
+                        pos.x + 30.0F, pos.y,
+                        pos.x + columns[1U] - 5.0F, pos.y + size.y);
+                    drawList->AddText(panelFont, panelFontSize,
+                        ImVec2(pos.x + 30.0F, textY), primaryText,
+                        identity.name.data(), nullptr, 0.0F, &nameClip);
+                    if (stats == nullptr) {
+                        drawList->AddText(panelFont, panelFontSize,
+                            ImVec2(pos.x + columns[1U], textY),
+                            secondaryText, "Querying...");
+                    } else if (stats->failed) {
+                        const bool suspectedNick = std::strcmp(
+                            stats->status.data(), "unavailable") == 0;
+                        drawList->AddText(panelBold, panelBoldSize,
+                            ImVec2(pos.x + columns[1U], textY),
+                            suspectedNick ? IM_COL32(224, 159, 255, 255)
+                                          : IM_COL32(255, 116, 127, 255),
+                            suspectedNick ? "SUSPECTED NICK" : "UNAVAILABLE");
+                    } else {
+                        char starsText[24]{};
+                        char fkdrText[16]{};
+                        char wlrText[16]{};
+                        char bblrText[16]{};
+                        char finalsText[16]{};
+                        char winsText[16]{};
+                        char winStreakText[12]{};
+                        const PrestigeStyle prestige = bedWarsPrestigeStyle(stats->stars);
+                        std::snprintf(starsText, sizeof(starsText), "%d", stats->stars);
+                        std::snprintf(fkdrText, sizeof(fkdrText), "%.2f", stats->fkdr);
+                        std::snprintf(wlrText, sizeof(wlrText), "%.2f", stats->wlr);
+                        std::snprintf(bblrText, sizeof(bblrText), "%.2f", stats->bblr);
+                        formatCompactCount(finalsText, sizeof(finalsText), stats->finalKills);
+                        formatCompactCount(winsText, sizeof(winsText), stats->wins);
+                        std::snprintf(winStreakText, sizeof(winStreakText), "%d", stats->winStreak);
+                        const ImU32 fkdrColor = stats->fkdr >= 3.0
+                            ? IM_COL32(89, 235, 122, 255)
+                            : (stats->fkdr >= 1.5 ? IM_COL32(255, 214, 82, 255)
+                                                  : IM_COL32(255, 97, 107, 255));
+                        drawList->AddText(panelBold, panelBoldSize,
+                            ImVec2(pos.x + columns[1U], textY),
+                            prestige.color, starsText);
+                        const ImVec2 starNumberSize = panelBold->CalcTextSizeA(
+                            panelBoldSize, FLT_MAX, 0.0F, starsText);
+                        drawPrestigeStar(drawList,
+                            ImVec2(pos.x + columns[1U] + starNumberSize.x + 6.0F,
+                                   pos.y + size.y * 0.5F),
+                            4.1F, prestige.color, prestige.master);
+                        drawList->AddText(panelBold, panelBoldSize,
+                            ImVec2(pos.x + columns[2U], textY), fkdrColor, fkdrText);
+                        drawList->AddText(panelFont, panelFontSize,
+                            ImVec2(pos.x + columns[3U], textY),
+                            stats->wlr >= 1.0 ? IM_COL32(57, 190, 112, 255) : secondaryText,
+                            wlrText);
+                        drawList->AddText(panelFont, panelFontSize,
+                            ImVec2(pos.x + columns[4U], textY),
+                            stats->bblr >= 1.5 ? IM_COL32(54, 164, 219, 255) : secondaryText,
+                            bblrText);
+                        drawList->AddText(panelFont, panelFontSize,
+                            ImVec2(pos.x + columns[5U], textY),
+                            stats->finalKills >= 5000 ? IM_COL32(224, 151, 35, 255) : secondaryText,
+                            finalsText);
+                        drawList->AddText(panelFont, panelFontSize,
+                            ImVec2(pos.x + columns[6U], textY), secondaryText, winsText);
+                        drawList->AddText(panelFont, panelFontSize,
+                            ImVec2(pos.x + columns[7U], textY),
+                            stats->winStreak >= 10 ? IM_COL32(238, 83, 70, 255) : secondaryText,
+                            winStreakText);
+                    }
+                    ImGui::Dummy(size);
+                }
+                statsRowsVertexEnd = statsRowsDraw != nullptr
+                    ? statsRowsDraw->VtxBuffer.Size : statsRowsVertexStart;
+                ImGui::EndChild();
+                ImGui::PopStyleVar();
+                if (interactive) {
+                    const ImU32 gripColor = whitePanel
+                        ? IM_COL32(20, 20, 24, 155) : IM_COL32(255, 255, 255, 160);
+                    for (int gripLine = 0; gripLine < 3; ++gripLine) {
+                        const float inset = 4.0F + static_cast<float>(gripLine) * 4.0F;
+                        cardDraw->AddLine(
+                            ImVec2(cardMax.x - inset, cardMax.y - 2.0F),
+                            ImVec2(cardMax.x - 2.0F, cardMax.y - inset),
+                            gripColor, 1.0F);
+                    }
+                }
+                statsCardVertexEnd = cardDraw->VtxBuffer.Size;
+            }
+            ImGui::End();
+            ImGui::PopStyleVar(3);
+
+            // Use the same whole-surface spotlight transform as the Click GUI.
+            // Geometry is laid out at its final coordinates and all vertices
+            // gather/scatter around the panel centre as one flat layer.
+            const ImVec2 statsCenter(targetPanelX + panelWidth * 0.5F,
+                                     targetPanelY + panelHeight * 0.5F);
+            const auto transformStats = [&](ImDrawList* const drawList,
+                                            int begin, int end) noexcept {
+                if (drawList == nullptr) return;
+                begin = std::clamp(begin, 0, drawList->VtxBuffer.Size);
+                end = std::clamp(end, begin, drawList->VtxBuffer.Size);
+                for (int vertexIndex = begin; vertexIndex < end; ++vertexIndex) {
+                    ImDrawVert& vertex = drawList->VtxBuffer[vertexIndex];
+                    if (std::abs(panelPresentationScale - 1.0F) >= 0.0001F) {
+                        vertex.pos.x = statsCenter.x +
+                            (vertex.pos.x - statsCenter.x) * panelPresentationScale;
+                        vertex.pos.y = statsCenter.y +
+                            (vertex.pos.y - statsCenter.y) * panelPresentationScale;
+                    }
+                    const unsigned alpha = static_cast<unsigned>(vertex.col >> 24U);
+                    const unsigned faded = static_cast<unsigned>(std::clamp(
+                        std::lround(static_cast<float>(alpha) * panelEase),
+                        0L, 255L));
+                    vertex.col = (vertex.col & 0x00FFFFFFU) | (faded << 24U);
+                }
+                if (std::abs(panelPresentationScale - 1.0F) >= 0.0001F) {
+                    for (ImDrawCmd& command : drawList->CmdBuffer) {
+                        command.ClipRect.x = statsCenter.x +
+                            (command.ClipRect.x - statsCenter.x) * panelPresentationScale;
+                        command.ClipRect.y = statsCenter.y +
+                            (command.ClipRect.y - statsCenter.y) * panelPresentationScale;
+                        command.ClipRect.z = statsCenter.x +
+                            (command.ClipRect.z - statsCenter.x) * panelPresentationScale;
+                        command.ClipRect.w = statsCenter.y +
+                            (command.ClipRect.w - statsCenter.y) * panelPresentationScale;
+                    }
+                }
+            };
+            transformStats(statsCardDraw, statsCardVertexStart,
+                           statsCardVertexEnd);
+            if (statsRowsDraw != statsCardDraw)
+                transformStats(statsRowsDraw, statsRowsVertexStart,
+                               statsRowsVertexEnd);
+    }
+
+    // A blacklist encounter is admitted only through the cumulative,
+    // colour-validated TAB roster. This excludes lobby/shop bots and keeps a
+    // UUID match stable across respawn gaps and later name changes.
+    if (!snapshot.matchActive) {
+        m_blacklistWarnedCount = 0U;
+        m_blacklistMatchWasActive = false;
+    } else {
+        m_blacklistMatchWasActive = true;
+        if (m_blacklist.matchAlertsEnabled) {
+            for (std::uint32_t entryIndex = 0U;
+                 entryIndex < m_blacklist.count; ++entryIndex) {
+                const BlacklistEntry& entry = m_blacklist.entries[entryIndex];
+                if (!entry.warnOnEncounter) continue;
+                bool encountered = false;
+                for (std::uint32_t playerIndex = 0U;
+                     playerIndex < snapshot.playerCount; ++playerIndex) {
+                    const PlayerIdentity& player = snapshot.players[playerIndex];
+                    encountered = entry.idOnly
+                        ? ::_stricmp(entry.name.data(), player.name.data()) == 0
+                        : entry.uuid[0U] != '\0' && player.uuid[0U] != '\0' &&
+                          ::_stricmp(entry.uuid.data(), player.uuid.data()) == 0;
+                    if (encountered) break;
+                }
+                if (!encountered) continue;
+                bool alreadyWarned = false;
+                for (std::uint32_t warned = 0U;
+                     warned < m_blacklistWarnedCount; ++warned) {
+                    if (::_stricmp(m_blacklistWarnedKeys[warned].data(),
+                                   entry.key.data()) == 0) {
+                        alreadyWarned = true;
+                        break;
+                    }
+                }
+                if (alreadyWarned) continue;
+                if (m_blacklistWarnedCount < m_blacklistWarnedKeys.size()) {
+                    std::snprintf(m_blacklistWarnedKeys[m_blacklistWarnedCount].data(),
+                        m_blacklistWarnedKeys[m_blacklistWarnedCount].size(), "%s",
+                        entry.key.data());
+                    ++m_blacklistWarnedCount;
+                }
+                char message[52]{};
+                std::snprintf(message, sizeof(message), "WARNING: %s is blacklisted",
+                              entry.name.data());
+                enqueueMessage(message, false);
+            }
+        }
+    }
+    // panelEnabled controls the always-on HUD surface. Even when it is off,
+    // opening the Blacklist settings page should temporarily reveal the same
+    // panel for review/editing, then dismiss it with the normal spring/blur
+    // transition when the Click GUI closes or leaves the page.
+    const bool blacklistPanelTarget = m_blacklist.panelEnabled ||
+        (m_blacklist.showWithClickGui && interactive && m_clickGuiPage == 11);
+    advancePresentationSpring(m_blacklistPanelProgress,
+                              m_blacklistPanelVelocity,
+                              blacklistPanelTarget ? 1.0F : 0.0F, delta);
+    if (m_blacklistPanelProgress > 0.005F) {
+        const float presentation = std::clamp(m_blacklistPanelProgress, 0.0F, 1.0F);
+        const float panelAlphaEase = presentation * presentation *
+                                     (3.0F - 2.0F * presentation);
+        const float panelScale = 1.26F - 0.26F * m_blacklistPanelProgress;
+        const float requestedWidth = std::clamp(330.0F *
+            static_cast<float>(m_blacklist.panelWidth) / 100.0F,
+            260.0F, std::max(260.0F, io.DisplaySize.x * 0.72F));
+        const float expandedHeight = std::clamp(420.0F *
+            static_cast<float>(m_blacklist.panelHeight) / 100.0F,
+            240.0F, std::max(240.0F, io.DisplaySize.y - 8.0F));
+        const float requestedHeight = m_blacklist.collapsed ? 58.0F : expandedHeight;
+        const float storedX = m_blacklist.panelX < 0 ? 18.0F
+            : io.DisplaySize.x * static_cast<float>(m_blacklist.panelX) / 1000.0F;
+        const float storedY = m_blacklist.panelY < 0
+            ? std::max(8.0F, (io.DisplaySize.y - requestedHeight) * 0.5F)
+            : io.DisplaySize.y * static_cast<float>(m_blacklist.panelY) / 1000.0F;
+        const float panelX = std::clamp(storedX, 4.0F,
+            std::max(4.0F, io.DisplaySize.x - 260.0F - 4.0F));
+        const float panelY = std::clamp(storedY, 4.0F,
+            std::max(4.0F, io.DisplaySize.y - 240.0F - 4.0F));
+        // Resizing is anchored to the upper-left. If the lower/right edge
+        // reaches the viewport, cap the effective size instead of moving the
+        // saved top-left in the opposite direction.
+        const float width = std::clamp(requestedWidth, 260.0F,
+            std::max(260.0F, io.DisplaySize.x - panelX - 4.0F));
+        const float minimumHeight = m_blacklist.collapsed ? 58.0F : 240.0F;
+        const float height = std::clamp(requestedHeight, minimumHeight,
+            std::max(minimumHeight, io.DisplaySize.y - panelY - 4.0F));
+        ImGui::SetNextWindowPos(ImVec2(panelX, panelY), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(width, height), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.0F);
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, panelAlphaEase);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0F);
+        ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground;
+        if (!interactive) flags |= ImGuiWindowFlags_NoInputs;
+        ImDrawList* panelDraw = nullptr;
+        ImDrawList* entriesDraw = nullptr;
+        int panelBegin = 0, panelEnd = 0, entriesBegin = 0, entriesEnd = 0;
+        if (ImGui::Begin("##BlacklistPanel", nullptr, flags)) {
+            panelDraw = ImGui::GetWindowDrawList();
+            panelBegin = panelDraw->VtxBuffer.Size;
+            const ImVec2 minimum = ImGui::GetWindowPos();
+            const ImVec2 maximum(minimum.x + width, minimum.y + height);
+            const int surfaceAlpha = static_cast<int>(std::lround(
+                std::clamp(m_blacklist.panelOpacity, 0, 100) * 2.55));
+            if (surfaceAlpha < 250) {
+                captureBackdropTexture();
+                if (m_blurTexture != 0U) {
+                    constexpr std::array<ImVec2, 9U> taps{{
+                        ImVec2(0,0), ImVec2(-3,0), ImVec2(3,0), ImVec2(0,-3),
+                        ImVec2(0,3), ImVec2(-5,-5), ImVec2(5,-5),
+                        ImVec2(-5,5), ImVec2(5,5)}};
+                    const float exitBlurSpread = 1.0F +
+                        (1.0F - presentation) * 2.8F;
+                    for (const ImVec2 tap : taps) {
+                        const float left = std::clamp(minimum.x +
+                            tap.x * exitBlurSpread, 0.0F, io.DisplaySize.x);
+                        const float top = std::clamp(minimum.y +
+                            tap.y * exitBlurSpread, 0.0F, io.DisplaySize.y);
+                        const float right = std::clamp(maximum.x +
+                            tap.x * exitBlurSpread, 0.0F, io.DisplaySize.x);
+                        const float bottom = std::clamp(maximum.y +
+                            tap.y * exitBlurSpread, 0.0F, io.DisplaySize.y);
+                        panelDraw->AddImageRounded(reinterpret_cast<ImTextureID>(
+                            static_cast<std::uintptr_t>(m_blurTexture)), minimum, maximum,
+                            ImVec2(left / io.DisplaySize.x, 1.0F - top / io.DisplaySize.y),
+                            ImVec2(right / io.DisplaySize.x, 1.0F - bottom / io.DisplaySize.y),
+                            IM_COL32(255,255,255,static_cast<int>(
+                                std::lround(36.0F * panelAlphaEase))), 18.0F);
+                    }
+                }
+            }
+            panelDraw->AddRectFilled(ImVec2(minimum.x + 4, minimum.y + 7),
+                ImVec2(maximum.x + 4, maximum.y + 7), IM_COL32(0,0,0,72), 18.0F);
+            panelDraw->AddRectFilled(minimum, maximum,
+                packedRgbColor(m_blacklist.panelColor, surfaceAlpha), 18.0F);
+            panelDraw->AddRect(minimum, maximum, IM_COL32(255,255,255,42),
+                               18.0F, 0, 1.0F);
+            ImFont* const bold = m_boldFonts[static_cast<std::size_t>(
+                std::clamp(m_guiScaleIndex, 0, 3))] != nullptr
+                ? m_boldFonts[static_cast<std::size_t>(
+                    std::clamp(m_guiScaleIndex, 0, 3))] : ImGui::GetFont();
+            panelDraw->AddText(bold, ImGui::GetFontSize() * 1.08F,
+                ImVec2(minimum.x + 18.0F, minimum.y + 15.0F),
+                IM_COL32(252,248,255,255), "BLACKLIST");
+            char countLabel[32]{};
+            std::snprintf(countLabel, sizeof(countLabel), "%u saved",
+                          m_blacklist.count);
+            panelDraw->AddText(ImVec2(minimum.x + 18.0F, minimum.y + 39.0F),
+                               IM_COL32(190,184,200,255), countLabel);
+
+            const ImVec2 collapseMin(maximum.x - 48.0F, minimum.y + 9.0F);
+            const ImVec2 collapseMax(maximum.x - 10.0F, minimum.y + 47.0F);
+            panelDraw->AddRectFilled(collapseMin, collapseMax,
+                IM_COL32(255,255,255,18), 11.0F);
+            const float chevronY = (collapseMin.y + collapseMax.y) * 0.5F;
+            const float chevronDirection = m_blacklist.collapsed ? -1.0F : 1.0F;
+            panelDraw->AddLine(
+                ImVec2(collapseMin.x + 11.0F, chevronY - 4.0F * chevronDirection),
+                ImVec2((collapseMin.x + collapseMax.x) * 0.5F, chevronY + 4.0F * chevronDirection),
+                IM_COL32(232,226,238,255), 2.0F);
+            panelDraw->AddLine(
+                ImVec2((collapseMin.x + collapseMax.x) * 0.5F, chevronY + 4.0F * chevronDirection),
+                ImVec2(collapseMax.x - 11.0F, chevronY - 4.0F * chevronDirection),
+                IM_COL32(232,226,238,255), 2.0F);
+
+            if (interactive && presentation > 0.985F) {
+                const ImVec2 resizeMin(maximum.x - 24.0F, maximum.y - 24.0F);
+                const bool collapseHovered = ImGui::IsMouseHoveringRect(
+                    collapseMin, collapseMax, false);
+                const bool resizeHovered = !m_blacklist.collapsed &&
+                    ImGui::IsMouseHoveringRect(resizeMin, maximum, false);
+                const bool headerHovered = ImGui::IsMouseHoveringRect(
+                    minimum, ImVec2(collapseMin.x - 4.0F, minimum.y + 58.0F), false);
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    if (collapseHovered) {
+                        m_blacklist.collapsed = !m_blacklist.collapsed;
+                        m_blacklistAction = {};
+                        m_blacklistAction.type = BlacklistAction::Type::Settings;
+                        m_blacklistAction.panelEnabled = m_blacklist.panelEnabled;
+                        m_blacklistAction.matchAlertsEnabled = m_blacklist.matchAlertsEnabled;
+                        m_blacklistAction.allowIdOnlyNicks = m_blacklist.allowIdOnlyNicks;
+                        m_blacklistAction.showWithClickGui = m_blacklist.showWithClickGui;
+                        m_blacklistAction.collapsed = m_blacklist.collapsed;
+                        m_blacklistAction.panelOpacity = m_blacklist.panelOpacity;
+                        m_blacklistAction.panelColor = m_blacklist.panelColor;
+                        m_blacklistActionDirty = true;
+                    } else if (resizeHovered) {
+                        m_blacklistPanelResizing = true;
+                        m_blacklistPanelDragging = false;
+                        // The default Y is vertically centred and therefore
+                        // depends on height. Materialise the current top-left
+                        // position before resizing so dragging the lower-right
+                        // grip never moves the top edge in the opposite
+                        // direction.
+                        if (m_blacklist.panelX < 0) {
+                            m_blacklist.panelX = std::clamp(
+                                static_cast<int>(std::lround(panelX /
+                                    std::max(1.0F, io.DisplaySize.x) * 1000.0F)),
+                                0, 1000);
+                        }
+                        if (m_blacklist.panelY < 0) {
+                            m_blacklist.panelY = std::clamp(
+                                static_cast<int>(std::lround(panelY /
+                                    std::max(1.0F, io.DisplaySize.y) * 1000.0F)),
+                                0, 1000);
+                        }
+                        m_blacklistResizeStartMouseX = io.MousePos.x;
+                        m_blacklistResizeStartMouseY = io.MousePos.y;
+                        m_blacklistResizeStartWidth = m_blacklist.panelWidth;
+                        m_blacklistResizeStartHeight = m_blacklist.panelHeight;
+                    } else if (headerHovered) {
+                        m_blacklistPanelDragging = true;
+                        m_blacklistPanelResizing = false;
+                        m_blacklistDragStartMouseX = io.MousePos.x;
+                        m_blacklistDragStartMouseY = io.MousePos.y;
+                        m_blacklistDragStartPanelX = panelX;
+                        m_blacklistDragStartPanelY = panelY;
+                    }
+                }
+                if (m_blacklistPanelDragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    const float x = m_blacklistDragStartPanelX +
+                        io.MousePos.x - m_blacklistDragStartMouseX;
+                    const float y = m_blacklistDragStartPanelY +
+                        io.MousePos.y - m_blacklistDragStartMouseY;
+                    m_blacklist.panelX = std::clamp(static_cast<int>(std::lround(
+                        x / std::max(1.0F, io.DisplaySize.x) * 1000.0F)), 0, 1000);
+                    m_blacklist.panelY = std::clamp(static_cast<int>(std::lround(
+                        y / std::max(1.0F, io.DisplaySize.y) * 1000.0F)), 0, 1000);
+                    m_blacklistPanelTransformDirty = true;
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+                } else if (m_blacklistPanelResizing &&
+                           ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                    m_blacklist.panelWidth = std::clamp(
+                        m_blacklistResizeStartWidth + static_cast<int>(std::lround(
+                            (io.MousePos.x - m_blacklistResizeStartMouseX) * 100.0F / 330.0F)),
+                        60, 180);
+                    m_blacklist.panelHeight = std::clamp(
+                        m_blacklistResizeStartHeight + static_cast<int>(std::lround(
+                            (io.MousePos.y - m_blacklistResizeStartMouseY) * 100.0F / 420.0F)),
+                        60, 300);
+                    m_blacklistPanelTransformDirty = true;
+                    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
+                } else if (resizeHovered) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
+                else if (headerHovered) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+                if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+                    (m_blacklistPanelDragging || m_blacklistPanelResizing)) {
+                    if (m_blacklistPanelTransformDirty) {
+                        m_blacklistAction = {};
+                        m_blacklistAction.type = BlacklistAction::Type::Layout;
+                        m_blacklistAction.x = m_blacklist.panelX;
+                        m_blacklistAction.y = m_blacklist.panelY;
+                        m_blacklistAction.width = m_blacklist.panelWidth;
+                        m_blacklistAction.height = m_blacklist.panelHeight;
+                        m_blacklistActionDirty = true;
+                    }
+                    m_blacklistPanelTransformDirty = false;
+                    m_blacklistPanelDragging = false;
+                    m_blacklistPanelResizing = false;
+                }
+            }
+
+            if (!m_blacklist.collapsed) {
+            ImGui::SetCursorScreenPos(ImVec2(minimum.x + 12.0F, minimum.y + 64.0F));
+            ImGui::BeginChild("##BlacklistCards", ImVec2(width - 24.0F, height - 112.0F),
+                              false, ImGuiWindowFlags_AlwaysVerticalScrollbar |
+                              ImGuiWindowFlags_NoBackground);
+            entriesDraw = ImGui::GetWindowDrawList();
+            entriesBegin = entriesDraw->VtxBuffer.Size;
+            for (std::uint32_t index = 0U; index < m_blacklist.count; ++index) {
+                const BlacklistEntry& entry = m_blacklist.entries[index];
+                ImGui::PushID(static_cast<int>(index));
+                const ImVec2 cardMin = ImGui::GetCursorScreenPos();
+                const float cardWidth = ImGui::GetContentRegionAvail().x;
+                const ImVec2 cardMax(cardMin.x + cardWidth, cardMin.y + 76.0F);
+                entriesDraw->AddRectFilled(cardMin, cardMax,
+                    IM_COL32(255,255,255,18), 12.0F);
+                entriesDraw->AddRect(cardMin, cardMax, IM_COL32(255,255,255,25),
+                                     12.0F, 0, 1.0F);
+                unsigned faceTexture = 0U;
+                if (entry.facePath[0U] != '\0') {
+                    BlacklistTexture* slot = nullptr;
+                    for (BlacklistTexture& cached : m_blacklistTextures) {
+                        if (cached.path[0U] != '\0' &&
+                            std::strcmp(cached.path.data(), entry.facePath.data()) == 0) {
+                            slot = &cached; break;
+                        }
+                        if (slot == nullptr && cached.path[0U] == '\0') slot = &cached;
+                    }
+                    if (slot != nullptr && slot->path[0U] == '\0') {
+                        std::snprintf(slot->path.data(), slot->path.size(), "%s",
+                                      entry.facePath.data());
+                        int imageWidth = 0, imageHeight = 0, channels = 0;
+                        unsigned char* pixels = stbi_load(entry.facePath.data(),
+                            &imageWidth, &imageHeight, &channels, 4);
+                        if (pixels != nullptr && imageWidth > 0 && imageHeight > 0) {
+                            GLint lastTexture = 0;
+                            ::glGetIntegerv(GL_TEXTURE_BINDING_2D, &lastTexture);
+                            ::glGenTextures(1, &slot->texture);
+                            ::glBindTexture(GL_TEXTURE_2D, slot->texture);
+                            ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                            ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                            ::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, imageWidth,
+                                imageHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+                            ::glBindTexture(GL_TEXTURE_2D,
+                                            static_cast<GLuint>(lastTexture));
+                        }
+                        stbi_image_free(pixels);
+                    }
+                    if (slot != nullptr) faceTexture = slot->texture;
+                }
+                const ImVec2 avatarMin(cardMin.x + 10.0F, cardMin.y + 10.0F);
+                const ImVec2 avatarMax(avatarMin.x + 46.0F, avatarMin.y + 46.0F);
+                entriesDraw->AddRectFilled(avatarMin, avatarMax,
+                    IM_COL32(88,72,110,255), 9.0F);
+                if (faceTexture != 0U) entriesDraw->AddImageRounded(
+                    reinterpret_cast<ImTextureID>(static_cast<std::uintptr_t>(faceTexture)),
+                    avatarMin, avatarMax, ImVec2(0,0), ImVec2(1,1),
+                    IM_COL32_WHITE, 9.0F);
+                entriesDraw->AddText(bold, ImGui::GetFontSize() * 1.06F,
+                    ImVec2(cardMin.x + 68.0F, cardMin.y + 9.0F),
+                    IM_COL32(250,248,252,255), entry.name.data());
+                if (entry.nick) entriesDraw->AddText(
+                    ImVec2(cardMax.x - 49.0F, cardMin.y + 11.0F),
+                    IM_COL32(221,125,255,255), "NICK");
+                const ImVec4 reasonClip(cardMin.x + 68.0F, cardMin.y + 31.0F,
+                                        cardMax.x - 8.0F, cardMin.y + 52.0F);
+                entriesDraw->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                    ImVec2(cardMin.x + 68.0F, cardMin.y + 31.0F),
+                    IM_COL32(214,207,220,255), entry.reason.data(), nullptr,
+                    0.0F, &reasonClip);
+                std::time_t seconds = static_cast<std::time_t>(entry.addedAt / 1000);
+                std::tm local{};
+                char date[24]{};
+                if (::_localtime64_s(&local, &seconds) == 0)
+                    std::strftime(date, sizeof(date), "%Y-%m-%d %H:%M", &local);
+                entriesDraw->AddText(ImVec2(cardMin.x + 68.0F, cardMin.y + 54.0F),
+                    IM_COL32(157,150,166,255), date);
+                if (interactive) {
+                    ImGui::SetCursorScreenPos(ImVec2(cardMax.x - 64.0F, cardMax.y - 24.0F));
+                    if (ImGui::SmallButton("Delete")) {
+                        m_blacklistAction = {};
+                        m_blacklistAction.type = BlacklistAction::Type::Remove;
+                        std::snprintf(m_blacklistAction.key.data(),
+                            m_blacklistAction.key.size(), "%s", entry.key.data());
+                        m_blacklistActionDirty = true;
+                    }
+                }
+                ImGui::SetCursorScreenPos(ImVec2(cardMin.x, cardMax.y + 7.0F));
+                ImGui::Dummy(ImVec2(cardWidth, 1.0F));
+                ImGui::PopID();
+            }
+            entriesEnd = entriesDraw->VtxBuffer.Size;
+            ImGui::EndChild();
+            ImGui::SetCursorScreenPos(ImVec2(minimum.x + 14.0F, maximum.y - 38.0F));
+            // Always submit an item after SetCursorScreenPos. The window's
+            // NoInputs flag already makes the button inert while the Click
+            // GUI is closed; short-circuiting the Button call here left the
+            // cursor beyond the previous content boundary and trips ImGui's
+            // ErrorCheckUsingSetCursorPosToExtendParentBoundaries assertion.
+            if (ImGui::Button("+", ImVec2(34.0F, 28.0F)) && interactive) {
+                m_previousClickGuiPage = m_clickGuiPage;
+                m_clickGuiPage = 11;
+                m_clickGuiPageProgress = 0.0F;
+                m_blacklistAddOpen = true;
+            }
+            }
+            panelEnd = panelDraw->VtxBuffer.Size;
+        }
+        ImGui::End();
+        ImGui::PopStyleVar(3);
+        const ImVec2 center(panelX + width * 0.5F, panelY + height * 0.5F);
+        const auto transform = [&](ImDrawList* drawList, int begin, int end) noexcept {
+            if (drawList == nullptr) return;
+            begin = std::clamp(begin, 0, drawList->VtxBuffer.Size);
+            end = std::clamp(end, begin, drawList->VtxBuffer.Size);
+            for (int vertex = begin; vertex < end; ++vertex) {
+                ImDrawVert& drawVertex = drawList->VtxBuffer[vertex];
+                if (std::abs(panelScale - 1.0F) >= 0.0001F) {
+                    drawVertex.pos.x = center.x +
+                        (drawVertex.pos.x - center.x) * panelScale;
+                    drawVertex.pos.y = center.y +
+                        (drawVertex.pos.y - center.y) * panelScale;
+                }
+                const unsigned alpha = static_cast<unsigned>(drawVertex.col >> 24U);
+                const unsigned faded = static_cast<unsigned>(std::clamp(
+                    std::lround(static_cast<float>(alpha) * panelAlphaEase),
+                    0L, 255L));
+                drawVertex.col = (drawVertex.col & 0x00FFFFFFU) |
+                    (faded << 24U);
+            }
+            if (std::abs(panelScale - 1.0F) >= 0.0001F) {
+                for (ImDrawCmd& command : drawList->CmdBuffer) {
+                    command.ClipRect.x = center.x +
+                        (command.ClipRect.x - center.x) * panelScale;
+                    command.ClipRect.y = center.y +
+                        (command.ClipRect.y - center.y) * panelScale;
+                    command.ClipRect.z = center.x +
+                        (command.ClipRect.z - center.x) * panelScale;
+                    command.ClipRect.w = center.y +
+                        (command.ClipRect.w - center.y) * panelScale;
+                }
+            }
+        };
+        transform(panelDraw, panelBegin, panelEnd);
+        if (entriesDraw != panelDraw) transform(entriesDraw, entriesBegin, entriesEnd);
     }
 
     renderToasts(delta, uiScale);
 
+    // Never render a software cursor. Windows remains the only cursor owner,
+    // preserving the exact system/game DPI-scaled pointer size and avoiding a
+    // second sprite that can race the title-screen cursor.
+    io.MouseDrawCursor = false;
     ImGui::Render();
     ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
     return newlyInitialized;
@@ -1707,30 +4218,72 @@ LRESULT OverlayRenderer::onWindowMessage(OverlayInputState& input,
             return 1;
         }
         if (wParam == VK_ESCAPE && input.interactive.load(std::memory_order_acquire)) {
+            if (::GetCapture() == window) ::ReleaseCapture();
             input.clickGuiToggle.store(true, std::memory_order_release);
             handled = true;
             return 1;
         }
         const unsigned configured = input.menuHotkey.load(std::memory_order_acquire);
         if (static_cast<unsigned>(wParam) == configured || resolvedKey == configured) {
+            if (input.interactive.load(std::memory_order_acquire) &&
+                ::GetCapture() == window) {
+                ::ReleaseCapture();
+            }
             input.clickGuiToggle.store(true, std::memory_order_release);
             handled = true;
             return 1;
         }
     }
     ImGuiContext* const context = input.imguiContext.load(std::memory_order_acquire);
+    const bool directBackend =
+        input.directImGuiWndProc.load(std::memory_order_acquire);
     if (input.acceptImGuiMessages.load(std::memory_order_acquire) &&
         input.interactive.load(std::memory_order_acquire) && context != nullptr &&
-        input.directImGuiWndProc.load(std::memory_order_acquire)) {
+        directBackend) {
         ImGui::SetCurrentContext(context);
-        ImGui_ImplWin32_WndProcHandler(window, message, wParam, lParam);
+        (void)ImGui_ImplWin32_WndProcHandler(window, message, wParam, lParam);
     }
     // When the Click GUI is open Minecraft must not receive any relative/raw
     // movement or gameplay key, even if ImGui currently has no hovered item.
     // WM_INPUT is cleaned up through DefWindowProc but never forwarded into the
     // client WndProc. This is what prevents Lunar's camera from rotating.
-    if (input.interactive.load(std::memory_order_acquire) &&
-        (isMouseMessage(message) || isKeyboardMessage(message))) {
+    const bool clientCursorMessage = message == WM_SETCURSOR &&
+        LOWORD(lParam) == HTCLIENT;
+    const bool overlayMouseMessage = isMouseMessage(message) &&
+        (message != WM_SETCURSOR || clientCursorMessage);
+    const bool interactiveNow = input.interactive.load(std::memory_order_acquire);
+    if (interactiveNow && !directBackend) {
+        // The official backend performs this exact capture transition on its
+        // owning thread. Lunar's split presentation thread cannot call that
+        // backend from WndProc, so mirror only the Win32 capture portion here.
+        // This keeps drag delivery continuous when the pointer crosses a card
+        // or the game client boundary; position still comes from one absolute
+        // GetCursorPos source on the render thread.
+        if (message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN ||
+            message == WM_MBUTTONDOWN || message == WM_XBUTTONDOWN) {
+            if (::GetCapture() == nullptr) ::SetCapture(window);
+        } else if (message == WM_LBUTTONUP || message == WM_RBUTTONUP ||
+                   message == WM_MBUTTONUP || message == WM_XBUTTONUP) {
+            const bool anyButtonDown =
+                (::GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 ||
+                (::GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0 ||
+                (::GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0 ||
+                (::GetAsyncKeyState(VK_XBUTTON1) & 0x8000) != 0 ||
+                (::GetAsyncKeyState(VK_XBUTTON2) & 0x8000) != 0;
+            if (!anyButtonDown && ::GetCapture() == window) ::ReleaseCapture();
+        }
+    }
+    if (clientCursorMessage && interactiveNow) {
+        if (HCURSOR const cursor =
+                input.sessionCursor.load(std::memory_order_acquire);
+            cursor != nullptr) {
+            ::SetCursor(cursor);
+            handled = true;
+            return TRUE;
+        }
+    }
+    if (interactiveNow &&
+        (overlayMouseMessage || isKeyboardMessage(message))) {
         handled = true;
         return message == WM_INPUT
             ? ::DefWindowProcW(window, message, wParam, lParam) : 1;

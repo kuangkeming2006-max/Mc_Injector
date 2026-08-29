@@ -65,6 +65,16 @@ The default end-to-end deadline is 45 seconds. The WGL window is marked
 visible because the production renderer intentionally rejects hidden HWNDs,
 but it is placed outside the virtual screen and never activates.
 
+`McOverlayHotkeyCaptureTests` is a small Controller-side regression target. It
+delivers native virtual-key and Escape events through Qt's application event
+filter and verifies that one-shot binding capture succeeds without relying on
+QML focus:
+
+```powershell
+cmake --build .\build-debug --target McOverlayHotkeyCaptureTests --parallel
+.\build-debug\McOverlayHotkeyCaptureTests.exe
+```
+
 ## JDK Attach path
 
 `Run-AgentAttachSmoke.ps1` performs a narrow end-to-end check of the supported

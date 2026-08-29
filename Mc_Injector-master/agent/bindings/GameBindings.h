@@ -9,7 +9,9 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 
+#include "BedWarsState.h"
 #include "MappingProvider.h"
 
 namespace mcoverlay {
@@ -32,10 +34,27 @@ struct EntityMarker final {
     double currentY = 0.0;
     double currentZ = 0.0;
     jint entityId = -1;
+    float health = 0.0F;
+    float maxHealth = 0.0F;
     double distance = 0.0;
     bool player = false;
+    bool invisible = false;
     bool hasArmor = false;
+    std::uint8_t protectionLevel = 0U;
+    std::int16_t heldItemId = -1;
+    std::uint8_t heldItemCount = 0U;
+    std::uint16_t heldItemDamage = 0U;
     char armorTeam = 'u';
+    char teamColor = 'u';
+    std::array<char, 17U> playerName{};
+    std::array<char, 37U> uuid{};
+    // True only after this spawned entity was joined to the persistent TAB
+    // roster (UUID first, exact name as a compatibility fallback).  Renderers
+    // use this to exclude shop NPCs and other player-shaped entities.
+    bool confirmedPlayer = false;
+    // OpenGL texture name owned by Minecraft's TextureManager in the same
+    // context used by the SwapBuffers hook.  The agent never deletes it.
+    std::uint32_t skinTextureId = 0U;
 };
 
 struct BedDefenseBlock final {
@@ -56,13 +75,18 @@ struct BedMarker final {
     int footZ = 0;
     std::array<BedDefenseBlock, MaxDefenseBlocks> defense{};
     std::uint8_t defenseCount = 0U;
+    // Derived only from nearby, bulk-copied team-coloured wool evidence. An
+    // ambiguous/absent result remains unknown; the threat detector must never
+    // guess an own bed from player proximity.
+    char teamColor = 'u';
 };
 
 struct PlayerIdentity final {
     std::array<char, 17U> name{};
+    std::array<char, 37U> uuid{};
     // Minecraft formatting color code without the section-sign prefix.
     // For example 'c' represents the protocol token "\xC2\xA7c".
-    char teamColor = 'f';
+    char teamColor = 'u';
 };
 
 struct WorldCameraSnapshot final {
@@ -99,6 +123,7 @@ struct GameSnapshot final {
     AxisAlignedBox bounds{};
     jint loadedEntities = 0;
     bool singlePlayer = false;
+    bool hypixelServer = false;
     std::array<EntityMarker, MaxEntityMarkers> entityMarkers{};
     std::uint32_t entityMarkerCount = 0U;
     // Incremented only when the 20 Hz JNI entity snapshot is refreshed. The
@@ -113,18 +138,37 @@ struct GameSnapshot final {
     std::uint32_t playerCount = 0U;
     std::uint64_t playerRosterGeneration = 0U;
     std::array<char, 17U> localPlayerName{};
-    // True only after at least two distinct BedWars team tags (for example
-    // [R] and [B]) are visible in the formatted player roster.
+    // True only after two consecutive snapshots agree on a local team. An
+    // explicit [R]/[B]/... roster tag is the primary signal; a complete
+    // Sidebar snapshot is accepted as corroborating evidence.
     bool matchActive = false;
-    char ownTeam = 'f';
+    char ownTeam = 'u';
+    enum class OwnBedSource : std::uint8_t { Unknown, TeamWool, MatchSpawn };
     bool ownBedKnown = false;
     int ownBedX = 0;
     int ownBedY = 0;
     int ownBedZ = 0;
+    OwnBedSource ownBedSource = OwnBedSource::Unknown;
     WorldCameraSnapshot camera{};
     std::uint32_t mappingAttempt = 0U;
     std::uint32_t mappingRetryInMs = 0U;
     const char* mapping = "unresolved";
+};
+
+struct GameplaySettings final {
+    bool safewalk = false;
+    bool scaffold = false;
+    bool fly = false;
+    bool bhop = false;
+    bool bhopAutoJump = true;
+    bool aimAssist = false;
+    bool aimSlowdownMode = true;
+    int safewalkReleaseDelayMs = 120;
+    int safewalkEdgeSensitivity = 55;
+    int safewalkMinimumPitch = -5;
+    int flySpeedPercent = 100;
+    int aimSlowdownPercent = 45;
+    int aimSpeedPercent = 35;
 };
 
 // Minecraft 1.8.9-only JNI binding cache. Only jclass global references and
@@ -179,6 +223,26 @@ public:
     // LWJGL release path each frame without repeatedly invoking Minecraft's
     // mapped focus methods.
     [[nodiscard]] bool maintainInputReleased(JNIEnv* env) noexcept;
+    // Main-thread edge assistant. It samples only four support blocks beneath
+    // the player's AABB and controls Minecraft's own sneak KeyBinding. The
+    // method restores the physical key state whenever the feature disables,
+    // the world disappears, or the agent shuts down.
+    [[nodiscard]] bool updateGameplay(JNIEnv* env,
+                                      const GameplaySettings& settings,
+                                      const GameSnapshot& snapshot,
+                                      std::uint64_t tickMilliseconds) noexcept;
+    // Adds a client-side component directly to EntityPlayerSP's chat log. It
+    // does not invoke the network handler and therefore cannot send a message
+    // to the server. Calls are de-duplicated by the roster generation.
+    void publishDebugChat(JNIEnv* env, bool enabled) noexcept;
+    // IPC/query threads may enqueue bounded diagnostics here. The Java chat
+    // call itself is always performed later by the attached render thread.
+    void enqueueDebugChatLine(std::string_view line) noexcept;
+    // Queues a local-only, clickable blacklist warning. Clicking it asks the
+    // Minecraft chat screen to prefill `/wdr <name>` via SUGGEST_COMMAND; the
+    // command is never sent automatically.
+    void enqueueWarningChatLine(std::string_view playerName,
+                                std::string_view reason) noexcept;
     void release(JNIEnv* env) noexcept;
     void abandon() noexcept;
 
@@ -206,7 +270,12 @@ private:
     void probeEnvironmentHints(JNIEnv* env,
                                bindings::ClientEnvironment& environment) noexcept;
     void clearException(JNIEnv* env) const noexcept;
+    [[nodiscard]] bool ensureLwjglMouseBindings(JNIEnv* env) noexcept;
+    [[nodiscard]] bool queryLwjglMouseGrabbed(JNIEnv* env, bool& grabbed) noexcept;
     [[nodiscard]] bool setLwjglMouseGrabbed(JNIEnv* env, bool grabbed) noexcept;
+    [[nodiscard]] bool ensureLwjglKeyboardBindings(JNIEnv* env) noexcept;
+    [[nodiscard]] bool queryLwjglKeyDown(JNIEnv* env, int lwjglKey,
+                                         bool& down) noexcept;
     static void deleteGlobalRefs(JNIEnv* env, BindingCache& cache) noexcept;
 
     JavaVM* m_vm = nullptr;
@@ -228,8 +297,63 @@ private:
     std::uint64_t m_entitySampleGeneration = 0U;
     std::uint64_t m_lastPlayerScan = 0U;
     std::uint64_t m_playerRosterGeneration = 0U;
+    std::uint64_t m_debugRosterGeneration = 0U;
+    std::uint64_t m_bedOwnershipGeneration = 0U;
+    std::uint64_t m_debugBedOwnershipGeneration = 0U;
+    struct MatchProbeState final {
+        bool sidebarAvailable = false;
+        bool tabAvailable = false;
+        bool sidebarEvidence = false;
+        bool rosterEvidence = false;
+        bool armorEvidence = false;
+        std::uint8_t sidebarLines = 0U;
+        std::uint8_t sidebarTeams = 0U;
+        std::uint8_t sidebarYouRows = 0U;
+        std::uint8_t rosterTaggedPlayers = 0U;
+        std::uint8_t rosterPlayers = 0U;
+        std::uint8_t rosterTeams = 0U;
+        char rosterOwnTeam = 'u';
+        char localArmorTeam = 'u';
+        std::uint8_t armorTeams = 0U;
+        std::uint8_t stableCount = 0U;
+
+        [[nodiscard]] bool operator==(const MatchProbeState&) const noexcept = default;
+    };
+    MatchProbeState m_matchProbe{};
+    std::uint64_t m_matchProbeGeneration = 0U;
+    std::uint64_t m_debugMatchProbeGeneration = 0U;
     jweak m_lastWorld = nullptr;
+    bedwars::Team m_sidebarCandidateTeam = bedwars::Team::Unknown;
+    std::uint8_t m_sidebarStableCount = 0U;
+    std::uint8_t m_sidebarMissingCount = 0U;
+    bool m_matchAnchorValid = false;
+    double m_matchAnchorX = 0.0;
+    double m_matchAnchorY = 0.0;
+    double m_matchAnchorZ = 0.0;
+    bool m_lockedOwnBedKnown = false;
+    int m_lockedOwnBedX = 0;
+    int m_lockedOwnBedY = 0;
+    int m_lockedOwnBedZ = 0;
+    GameSnapshot::OwnBedSource m_lockedOwnBedSource =
+        GameSnapshot::OwnBedSource::Unknown;
     GameSnapshot m_snapshot{};
+
+    static constexpr std::size_t DebugQueueCapacity = 32U;
+    static constexpr std::size_t DebugLineCapacity = 160U;
+    mutable SRWLOCK m_debugQueueLock = SRWLOCK_INIT;
+    std::array<std::array<char, DebugLineCapacity>, DebugQueueCapacity> m_debugQueue{};
+    std::uint32_t m_debugQueueHead = 0U;
+    std::uint32_t m_debugQueueCount = 0U;
+
+    struct WarningChatLine final {
+        std::array<char, 17U> playerName{};
+        std::array<char, 81U> reason{};
+    };
+    static constexpr std::size_t WarningQueueCapacity = 8U;
+    mutable SRWLOCK m_warningQueueLock = SRWLOCK_INIT;
+    std::array<WarningChatLine, WarningQueueCapacity> m_warningQueue{};
+    std::uint32_t m_warningQueueHead = 0U;
+    std::uint32_t m_warningQueueCount = 0U;
 
     struct PublishedBedCache final {
         std::array<BedMarker, GameSnapshot::MaxBedMarkers> markers{};
@@ -244,6 +368,20 @@ private:
 
     jclass m_lwjglMouseClass = nullptr;
     jmethodID m_lwjglSetGrabbed = nullptr;
+    jmethodID m_lwjglIsGrabbed = nullptr;
+    jclass m_lwjglKeyboardClass = nullptr;
+    jmethodID m_lwjglIsKeyDown = nullptr;
+    bool m_overlayInputSessionActive = false;
+    bool m_inputGrabStateKnown = false;
+    bool m_inputWasGrabbed = true;
+    bool m_safewalkSneakForced = false;
+    int m_safewalkSneakKeyCode = 0;
+    std::uint8_t m_safewalkSupportMask = 0U;
+    std::uint64_t m_safewalkReleaseAt = 0U;
+    std::uint64_t m_lastScaffoldPlacementTick = 0U;
+    std::uint64_t m_lastGameplayTick = 0U;
+    bool m_aimSensitivityModified = false;
+    float m_originalMouseSensitivity = 0.5F;
 };
 
 } // namespace mcoverlay

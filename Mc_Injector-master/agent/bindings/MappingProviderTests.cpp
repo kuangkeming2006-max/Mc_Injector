@@ -132,6 +132,33 @@ int main()
                          lunarCandidates.items[0]->scoreName == "aum" &&
                          lunarCandidates.items[0]->scoreSignature == "Laum;",
                      "verified 1.8.9 Notch scoreboard class mappings");
+    passed &= expect(lunarCandidates.items[0] != nullptr &&
+                         lunarCandidates.items[0]->scorePlayerTeamName == "aul" &&
+                         lunarCandidates.items[0]->scorePlayerTeamSignature == "Laul;" &&
+                         lunarCandidates.items[0]->teamSignature == "Lauq;" &&
+                         lunarCandidates.items[0]->getScoreboard == "Z" &&
+                         lunarCandidates.items[0]->getObjectiveInDisplaySlot == "a" &&
+                         lunarCandidates.items[0]->getPlayersTeam == "h" &&
+                         lunarCandidates.items[0]->getSortedScores == "i" &&
+                         lunarCandidates.items[0]->formatPlayerName == "a",
+                     "verified 1.8.9 Notch Sidebar method/signature mappings");
+    passed &= expect(lunarCandidates.items[0] != nullptr &&
+                         lunarCandidates.items[0]->netHandlerName == "bcy" &&
+                         lunarCandidates.items[0]->networkPlayerInfoName == "bdc" &&
+                         lunarCandidates.items[0]->getNetHandler == "u" &&
+                         lunarCandidates.items[0]->getPlayerInfoMap == "d" &&
+                         lunarCandidates.items[0]->getGameProfile == "a",
+                     "verified 1.8.9 Notch TAB roster mappings");
+    passed &= expect(lunarCandidates.items[0] != nullptr &&
+                         lunarCandidates.items[0]->gameSettingsName == "avh" &&
+                         lunarCandidates.items[0]->keyBindingName == "avb" &&
+                         lunarCandidates.items[0]->gameSettingsField == "t" &&
+                         lunarCandidates.items[0]->keyBindSneakField == "ad" &&
+                         lunarCandidates.items[0]->getKeyCode == "i" &&
+                         lunarCandidates.items[0]->setKeyBindState == "a" &&
+                         lunarCandidates.items[0]->rotationPitchField == "z" &&
+                         lunarCandidates.items[0]->isAirBlock == "d",
+                     "verified 1.8.9 Notch Safewalk mappings");
 
     MappingRegistry lunarNamedBuiltins;
     ClientEnvironment lunarNamed;
@@ -156,6 +183,15 @@ int main()
                          lunarNamedCandidates.items[0]->loadedEntitiesField ==
                              "loadedEntityList",
                      "Lunar named dictionary uses verified static/list fields");
+    passed &= expect(lunarNamedCandidates.items[0] != nullptr &&
+                         lunarNamedCandidates.items[0]->gameSettingsField ==
+                             "gameSettings" &&
+                         lunarNamedCandidates.items[0]->keyBindSneakField ==
+                             "keyBindSneak" &&
+                         lunarNamedCandidates.items[0]->setKeyBindState ==
+                             "setKeyBindState" &&
+                         lunarNamedCandidates.items[0]->isAirBlock == "isAirBlock",
+                     "Lunar named dictionary exposes optional Safewalk mappings");
 
     MappingRegistry external;
     std::string error;
