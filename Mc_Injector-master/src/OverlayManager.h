@@ -84,6 +84,12 @@ public:
     Q_PROPERTY(bool aimSlowdownMode READ aimSlowdownMode WRITE setAimSlowdownMode NOTIFY featureSettingsChanged)
     Q_PROPERTY(int aimSlowdownPercent READ aimSlowdownPercent WRITE setAimSlowdownPercent NOTIFY featureSettingsChanged)
     Q_PROPERTY(int aimSpeedPercent READ aimSpeedPercent WRITE setAimSpeedPercent NOTIFY featureSettingsChanged)
+    Q_PROPERTY(int aimMinimumDistance READ aimMinimumDistance WRITE setAimMinimumDistance NOTIFY featureSettingsChanged)
+    Q_PROPERTY(int aimMaximumDistance READ aimMaximumDistance WRITE setAimMaximumDistance NOTIFY featureSettingsChanged)
+    Q_PROPERTY(int aimFovDegrees READ aimFovDegrees WRITE setAimFovDegrees NOTIFY featureSettingsChanged)
+    Q_PROPERTY(int clickGuiWidthPercent READ clickGuiWidthPercent WRITE setClickGuiWidthPercent NOTIFY featureSettingsChanged)
+    Q_PROPERTY(int clickGuiHeightPercent READ clickGuiHeightPercent WRITE setClickGuiHeightPercent NOTIFY featureSettingsChanged)
+    Q_PROPERTY(int clickGuiOpacity READ clickGuiOpacity WRITE setClickGuiOpacity NOTIFY featureSettingsChanged)
     Q_PROPERTY(bool textGuiEnabled READ textGuiEnabled WRITE setTextGuiEnabled NOTIFY featureSettingsChanged)
     Q_PROPERTY(QString textGuiColor READ textGuiColor WRITE setTextGuiColor NOTIFY featureSettingsChanged)
     Q_PROPERTY(bool allowHypixelMovement READ allowHypixelMovement WRITE setAllowHypixelMovement NOTIFY featureSettingsChanged)
@@ -181,6 +187,12 @@ public:
     [[nodiscard]] bool aimSlowdownMode() const noexcept { return m_aimSlowdownMode; }
     [[nodiscard]] int aimSlowdownPercent() const noexcept { return m_aimSlowdownPercent; }
     [[nodiscard]] int aimSpeedPercent() const noexcept { return m_aimSpeedPercent; }
+    [[nodiscard]] int aimMinimumDistance() const noexcept { return m_aimMinimumDistance; }
+    [[nodiscard]] int aimMaximumDistance() const noexcept { return m_aimMaximumDistance; }
+    [[nodiscard]] int aimFovDegrees() const noexcept { return m_aimFovDegrees; }
+    [[nodiscard]] int clickGuiWidthPercent() const noexcept { return m_clickGuiWidthPercent; }
+    [[nodiscard]] int clickGuiHeightPercent() const noexcept { return m_clickGuiHeightPercent; }
+    [[nodiscard]] int clickGuiOpacity() const noexcept { return m_clickGuiOpacity; }
     [[nodiscard]] bool textGuiEnabled() const noexcept { return m_textGuiEnabled; }
     [[nodiscard]] QString textGuiColor() const { return m_textGuiColor; }
     [[nodiscard]] bool allowHypixelMovement() const noexcept { return m_allowHypixelMovement; }
@@ -273,6 +285,12 @@ public slots:
     void setAimSlowdownMode(bool enabled);
     void setAimSlowdownPercent(int coefficient);
     void setAimSpeedPercent(int speed);
+    void setAimMinimumDistance(int distance);
+    void setAimMaximumDistance(int distance);
+    void setAimFovDegrees(int degrees);
+    void setClickGuiWidthPercent(int percent);
+    void setClickGuiHeightPercent(int percent);
+    void setClickGuiOpacity(int opacity);
     void setTextGuiEnabled(bool enabled);
     void setTextGuiColor(const QString &color);
     void setAllowHypixelMovement(bool enabled);
@@ -488,6 +506,12 @@ private:
     bool m_aimSlowdownMode = true;
     int m_aimSlowdownPercent = 45;
     int m_aimSpeedPercent = 35;
+    int m_aimMinimumDistance = 0;
+    int m_aimMaximumDistance = 16;
+    int m_aimFovDegrees = 90;
+    int m_clickGuiWidthPercent = 100;
+    int m_clickGuiHeightPercent = 100;
+    int m_clickGuiOpacity = 96;
     bool m_textGuiEnabled = false;
     QString m_textGuiColor = QStringLiteral("#7EE7FF");
     int m_textGuiX = -1;

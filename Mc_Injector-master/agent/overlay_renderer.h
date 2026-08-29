@@ -85,6 +85,12 @@ struct FeatureSettings final {
     int longJumpSpeedPercent = 100;
     int aimSlowdownPercent = 45;
     int aimSpeedPercent = 35;
+    int aimMinimumDistance = 0;
+    int aimMaximumDistance = 16;
+    int aimFovDegrees = 90;
+    int clickGuiWidthPercent = 100;
+    int clickGuiHeightPercent = 100;
+    int clickGuiOpacity = 96;
     int textGuiX = -1;
     int textGuiY = -1;
     // Stored as 0xRRGGBB so the value is renderer-independent and can travel
@@ -320,6 +326,8 @@ private:
     float m_statsPanelDragStartPanelX = 0.0F;
     float m_statsPanelDragStartPanelY = 0.0F;
     bool m_blacklistAddOpen = false;
+    float m_blacklistAddProgress = 0.0F;
+    float m_blacklistAddVelocity = 0.0F;
     int m_blacklistSelectedPlayer = -1;
     std::array<char, 161U> m_blacklistReasonInput{};
     bool m_blacklistIdOnlyNick = false;

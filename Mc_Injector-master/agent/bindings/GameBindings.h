@@ -173,6 +173,9 @@ struct GameplaySettings final {
     int bhopAirSpeedPercent = 100;
     int aimSlowdownPercent = 45;
     int aimSpeedPercent = 35;
+    int aimMinimumDistance = 0;
+    int aimMaximumDistance = 16;
+    int aimFovDegrees = 90;
     int longJumpSpeedPercent = 100;
 };
 
@@ -383,6 +386,7 @@ private:
     int m_safewalkSneakKeyCode = 0;
     std::uint8_t m_safewalkSupportMask = 0U;
     std::uint64_t m_safewalkReleaseAt = 0U;
+    jint m_aimTargetEntityId = -1;
     std::uint64_t m_lastScaffoldPlacementTick = 0U;
     // Scaffold keeps the last supported block layer while the player is in
     // the air. Recomputing this from minY during a jump raises the target one

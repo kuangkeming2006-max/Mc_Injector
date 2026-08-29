@@ -162,7 +162,13 @@ FeatureSettings unpackFeatures(const std::uint32_t bits,
                                 const bool fireballEspFilled = true,
                                 const bool longJumpEnabled = false,
                                 const int longJumpSpeedPercent = 100,
-                                const std::uint32_t fireballEspColor = 0xFF9D3DU) noexcept
+                                const std::uint32_t fireballEspColor = 0xFF9D3DU,
+                                const int aimMinimumDistance = 0,
+                                const int aimMaximumDistance = 16,
+                                const int aimFovDegrees = 90,
+                                const int clickGuiWidthPercent = 100,
+                                const int clickGuiHeightPercent = 100,
+                                const int clickGuiOpacity = 96) noexcept
 {
     FeatureSettings s;
     s.espEnabled = (bits & 0x01U) != 0U;
@@ -245,6 +251,13 @@ FeatureSettings unpackFeatures(const std::uint32_t bits,
     s.longJumpEnabled = longJumpEnabled;
     s.longJumpSpeedPercent = std::clamp(longJumpSpeedPercent, 25, 250);
     s.fireballEspColor = fireballEspColor & 0xFFFFFFU;
+    s.aimMinimumDistance = std::clamp(aimMinimumDistance, 0, 64);
+    s.aimMaximumDistance = std::clamp(aimMaximumDistance,
+                                      std::max(1, s.aimMinimumDistance), 128);
+    s.aimFovDegrees = std::clamp(aimFovDegrees, 1, 360);
+    s.clickGuiWidthPercent = std::clamp(clickGuiWidthPercent, 80, 150);
+    s.clickGuiHeightPercent = std::clamp(clickGuiHeightPercent, 80, 150);
+    s.clickGuiOpacity = std::clamp(clickGuiOpacity, 35, 100);
     return s;
 }
 
@@ -743,8 +756,14 @@ void AgentRuntime::telemetryMain() noexcept
                 m_featureChangedFireballEspFilled.load(std::memory_order_acquire),
                 m_featureChangedLongJumpEnabled.load(std::memory_order_acquire),
                 m_featureChangedLongJumpSpeedPercent.load(std::memory_order_acquire),
-                m_featureChangedFireballEspColor.load(std::memory_order_acquire));
-            FixedLine<860U> line;
+                m_featureChangedFireballEspColor.load(std::memory_order_acquire),
+                m_featureChangedAimMinimumDistance.load(std::memory_order_acquire),
+                m_featureChangedAimMaximumDistance.load(std::memory_order_acquire),
+                m_featureChangedAimFovDegrees.load(std::memory_order_acquire),
+                m_featureChangedClickGuiWidthPercent.load(std::memory_order_acquire),
+                m_featureChangedClickGuiHeightPercent.load(std::memory_order_acquire),
+                m_featureChangedClickGuiOpacity.load(std::memory_order_acquire));
+            FixedLine<960U> line;
             if (line.append("FEATURE_STATE_CHANGED ") &&
                 line.appendInteger(settings.espEnabled ? 1 : 0) && line.append(' ') &&
                 line.appendInteger(settings.entityEspEnabled ? 1 : 0) && line.append(' ') &&
@@ -818,7 +837,13 @@ void AgentRuntime::telemetryMain() noexcept
                 line.appendInteger(settings.fireballEspFilled ? 1 : 0) && line.append(' ') &&
                 line.appendInteger(settings.longJumpEnabled ? 1 : 0) && line.append(' ') &&
                 line.appendInteger(settings.longJumpSpeedPercent) && line.append(' ') &&
-                line.appendInteger(settings.fireballEspColor) &&
+                line.appendInteger(settings.fireballEspColor) && line.append(' ') &&
+                line.appendInteger(settings.aimMinimumDistance) && line.append(' ') &&
+                line.appendInteger(settings.aimMaximumDistance) && line.append(' ') &&
+                line.appendInteger(settings.aimFovDegrees) && line.append(' ') &&
+                line.appendInteger(settings.clickGuiWidthPercent) && line.append(' ') &&
+                line.appendInteger(settings.clickGuiHeightPercent) && line.append(' ') &&
+                line.appendInteger(settings.clickGuiOpacity) &&
                 m_ipc->sendLine(line.view())) {
                 sentFeatureChangedRevision = featureRevision;
             }
@@ -1125,6 +1150,18 @@ void AgentRuntime::queueFeatureChanged(const FeatureSettings& settings) noexcept
                                std::memory_order_release);
     m_aimSpeedPercent.store(std::clamp(settings.aimSpeedPercent, 1, 100),
                             std::memory_order_release);
+    m_aimMinimumDistance.store(std::clamp(settings.aimMinimumDistance, 0, 64),
+                               std::memory_order_release);
+    m_aimMaximumDistance.store(std::clamp(settings.aimMaximumDistance,
+        std::max(1, settings.aimMinimumDistance), 128), std::memory_order_release);
+    m_aimFovDegrees.store(std::clamp(settings.aimFovDegrees, 1, 360),
+                          std::memory_order_release);
+    m_clickGuiWidthPercent.store(std::clamp(settings.clickGuiWidthPercent, 80, 150),
+                                 std::memory_order_release);
+    m_clickGuiHeightPercent.store(std::clamp(settings.clickGuiHeightPercent, 80, 150),
+                                  std::memory_order_release);
+    m_clickGuiOpacity.store(std::clamp(settings.clickGuiOpacity, 35, 100),
+                            std::memory_order_release);
     m_textGuiColor.store(settings.textGuiColor & 0xFFFFFFU,
                          std::memory_order_release);
     m_textGuiX.store(std::clamp(settings.textGuiX, -1, 1000),
@@ -1219,6 +1256,19 @@ void AgentRuntime::queueFeatureChanged(const FeatureSettings& settings) noexcept
     m_featureChangedAimSpeedPercent.store(
         std::clamp(settings.aimSpeedPercent, 1, 100),
         std::memory_order_relaxed);
+    m_featureChangedAimMinimumDistance.store(
+        std::clamp(settings.aimMinimumDistance, 0, 64), std::memory_order_relaxed);
+    m_featureChangedAimMaximumDistance.store(std::clamp(
+        settings.aimMaximumDistance, std::max(1, settings.aimMinimumDistance), 128),
+        std::memory_order_relaxed);
+    m_featureChangedAimFovDegrees.store(
+        std::clamp(settings.aimFovDegrees, 1, 360), std::memory_order_relaxed);
+    m_featureChangedClickGuiWidthPercent.store(
+        std::clamp(settings.clickGuiWidthPercent, 80, 150), std::memory_order_relaxed);
+    m_featureChangedClickGuiHeightPercent.store(
+        std::clamp(settings.clickGuiHeightPercent, 80, 150), std::memory_order_relaxed);
+    m_featureChangedClickGuiOpacity.store(
+        std::clamp(settings.clickGuiOpacity, 35, 100), std::memory_order_relaxed);
     m_featureChangedTextGuiColor.store(settings.textGuiColor & 0xFFFFFFU,
                                        std::memory_order_relaxed);
     m_featureChangedTextGuiX.store(std::clamp(settings.textGuiX, -1, 1000),
@@ -1366,6 +1416,12 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
         std::string longJumpEnabledToken;
         int longJumpSpeedPercent = 0;
         std::uint32_t fireballEspColor = 0U;
+        int aimMinimumDistance = 0;
+        int aimMaximumDistance = 0;
+        int aimFovDegrees = 0;
+        int clickGuiWidthPercent = 0;
+        int clickGuiHeightPercent = 0;
+        int clickGuiOpacity = 0;
         bool featureTokensRead = true;
         for (std::string& token : tokens) {
             if (!(stream >> token)) {
@@ -1388,7 +1444,10 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
                >> hotkeysPackedA >> hotkeysPackedB
                >> fireballEnabledToken >> fireballFilledToken
                >> longJumpEnabledToken >> longJumpSpeedPercent
-               >> fireballEspColor) ||
+               >> fireballEspColor >> aimMinimumDistance
+               >> aimMaximumDistance >> aimFovDegrees
+               >> clickGuiWidthPercent >> clickGuiHeightPercent
+               >> clickGuiOpacity) ||
             (stream >> trailing)) {
             (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE expected-thirty-two-flags-and-layout");
             return true;
@@ -1424,6 +1483,13 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
             flySpeedPercent < 10 || flySpeedPercent > 500 ||
             aimSlowdownPercent < 5 || aimSlowdownPercent > 95 ||
             aimSpeedPercent < 1 || aimSpeedPercent > 100 ||
+            aimMinimumDistance < 0 || aimMinimumDistance > 64 ||
+            aimMaximumDistance < std::max(1, aimMinimumDistance) ||
+            aimMaximumDistance > 128 ||
+            aimFovDegrees < 1 || aimFovDegrees > 360 ||
+            clickGuiWidthPercent < 80 || clickGuiWidthPercent > 150 ||
+            clickGuiHeightPercent < 80 || clickGuiHeightPercent > 150 ||
+            clickGuiOpacity < 35 || clickGuiOpacity > 100 ||
             textGuiColor > 0xFFFFFFU || textGuiX < -1 || textGuiX > 1000 ||
             textGuiY < -1 || textGuiY > 1000 ||
             bhopAirSpeedPercent < 10 || bhopAirSpeedPercent > 300 ||
@@ -1528,6 +1594,12 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
         settings.longJumpEnabled = longJumpEnabled;
         settings.longJumpSpeedPercent = longJumpSpeedPercent;
         settings.fireballEspColor = fireballEspColor;
+        settings.aimMinimumDistance = aimMinimumDistance;
+        settings.aimMaximumDistance = aimMaximumDistance;
+        settings.aimFovDegrees = aimFovDegrees;
+        settings.clickGuiWidthPercent = clickGuiWidthPercent;
+        settings.clickGuiHeightPercent = clickGuiHeightPercent;
+        settings.clickGuiOpacity = clickGuiOpacity;
         m_featureBits.store(packFeatures(settings), std::memory_order_release);
         m_bedDefenseRadius.store(defenseRadius, std::memory_order_release);
         m_bedThreatRadius.store(threatRadius, std::memory_order_release);
@@ -1578,6 +1650,12 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
         m_longJumpSpeedPercent.store(longJumpSpeedPercent,
                                      std::memory_order_release);
         m_fireballEspColor.store(fireballEspColor, std::memory_order_release);
+        m_aimMinimumDistance.store(aimMinimumDistance, std::memory_order_release);
+        m_aimMaximumDistance.store(aimMaximumDistance, std::memory_order_release);
+        m_aimFovDegrees.store(aimFovDegrees, std::memory_order_release);
+        m_clickGuiWidthPercent.store(clickGuiWidthPercent, std::memory_order_release);
+        m_clickGuiHeightPercent.store(clickGuiHeightPercent, std::memory_order_release);
+        m_clickGuiOpacity.store(clickGuiOpacity, std::memory_order_release);
         (void)m_ipc->sendLine("FEATURE_STATE_APPLIED");
         return true;
     }
@@ -2061,7 +2139,13 @@ void AgentRuntime::beforeSwapBuffers(HDC const deviceContext)
         m_fireballEspFilled.load(std::memory_order_acquire),
         m_longJumpEnabled.load(std::memory_order_acquire),
         m_longJumpSpeedPercent.load(std::memory_order_acquire),
-        m_fireballEspColor.load(std::memory_order_acquire));
+        m_fireballEspColor.load(std::memory_order_acquire),
+        m_aimMinimumDistance.load(std::memory_order_acquire),
+        m_aimMaximumDistance.load(std::memory_order_acquire),
+        m_aimFovDegrees.load(std::memory_order_acquire),
+        m_clickGuiWidthPercent.load(std::memory_order_acquire),
+        m_clickGuiHeightPercent.load(std::memory_order_acquire),
+        m_clickGuiOpacity.load(std::memory_order_acquire));
     const bool interactiveNow = m_interactive.load(std::memory_order_acquire);
     if (env != nullptr) {
         if (interactiveNow && !m_gameInputReleased) {
@@ -2144,6 +2228,9 @@ void AgentRuntime::beforeSwapBuffers(HDC const deviceContext)
         gameplay.bhopAirSpeedPercent = activeFeatures.bhopAirSpeedPercent;
         gameplay.aimSlowdownPercent = activeFeatures.aimSlowdownPercent;
         gameplay.aimSpeedPercent = activeFeatures.aimSpeedPercent;
+        gameplay.aimMinimumDistance = activeFeatures.aimMinimumDistance;
+        gameplay.aimMaximumDistance = activeFeatures.aimMaximumDistance;
+        gameplay.aimFovDegrees = activeFeatures.aimFovDegrees;
         gameplay.longJumpSpeedPercent = activeFeatures.longJumpSpeedPercent;
         (void)m_bindings->updateGameplay(env, gameplay, snapshot,
                                          tickMilliseconds);

@@ -122,6 +122,12 @@ private:
     std::atomic<std::uint32_t> m_fireballEspColor{0xFF9D3DU};
     std::atomic<int> m_aimSlowdownPercent{45};
     std::atomic<int> m_aimSpeedPercent{35};
+    std::atomic<int> m_aimMinimumDistance{0};
+    std::atomic<int> m_aimMaximumDistance{16};
+    std::atomic<int> m_aimFovDegrees{90};
+    std::atomic<int> m_clickGuiWidthPercent{100};
+    std::atomic<int> m_clickGuiHeightPercent{100};
+    std::atomic<int> m_clickGuiOpacity{96};
     std::atomic<std::uint32_t> m_textGuiColor{0x7EE7FFU};
     std::atomic<int> m_textGuiX{-1};
     std::atomic<int> m_textGuiY{-1};
@@ -220,6 +226,12 @@ private:
     std::atomic<std::uint32_t> m_featureChangedFireballEspColor{0xFF9D3DU};
     std::atomic<int> m_featureChangedAimSlowdownPercent{45};
     std::atomic<int> m_featureChangedAimSpeedPercent{35};
+    std::atomic<int> m_featureChangedAimMinimumDistance{0};
+    std::atomic<int> m_featureChangedAimMaximumDistance{16};
+    std::atomic<int> m_featureChangedAimFovDegrees{90};
+    std::atomic<int> m_featureChangedClickGuiWidthPercent{100};
+    std::atomic<int> m_featureChangedClickGuiHeightPercent{100};
+    std::atomic<int> m_featureChangedClickGuiOpacity{96};
     std::atomic<std::uint32_t> m_featureChangedTextGuiColor{0x7EE7FFU};
     std::atomic<int> m_featureChangedTextGuiX{-1};
     std::atomic<int> m_featureChangedTextGuiY{-1};

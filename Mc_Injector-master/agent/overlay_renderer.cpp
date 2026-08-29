@@ -1600,16 +1600,19 @@ void OverlayRenderer::renderInventoryBlur(const float strength) noexcept
     ::glPushMatrix();
     ::glLoadIdentity();
     struct BlurSample final { float x; float y; float weight; };
-    // Preserve the previous kernel's 0.921 aggregate opacity and 19 px extent,
+    // Preserve the previous kernel's aggregate opacity, but widen its sampling
+    // radius. Bilinear filtering turns these wider taps into a stronger frosted
+    // glass separation without adding full-screen passes or changing animation
+    // timing.
     // but fold the diagonal ring into the bilinear near/far weights. Nine full
     // screen samples instead of thirteen reduce fill bandwidth by about 31%
     // without changing the GUI animation or its perceived blur strength.
     constexpr std::array<BlurSample, 9U> samples{{
         {0.0F, 0.0F, 0.145F},
-        {-9.0F, 0.0F, 0.120F}, {9.0F, 0.0F, 0.120F},
-        {0.0F, -9.0F, 0.120F}, {0.0F, 9.0F, 0.120F},
-        {-19.0F, 0.0F, 0.074F}, {19.0F, 0.0F, 0.074F},
-        {0.0F, -19.0F, 0.074F}, {0.0F, 19.0F, 0.074F}}};
+        {-13.0F, 0.0F, 0.120F}, {13.0F, 0.0F, 0.120F},
+        {0.0F, -13.0F, 0.120F}, {0.0F, 13.0F, 0.120F},
+        {-29.0F, 0.0F, 0.074F}, {29.0F, 0.0F, 0.074F},
+        {0.0F, -29.0F, 0.074F}, {0.0F, 29.0F, 0.074F}}};
     for (const BlurSample& sample : samples) {
         ::glColor4f(1.0F, 1.0F, 1.0F, sample.weight * strength);
         const float x0 = sample.x;
@@ -2287,8 +2290,12 @@ bool OverlayRenderer::render(HDC const deviceContext,
     // each page owns its top-right master switch and all related detail
     // settings. Categories are labels, never collapsing containers, so every
     // function remains one click away.
-    constexpr float baseGuiWidth = 820.0F;
-    constexpr float baseGuiHeight = 650.0F;
+    const float baseGuiWidth = 820.0F * static_cast<float>(std::clamp(
+        m_features.clickGuiWidthPercent, 80, 150)) / 100.0F;
+    // Keep the navigation rail usable at the smallest height while still
+    // allowing generous vertical expansion on larger displays.
+    const float baseGuiHeight = std::max(620.0F, 650.0F * static_cast<float>(
+        std::clamp(m_features.clickGuiHeightPercent, 80, 150)) / 100.0F);
     constexpr float baseRailWidth = 198.0F;
     const float guiWidth = baseGuiWidth * uiScale;
     const float guiHeight = baseGuiHeight * uiScale;
@@ -2307,10 +2314,14 @@ bool OverlayRenderer::render(HDC const deviceContext,
                       dark.w + (light.w - dark.w) * amount);
     };
     const float theme = std::clamp(m_clickGuiThemeProgress, 0.0F, 1.0F);
-    const ImVec4 guiSurface = mixColor(ImVec4(0.075F, 0.068F, 0.096F, 0.98F),
-                                      ImVec4(0.965F, 0.956F, 0.975F, 0.98F), theme);
-    const ImVec4 guiRail = mixColor(ImVec4(0.055F, 0.050F, 0.073F, 1.0F),
-                                   ImVec4(0.918F, 0.906F, 0.938F, 1.0F), theme);
+    ImVec4 guiSurface = mixColor(ImVec4(0.075F, 0.068F, 0.096F, 0.98F),
+                                ImVec4(0.965F, 0.956F, 0.975F, 0.98F), theme);
+    ImVec4 guiRail = mixColor(ImVec4(0.055F, 0.050F, 0.073F, 1.0F),
+                             ImVec4(0.918F, 0.906F, 0.938F, 1.0F), theme);
+    const float guiOpacity = static_cast<float>(std::clamp(
+        m_features.clickGuiOpacity, 35, 100)) / 100.0F;
+    guiSurface.w = guiOpacity;
+    guiRail.w = std::min(1.0F, guiOpacity + 0.03F);
     const ImVec4 guiText = mixColor(ImVec4(0.94F, 0.92F, 0.98F, 1.0F),
                                    ImVec4(0.10F, 0.09F, 0.13F, 1.0F), theme);
     const ImVec4 guiMuted = mixColor(ImVec4(0.59F, 0.56F, 0.65F, 1.0F),
@@ -2453,19 +2464,25 @@ bool OverlayRenderer::render(HDC const deviceContext,
                                 "Native workspace");
 
             struct NavItem final { const char* label; int page; float y; };
-            constexpr std::array<NavItem, 16U> navItems{{
-                {"Player ESP", 0, 84.0F}, {"Bed ESP", 1, 109.0F},
-                {"Nametag", 2, 134.0F}, {"Fireball ESP", 14, 159.0F},
-                {"Bed Alert", 3, 211.0F}, {"Safewalk", 4, 257.0F},
-                {"Scaffold", 5, 282.0F}, {"Fly", 6, 307.0F},
-                {"BHop", 7, 332.0F}, {"LongJump", 15, 357.0F},
-                {"Aim Assist", 8, 382.0F}, {"Player Stats", 9, 428.0F},
-                {"Debug", 10, 453.0F}, {"Blacklist", 11, 478.0F},
-                {"Text GUI", 12, 524.0F}, {"Interface", 13, 570.0F}}};
-            constexpr std::array<std::pair<const char*, float>, 6U> navGroups{{
-                {"ESP", 68.0F}, {"ALERT", 195.0F}, {"SAFE", 241.0F},
-                {"DATA", 412.0F}, {"HUD", 508.0F},
-                {"APPLICATION", 554.0F}}};
+            const float railLayoutScale = std::clamp(
+                (baseGuiHeight - 80.0F - 68.0F) / (570.0F - 68.0F),
+                0.86F, 1.15F);
+            const auto railY = [&](const float original) noexcept {
+                return 68.0F + (original - 68.0F) * railLayoutScale;
+            };
+            const std::array<NavItem, 16U> navItems{{
+                {"Player ESP", 0, railY(84.0F)}, {"Bed ESP", 1, railY(109.0F)},
+                {"Nametag", 2, railY(134.0F)}, {"Fireball ESP", 14, railY(159.0F)},
+                {"Bed Alert", 3, railY(211.0F)}, {"Safewalk", 4, railY(257.0F)},
+                {"Scaffold", 5, railY(282.0F)}, {"Fly", 6, railY(307.0F)},
+                {"BHop", 7, railY(332.0F)}, {"LongJump", 15, railY(357.0F)},
+                {"Aim Assist", 8, railY(382.0F)}, {"Player Stats", 9, railY(428.0F)},
+                {"Debug", 10, railY(453.0F)}, {"Blacklist", 11, railY(478.0F)},
+                {"Text GUI", 12, railY(524.0F)}, {"Interface", 13, railY(570.0F)}}};
+            const std::array<std::pair<const char*, float>, 6U> navGroups{{
+                {"ESP", railY(68.0F)}, {"ALERT", railY(195.0F)},
+                {"SAFE", railY(241.0F)}, {"DATA", railY(412.0F)},
+                {"HUD", railY(508.0F)}, {"APPLICATION", railY(554.0F)}}};
             float targetNavY = navItems.front().y;
             for (const NavItem& item : navItems)
                 if (item.page == m_clickGuiPage) { targetNavY = item.y; break; }
@@ -2481,10 +2498,10 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     guiAccent.x, guiAccent.y, guiAccent.z, 0.18F)),
                 10.0F * uiScale);
             windowDraw->AddRectFilled(
-                ImVec2(windowPosition.x + 10.0F * uiScale,
-                       windowPosition.y + (m_clickGuiNavPosition + 5.0F) * uiScale),
-                ImVec2(windowPosition.x + 13.0F * uiScale,
-                       windowPosition.y + (m_clickGuiNavPosition + 20.0F) * uiScale),
+                ImVec2(windowPosition.x + 12.0F * uiScale,
+                       windowPosition.y + (m_clickGuiNavPosition + 3.0F) * uiScale),
+                ImVec2(windowPosition.x + 15.0F * uiScale,
+                       windowPosition.y + (m_clickGuiNavPosition + 17.0F) * uiScale),
                 fadedGuiColor(guiAccent), 1.5F * uiScale);
             for (const auto& group : navGroups) {
                 windowDraw->AddText(boldFont, ImGui::GetFontSize() * 0.72F,
@@ -2960,6 +2977,21 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     changed |= ImGui::SliderInt("Aim speed",
                         &m_features.aimSpeedPercent, 1, 100, "%d%%",
                         ImGuiSliderFlags_AlwaysClamp);
+                sectionTitle("TARGET WINDOW");
+                ImGui::SetNextItemWidth(320.0F * uiScale);
+                changed |= ImGui::SliderInt("Minimum distance",
+                    &m_features.aimMinimumDistance, 0,
+                    std::max(0, m_features.aimMaximumDistance - 1), "%d blocks",
+                    ImGuiSliderFlags_AlwaysClamp);
+                ImGui::SetNextItemWidth(320.0F * uiScale);
+                changed |= ImGui::SliderInt("Maximum distance",
+                    &m_features.aimMaximumDistance,
+                    std::max(1, m_features.aimMinimumDistance), 128, "%d blocks",
+                    ImGuiSliderFlags_AlwaysClamp);
+                ImGui::SetNextItemWidth(320.0F * uiScale);
+                changed |= ImGui::SliderInt("Field of view",
+                    &m_features.aimFovDegrees, 1, 360, "%d deg",
+                    ImGuiSliderFlags_AlwaysClamp);
                 ImGui::TextDisabled("Only colour-validated enemy TAB players are eligible targets.");
             } else if (page == 9) {
                 sectionTitle("VISIBILITY");
@@ -3091,84 +3123,12 @@ bool OverlayRenderer::render(HDC const deviceContext,
                 if (blacklistSettingsChanged) publishBlacklistSettings();
 
                 sectionTitle("ADD RECENT PLAYER");
-                if (ImGui::Button(m_blacklistAddOpen ? "Close" : "+ Add player",
+                if (ImGui::Button("+ Add player",
                                   ImVec2(130.0F * uiScale, 0.0F))) {
-                    m_blacklistAddOpen = !m_blacklistAddOpen;
-                    if (!m_blacklistAddOpen) m_blacklistSelectedPlayer = -1;
+                    m_blacklistAddOpen = true;
                 }
-                if (m_blacklistAddOpen) {
-                    const char* preview = "Select a recent player";
-                    if (m_blacklistSelectedPlayer >= 0 &&
-                        static_cast<std::uint32_t>(m_blacklistSelectedPlayer) <
-                            snapshot.playerCount) {
-                        preview = snapshot.players[static_cast<std::size_t>(
-                            m_blacklistSelectedPlayer)].name.data();
-                    }
-                    ImGui::SetNextItemWidth(300.0F * uiScale);
-                    if (ImGui::BeginCombo("##blacklistRecent", preview)) {
-                        for (std::uint32_t index = 0U; index < snapshot.playerCount; ++index) {
-                            const PlayerIdentity& identity = snapshot.players[index];
-                            const bool selected = static_cast<int>(index) ==
-                                m_blacklistSelectedPlayer;
-                            char label[64]{};
-                            std::snprintf(label, sizeof(label), "%s%s",
-                                identity.name.data(),
-                                identity.uuid[0U] == '\0' ? "  (nick / no UUID)" : "");
-                            if (ImGui::Selectable(label, selected)) {
-                                m_blacklistSelectedPlayer = static_cast<int>(index);
-                                m_blacklistIdOnlyNick = identity.uuid[0U] == '\0';
-                            }
-                        }
-                        ImGui::EndCombo();
-                    }
-                    ImGui::SetNextItemWidth(360.0F * uiScale);
-                    ImGui::InputTextWithHint("##blacklistReason", "Reason",
-                        m_blacklistReasonInput.data(), m_blacklistReasonInput.size());
-                    if (m_blacklist.presetCount > 0U) {
-                        ImGui::TextDisabled("Reason presets");
-                        for (std::uint32_t index = 0U;
-                             index < m_blacklist.presetCount; ++index) {
-                            if (index != 0U) ImGui::SameLine();
-                            ImGui::PushID(static_cast<int>(index));
-                            if (ImGui::SmallButton(m_blacklist.presets[index].data()))
-                                std::snprintf(m_blacklistReasonInput.data(),
-                                    m_blacklistReasonInput.size(), "%s",
-                                    m_blacklist.presets[index].data());
-                            ImGui::PopID();
-                        }
-                    }
-                    if (m_blacklist.allowIdOnlyNicks)
-                        ImGui::Checkbox("Store ID only when UUID is unavailable",
-                                        &m_blacklistIdOnlyNick);
-                    ImGui::Checkbox("Warn on encounter", &m_blacklistWarnOnEncounter);
-                    const bool selectionValid = m_blacklistSelectedPlayer >= 0 &&
-                        static_cast<std::uint32_t>(m_blacklistSelectedPlayer) <
-                            snapshot.playerCount;
-                    if (!selectionValid) ImGui::BeginDisabled();
-                    if (ImGui::Button("Add to blacklist",
-                                      ImVec2(170.0F * uiScale, 0.0F)) &&
-                        selectionValid) {
-                        const PlayerIdentity& identity = snapshot.players[
-                            static_cast<std::size_t>(m_blacklistSelectedPlayer)];
-                        m_blacklistAction = {};
-                        m_blacklistAction.type = BlacklistAction::Type::Add;
-                        std::snprintf(m_blacklistAction.name.data(),
-                            m_blacklistAction.name.size(), "%s", identity.name.data());
-                        std::snprintf(m_blacklistAction.uuid.data(),
-                            m_blacklistAction.uuid.size(), "%s", identity.uuid.data());
-                        std::snprintf(m_blacklistAction.reason.data(),
-                            m_blacklistAction.reason.size(), "%s",
-                            m_blacklistReasonInput[0U] == '\0'
-                                ? "No reason supplied" : m_blacklistReasonInput.data());
-                        m_blacklistAction.idOnlyNick = m_blacklistIdOnlyNick;
-                        m_blacklistAction.warnOnEncounter = m_blacklistWarnOnEncounter;
-                        m_blacklistActionDirty = true;
-                        m_blacklistAddOpen = false;
-                        m_blacklistSelectedPlayer = -1;
-                        m_blacklistReasonInput.fill('\0');
-                    }
-                    if (!selectionValid) ImGui::EndDisabled();
-                }
+                ImGui::SameLine();
+                ImGui::TextDisabled("Opens a separate animated dialog.");
 
                 sectionTitle("SAVED PLAYERS");
                 ImGui::BeginChild("##blacklistEntries", ImVec2(0.0F, 190.0F * uiScale),
@@ -3264,6 +3224,18 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     }
                     if (selected) ImGui::PopStyleColor();
                 }
+                ImGui::SetNextItemWidth(320.0F * uiScale);
+                changed |= ImGui::SliderInt("Window width",
+                    &m_features.clickGuiWidthPercent, 80, 150, "%d%%",
+                    ImGuiSliderFlags_AlwaysClamp);
+                ImGui::SetNextItemWidth(320.0F * uiScale);
+                changed |= ImGui::SliderInt("Window height",
+                    &m_features.clickGuiHeightPercent, 80, 150, "%d%%",
+                    ImGuiSliderFlags_AlwaysClamp);
+                ImGui::SetNextItemWidth(320.0F * uiScale);
+                changed |= ImGui::SliderInt("Surface opacity",
+                    &m_features.clickGuiOpacity, 35, 100, "%d%%",
+                    ImGuiSliderFlags_AlwaysClamp);
                 sectionTitle("INPUT");
                 hotkeyControl("Open Click GUI", 1, m_menuHotkey);
                 ImGui::TextDisabled("ESC closes the GUI and restores Minecraft mouse capture.");
@@ -3371,6 +3343,176 @@ bool OverlayRenderer::render(HDC const deviceContext,
         ImGui::PopStyleVar(4);
     }
 
+    // Adding a recent player is intentionally a separate modal surface. It no
+    // longer expands the Blacklist settings page and therefore cannot disturb
+    // that page's scroll position or make the form feel visually mixed with
+    // persistent settings.
+    if (!interactive) m_blacklistAddOpen = false;
+    advancePresentationSpring(m_blacklistAddProgress,
+                              m_blacklistAddVelocity,
+                              m_blacklistAddOpen ? 1.0F : 0.0F, delta);
+    if (m_blacklistAddProgress > 0.005F) {
+        const float modalProgress = std::clamp(m_blacklistAddProgress, 0.0F, 1.0F);
+        const float modalEase = modalProgress * modalProgress *
+                                (3.0F - 2.0F * modalProgress);
+        const float modalScale = 1.12F - 0.12F * m_blacklistAddProgress;
+        const ImVec2 modalSize(460.0F * uiScale, 392.0F * uiScale);
+        const ImVec2 modalPosition(
+            std::max(6.0F, (io.DisplaySize.x - modalSize.x) * 0.5F),
+            std::max(6.0F, (io.DisplaySize.y - modalSize.y) * 0.5F));
+        const ImVec2 modalCenter(modalPosition.x + modalSize.x * 0.5F,
+                                 modalPosition.y + modalSize.y * 0.5F);
+        ImGui::SetNextWindowPos(ImVec2(0.0F, 0.0F), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        if (ImGui::Begin("##BlacklistAddModalBlocker", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
+                ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoNav)) {
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                ImVec2(0.0F, 0.0F), io.DisplaySize,
+                IM_COL32(5, 4, 9, static_cast<int>(82.0F * modalEase)));
+            ImGui::InvisibleButton("##blacklistModalOutside", io.DisplaySize);
+            if (interactive && modalProgress > 0.985F &&
+                ImGui::IsItemClicked(ImGuiMouseButton_Left))
+                m_blacklistAddOpen = false;
+        }
+        ImGui::End();
+        ImGui::PopStyleVar();
+        ImGui::SetNextWindowPos(modalPosition, ImGuiCond_Always);
+        ImGui::SetNextWindowSize(modalSize, ImGuiCond_Always);
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, modalEase);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                            ImVec2(22.0F * uiScale, 20.0F * uiScale));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 18.0F * uiScale);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0F);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, guiSurface);
+        ImGui::PushStyleColor(ImGuiCol_Text, guiText);
+        ImGui::PushStyleColor(ImGuiCol_TextDisabled, guiMuted);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, guiFrame);
+        ImGui::PushStyleColor(ImGuiCol_Button, guiFrame);
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+            ImVec4(guiAccent.x, guiAccent.y, guiAccent.z, 0.76F));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, guiAccent);
+        ImGui::PushStyleColor(ImGuiCol_CheckMark, guiAccent);
+        ImGuiWindowFlags modalFlags = ImGuiWindowFlags_NoTitleBar |
+            ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse;
+        if (!interactive || modalProgress < 0.985F)
+            modalFlags |= ImGuiWindowFlags_NoInputs;
+        ImDrawList* modalDraw = nullptr;
+        int modalVertexEnd = 0;
+        if (ImGui::Begin("##BlacklistAddDialog", nullptr, modalFlags)) {
+            modalDraw = ImGui::GetWindowDrawList();
+            ImFont* const modalBold = m_boldFonts[static_cast<std::size_t>(
+                std::clamp(m_guiScaleIndex, 0, 3))] != nullptr
+                ? m_boldFonts[static_cast<std::size_t>(
+                    std::clamp(m_guiScaleIndex, 0, 3))] : ImGui::GetFont();
+            ImGui::PushFont(modalBold);
+            ImGui::TextUnformatted("Add to blacklist");
+            ImGui::PopFont();
+            ImGui::SameLine(modalSize.x - 61.0F * uiScale);
+            if (ImGui::Button("x", ImVec2(30.0F * uiScale,
+                                           28.0F * uiScale)))
+                m_blacklistAddOpen = false;
+            ImGui::TextDisabled("Choose a recently observed player; UUID is preferred when available.");
+            ImGui::Spacing();
+            const char* preview = "Select a recent player";
+            if (m_blacklistSelectedPlayer >= 0 &&
+                static_cast<std::uint32_t>(m_blacklistSelectedPlayer) <
+                    snapshot.playerCount) {
+                preview = snapshot.players[static_cast<std::size_t>(
+                    m_blacklistSelectedPlayer)].name.data();
+            }
+            ImGui::SetNextItemWidth(-1.0F);
+            if (ImGui::BeginCombo("##blacklistRecentModal", preview)) {
+                for (std::uint32_t index = 0U; index < snapshot.playerCount; ++index) {
+                    const PlayerIdentity& identity = snapshot.players[index];
+                    const bool selected = static_cast<int>(index) ==
+                                          m_blacklistSelectedPlayer;
+                    char label[64]{};
+                    std::snprintf(label, sizeof(label), "%s%s",
+                        identity.name.data(), identity.uuid[0U] == '\0'
+                            ? "  (nick / no UUID)" : "");
+                    if (ImGui::Selectable(label, selected)) {
+                        m_blacklistSelectedPlayer = static_cast<int>(index);
+                        m_blacklistIdOnlyNick = identity.uuid[0U] == '\0';
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SetNextItemWidth(-1.0F);
+            ImGui::InputTextWithHint("##blacklistReasonModal", "Reason",
+                m_blacklistReasonInput.data(), m_blacklistReasonInput.size());
+            if (m_blacklist.presetCount > 0U) {
+                ImGui::TextDisabled("Reason presets");
+                for (std::uint32_t index = 0U;
+                     index < m_blacklist.presetCount; ++index) {
+                    if (index != 0U) ImGui::SameLine();
+                    ImGui::PushID(static_cast<int>(index));
+                    if (ImGui::SmallButton(m_blacklist.presets[index].data()))
+                        std::snprintf(m_blacklistReasonInput.data(),
+                            m_blacklistReasonInput.size(), "%s",
+                            m_blacklist.presets[index].data());
+                    ImGui::PopID();
+                }
+            }
+            if (m_blacklist.allowIdOnlyNicks)
+                ImGui::Checkbox("Store ID only when UUID is unavailable",
+                                &m_blacklistIdOnlyNick);
+            ImGui::Checkbox("Warn on encounter", &m_blacklistWarnOnEncounter);
+            const bool selectionValid = m_blacklistSelectedPlayer >= 0 &&
+                static_cast<std::uint32_t>(m_blacklistSelectedPlayer) <
+                    snapshot.playerCount;
+            ImGui::SetCursorPosY(modalSize.y - 58.0F * uiScale);
+            if (ImGui::Button("Cancel", ImVec2(104.0F * uiScale, 34.0F * uiScale)))
+                m_blacklistAddOpen = false;
+            ImGui::SameLine();
+            if (!selectionValid) ImGui::BeginDisabled();
+            if (ImGui::Button("Add player",
+                              ImVec2(138.0F * uiScale, 34.0F * uiScale)) &&
+                selectionValid) {
+                const PlayerIdentity& identity = snapshot.players[
+                    static_cast<std::size_t>(m_blacklistSelectedPlayer)];
+                m_blacklistAction = {};
+                m_blacklistAction.type = BlacklistAction::Type::Add;
+                std::snprintf(m_blacklistAction.name.data(),
+                    m_blacklistAction.name.size(), "%s", identity.name.data());
+                std::snprintf(m_blacklistAction.uuid.data(),
+                    m_blacklistAction.uuid.size(), "%s", identity.uuid.data());
+                std::snprintf(m_blacklistAction.reason.data(),
+                    m_blacklistAction.reason.size(), "%s",
+                    m_blacklistReasonInput[0U] == '\0'
+                        ? "No reason supplied" : m_blacklistReasonInput.data());
+                m_blacklistAction.idOnlyNick = m_blacklistIdOnlyNick;
+                m_blacklistAction.warnOnEncounter = m_blacklistWarnOnEncounter;
+                m_blacklistActionDirty = true;
+                m_blacklistAddOpen = false;
+                m_blacklistSelectedPlayer = -1;
+                m_blacklistReasonInput.fill('\0');
+            }
+            if (!selectionValid) ImGui::EndDisabled();
+            // SetCursorPosY deliberately extends to the modal footer. Submit a
+            // final bounded item so Dear ImGui can validate the content extent.
+            ImGui::Dummy(ImVec2(1.0F, 1.0F));
+            modalVertexEnd = modalDraw->VtxBuffer.Size;
+        }
+        ImGui::End();
+        ImGui::PopStyleColor(8);
+        ImGui::PopStyleVar(4);
+        if (modalDraw != nullptr && std::abs(modalScale - 1.0F) > 0.0001F) {
+            modalVertexEnd = std::clamp(modalVertexEnd, 0,
+                                        modalDraw->VtxBuffer.Size);
+            for (int vertex = 0; vertex < modalVertexEnd; ++vertex) {
+                ImVec2& position = modalDraw->VtxBuffer[vertex].pos;
+                position.x = modalCenter.x +
+                    (position.x - modalCenter.x) * modalScale;
+                position.y = modalCenter.y +
+                    (position.y - modalCenter.y) * modalScale;
+            }
+        }
+    }
+
     // Text GUI is deliberately a text-only HUD: no window surface is drawn.
     // A single invisible hit target owns dragging while the Click GUI is open,
     // avoiding competing per-row hover/cursor state.
@@ -3458,24 +3600,42 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     float glyphX = textX + width - textSize.x - 4.0F * uiScale +
                                    (1.0F - eased) * 18.0F * uiScale;
                     const float glyphY = rowY + (1.0F - eased) * 4.0F * uiScale;
-                    // A character-phase highlight creates an actual flowing
-                    // sheen instead of tinting the entire row at once.
+                    // Stable premium text with one sparse diagonal specular
+                    // sweep. Unlike the old per-character sine wave, the base
+                    // label never cycles like karaoke lyrics; only a narrow,
+                    // coherent light band crosses the whole HUD every few
+                    // seconds.
+                    const float rowTone = 0.86F + 0.10F * std::sin(
+                        static_cast<float>(moduleIndex) * 0.63F + 0.4F);
+                    const ImVec4 stable(
+                        std::clamp(base.x * rowTone + 0.08F, 0.0F, 1.0F),
+                        std::clamp(base.y * rowTone + 0.08F, 0.0F, 1.0F),
+                        std::clamp(base.z * rowTone + 0.08F, 0.0F, 1.0F), eased);
+                    textDraw->AddText(ImVec2(glyphX + 1.0F, glyphY + 1.5F),
+                        IM_COL32(0, 0, 0, static_cast<int>(150.0F * eased)),
+                        module.name);
+                    textDraw->AddText(ImVec2(glyphX, glyphY),
+                        ImGui::ColorConvertFloat4ToU32(stable), module.name);
+
+                    const float sweepPhase = std::fmod(
+                        static_cast<float>(ImGui::GetTime()), 3.6F) / 3.6F;
+                    const float sweepPosition = -0.22F + sweepPhase * 1.44F;
                     for (std::size_t characterIndex = 0U;
                          module.name[characterIndex] != '\0'; ++characterIndex) {
                         char glyph[2]{module.name[characterIndex], '\0'};
-                        const float wave = 0.5F + 0.5F * std::sin(
-                            static_cast<float>(ImGui::GetTime()) * 3.0F -
-                            static_cast<float>(characterIndex) * 0.48F +
-                            static_cast<float>(moduleIndex) * 0.31F);
-                        const ImVec4 flowing(
-                            base.x + (1.0F - base.x) * wave * 0.58F,
-                            base.y + (1.0F - base.y) * wave * 0.58F,
-                            base.z + (1.0F - base.z) * wave * 0.58F, eased);
-                        textDraw->AddText(ImVec2(glyphX + 1.0F, glyphY + 1.0F),
-                            IM_COL32(0, 0, 0, static_cast<int>(120.0F * eased)), glyph);
-                        textDraw->AddText(ImVec2(glyphX, glyphY),
-                            ImGui::ColorConvertFloat4ToU32(flowing), glyph);
-                        glyphX += ImGui::CalcTextSize(glyph).x;
+                        const float glyphWidth = ImGui::CalcTextSize(glyph).x;
+                        const float normalizedX = (glyphX + glyphWidth * 0.5F - textX) /
+                            std::max(1.0F, width) +
+                            static_cast<float>(moduleIndex) * 0.018F;
+                        const float distance = (normalizedX - sweepPosition) / 0.075F;
+                        const float sheen = std::exp(-distance * distance) *
+                                            0.78F * eased;
+                        if (sheen > 0.008F) {
+                            textDraw->AddText(ImVec2(glyphX, glyphY),
+                                IM_COL32(255, 255, 255,
+                                    static_cast<int>(255.0F * sheen)), glyph);
+                        }
+                        glyphX += glyphWidth;
                     }
                     rowY += lineHeight * progress;
                 }
@@ -4072,8 +4232,15 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     }
                 }
             }
-            panelDraw->AddRectFilled(ImVec2(minimum.x + 4, minimum.y + 7),
-                ImVec2(maximum.x + 4, maximum.y + 7), IM_COL32(0,0,0,72), 18.0F);
+            // A drop shadow extending below a 58 px collapsed window is
+            // clipped by ImGui's rectangular window clip and becomes the
+            // straight strip seen under the rounded card. Omit it only for the
+            // collapsed state; the expanded surface keeps its elevation.
+            if (!m_blacklist.collapsed) {
+                panelDraw->AddRectFilled(ImVec2(minimum.x + 4, minimum.y + 7),
+                    ImVec2(maximum.x + 4, maximum.y + 7),
+                    IM_COL32(0,0,0,72), 18.0F);
+            }
             panelDraw->AddRectFilled(minimum, maximum,
                 packedRgbColor(m_blacklist.panelColor, surfaceAlpha), 18.0F);
             panelDraw->AddRect(minimum, maximum, IM_COL32(255,255,255,42),
@@ -4294,18 +4461,32 @@ bool OverlayRenderer::render(HDC const deviceContext,
             }
             entriesEnd = entriesDraw->VtxBuffer.Size;
             ImGui::EndChild();
-            ImGui::SetCursorScreenPos(ImVec2(minimum.x + 14.0F, maximum.y - 38.0F));
+            const ImVec2 addMin(minimum.x + 14.0F, maximum.y - 38.0F);
+            ImGui::SetCursorScreenPos(addMin);
             // Always submit an item after SetCursorScreenPos. The window's
             // NoInputs flag already makes the button inert while the Click
             // GUI is closed; short-circuiting the Button call here left the
             // cursor beyond the previous content boundary and trips ImGui's
             // ErrorCheckUsingSetCursorPosToExtendParentBoundaries assertion.
-            if (ImGui::Button("+", ImVec2(34.0F, 28.0F)) && interactive) {
+            if (ImGui::InvisibleButton("##BlacklistAddPlayer",
+                                       ImVec2(34.0F, 28.0F)) && interactive) {
                 m_previousClickGuiPage = m_clickGuiPage;
                 m_clickGuiPage = 11;
                 m_clickGuiPageProgress = 0.0F;
                 m_blacklistAddOpen = true;
             }
+            const bool addHovered = interactive && ImGui::IsItemHovered();
+            panelDraw->AddRectFilled(addMin,
+                ImVec2(addMin.x + 34.0F, addMin.y + 28.0F),
+                addHovered ? IM_COL32(255,255,255,34)
+                           : IM_COL32(255,255,255,20), 10.0F);
+            const ImVec2 addCenter(addMin.x + 17.0F, addMin.y + 14.0F);
+            panelDraw->AddLine(ImVec2(addCenter.x - 5.5F, addCenter.y),
+                               ImVec2(addCenter.x + 5.5F, addCenter.y),
+                               IM_COL32(242,236,248,255), 2.0F);
+            panelDraw->AddLine(ImVec2(addCenter.x, addCenter.y - 5.5F),
+                               ImVec2(addCenter.x, addCenter.y + 5.5F),
+                               IM_COL32(242,236,248,255), 2.0F);
             }
             panelEnd = panelDraw->VtxBuffer.Size;
         }

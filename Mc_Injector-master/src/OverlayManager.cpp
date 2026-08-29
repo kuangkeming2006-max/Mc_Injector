@@ -837,6 +837,57 @@ void OverlayManager::setAimSpeedPercent(const int speed)
     storeFeatureSettings(); emit featureSettingsChanged(); sendFeatureSnapshot();
 }
 
+void OverlayManager::setAimMinimumDistance(const int distance)
+{
+    const int bounded = std::clamp(distance, 0, 64);
+    if (m_aimMinimumDistance == bounded) return;
+    m_aimMinimumDistance = bounded;
+    if (m_aimMaximumDistance < std::max(1, bounded))
+        m_aimMaximumDistance = std::max(1, bounded);
+    storeFeatureSettings(); emit featureSettingsChanged(); sendFeatureSnapshot();
+}
+
+void OverlayManager::setAimMaximumDistance(const int distance)
+{
+    const int bounded = std::clamp(distance,
+        std::max(1, m_aimMinimumDistance), 128);
+    if (m_aimMaximumDistance == bounded) return;
+    m_aimMaximumDistance = bounded;
+    storeFeatureSettings(); emit featureSettingsChanged(); sendFeatureSnapshot();
+}
+
+void OverlayManager::setAimFovDegrees(const int degrees)
+{
+    const int bounded = std::clamp(degrees, 1, 360);
+    if (m_aimFovDegrees == bounded) return;
+    m_aimFovDegrees = bounded;
+    storeFeatureSettings(); emit featureSettingsChanged(); sendFeatureSnapshot();
+}
+
+void OverlayManager::setClickGuiWidthPercent(const int percent)
+{
+    const int bounded = std::clamp(percent, 80, 150);
+    if (m_clickGuiWidthPercent == bounded) return;
+    m_clickGuiWidthPercent = bounded;
+    storeFeatureSettings(); emit featureSettingsChanged(); sendFeatureSnapshot();
+}
+
+void OverlayManager::setClickGuiHeightPercent(const int percent)
+{
+    const int bounded = std::clamp(percent, 80, 150);
+    if (m_clickGuiHeightPercent == bounded) return;
+    m_clickGuiHeightPercent = bounded;
+    storeFeatureSettings(); emit featureSettingsChanged(); sendFeatureSnapshot();
+}
+
+void OverlayManager::setClickGuiOpacity(const int opacity)
+{
+    const int bounded = std::clamp(opacity, 35, 100);
+    if (m_clickGuiOpacity == bounded) return;
+    m_clickGuiOpacity = bounded;
+    storeFeatureSettings(); emit featureSettingsChanged(); sendFeatureSnapshot();
+}
+
 void OverlayManager::setTextGuiColor(const QString &color)
 {
     const QString normalized = normalizedRgbColor(color);
@@ -1564,7 +1615,7 @@ void OverlayManager::processAgentLine(const QByteArray &line)
             emit interactiveChanged();
         }
     } else if (type == QByteArrayLiteral("FEATURE_STATE_CHANGED")) {
-        if (fields.size() != 74) return;
+        if (fields.size() != 80) return;
         std::array<bool, 32U> values{};
         for (int index = 0; index < 32; ++index) {
             const QByteArray token = fields.at(index + 1);
@@ -1603,6 +1654,9 @@ void OverlayManager::processAgentLine(const QByteArray &line)
         bool fireballEnabledOk = false, fireballFilledOk = false;
         bool longJumpEnabledOk = false, longJumpSpeedOk = false;
         bool fireballColorOk = false;
+        bool aimMinimumDistanceOk = false, aimMaximumDistanceOk = false;
+        bool aimFovOk = false, clickGuiWidthOk = false;
+        bool clickGuiHeightOk = false, clickGuiOpacityOk = false;
         const int defenseRadius = fields.at(33).toInt(&defenseRadiusOk);
         const int threatRadius = fields.at(34).toInt(&threatRadiusOk);
         const int bedHotkey = fields.at(35).toInt(&bedHotkeyOk);
@@ -1645,6 +1699,12 @@ void OverlayManager::processAgentLine(const QByteArray &line)
         const int longJumpEnabled = fields.at(71).toInt(&longJumpEnabledOk);
         const int longJumpSpeed = fields.at(72).toInt(&longJumpSpeedOk);
         const quint32 fireballColor = fields.at(73).toUInt(&fireballColorOk);
+        const int aimMinimumDistance = fields.at(74).toInt(&aimMinimumDistanceOk);
+        const int aimMaximumDistance = fields.at(75).toInt(&aimMaximumDistanceOk);
+        const int aimFovDegrees = fields.at(76).toInt(&aimFovOk);
+        const int clickGuiWidthPercent = fields.at(77).toInt(&clickGuiWidthOk);
+        const int clickGuiHeightPercent = fields.at(78).toInt(&clickGuiHeightOk);
+        const int clickGuiOpacity = fields.at(79).toInt(&clickGuiOpacityOk);
         const auto validHotkeyPack = [](const quint64 packed,
                                         const int count) noexcept {
             for (int index = 0; index < count; ++index) {
@@ -1694,7 +1754,16 @@ void OverlayManager::processAgentLine(const QByteArray &line)
             !fireballFilledOk || fireballFilled < 0 || fireballFilled > 1 ||
             !longJumpEnabledOk || longJumpEnabled < 0 || longJumpEnabled > 1 ||
             !longJumpSpeedOk || longJumpSpeed < 25 || longJumpSpeed > 250 ||
-            !fireballColorOk || fireballColor > 0xFFFFFFU) return;
+            !fireballColorOk || fireballColor > 0xFFFFFFU ||
+            !aimMinimumDistanceOk || aimMinimumDistance < 0 ||
+            aimMinimumDistance > 64 || !aimMaximumDistanceOk ||
+            aimMaximumDistance < std::max(1, aimMinimumDistance) ||
+            aimMaximumDistance > 128 || !aimFovOk || aimFovDegrees < 1 ||
+            aimFovDegrees > 360 || !clickGuiWidthOk ||
+            clickGuiWidthPercent < 80 || clickGuiWidthPercent > 150 ||
+            !clickGuiHeightOk || clickGuiHeightPercent < 80 ||
+            clickGuiHeightPercent > 150 || !clickGuiOpacityOk ||
+            clickGuiOpacity < 35 || clickGuiOpacity > 100) return;
         const QString playerColorName = QStringLiteral("#%1")
             .arg(playerColor, 6, 16, QLatin1Char('0')).toUpper();
         const QString bedColorName = QStringLiteral("#%1")
@@ -1771,7 +1840,13 @@ void OverlayManager::processAgentLine(const QByteArray &line)
             m_fireballEspFilled != (fireballFilled != 0) ||
             m_longJumpEnabled != (longJumpEnabled != 0) ||
             m_longJumpSpeedPercent != longJumpSpeed ||
-            m_fireballEspColor != fireballColorName;
+            m_fireballEspColor != fireballColorName ||
+            m_aimMinimumDistance != aimMinimumDistance ||
+            m_aimMaximumDistance != aimMaximumDistance ||
+            m_aimFovDegrees != aimFovDegrees ||
+            m_clickGuiWidthPercent != clickGuiWidthPercent ||
+            m_clickGuiHeightPercent != clickGuiHeightPercent ||
+            m_clickGuiOpacity != clickGuiOpacity;
         m_espEnabled = values[0];
         m_entityEspEnabled = values[1];
         m_bedEspEnabled = values[2];
@@ -1845,6 +1920,12 @@ void OverlayManager::processAgentLine(const QByteArray &line)
         m_longJumpEnabled = longJumpEnabled != 0;
         m_longJumpSpeedPercent = longJumpSpeed;
         m_fireballEspColor = fireballColorName;
+        m_aimMinimumDistance = aimMinimumDistance;
+        m_aimMaximumDistance = aimMaximumDistance;
+        m_aimFovDegrees = aimFovDegrees;
+        m_clickGuiWidthPercent = clickGuiWidthPercent;
+        m_clickGuiHeightPercent = clickGuiHeightPercent;
+        m_clickGuiOpacity = clickGuiOpacity;
         if (changed) {
             storeFeatureSettings();
             emit featureSettingsChanged();
@@ -2171,6 +2252,19 @@ void OverlayManager::loadFeatureSettings()
         QStringLiteral("aimSlowdownPercent"), 45).toInt(), 5, 95);
     m_aimSpeedPercent = std::clamp(settings.value(
         QStringLiteral("aimSpeedPercent"), 35).toInt(), 1, 100);
+    m_aimMinimumDistance = std::clamp(settings.value(
+        QStringLiteral("aimMinimumDistance"), 0).toInt(), 0, 64);
+    m_aimMaximumDistance = std::clamp(settings.value(
+        QStringLiteral("aimMaximumDistance"), 16).toInt(),
+        std::max(1, m_aimMinimumDistance), 128);
+    m_aimFovDegrees = std::clamp(settings.value(
+        QStringLiteral("aimFovDegrees"), 90).toInt(), 1, 360);
+    m_clickGuiWidthPercent = std::clamp(settings.value(
+        QStringLiteral("clickGuiWidthPercent"), 100).toInt(), 80, 150);
+    m_clickGuiHeightPercent = std::clamp(settings.value(
+        QStringLiteral("clickGuiHeightPercent"), 100).toInt(), 80, 150);
+    m_clickGuiOpacity = std::clamp(settings.value(
+        QStringLiteral("clickGuiOpacity"), 96).toInt(), 35, 100);
     m_textGuiEnabled = settings.value(
         QStringLiteral("textGuiEnabled"), false).toBool();
     m_textGuiX = std::clamp(settings.value(
@@ -2306,6 +2400,12 @@ void OverlayManager::flushFeatureSettings() const
     settings.setValue(QStringLiteral("aimSlowdownMode"), m_aimSlowdownMode);
     settings.setValue(QStringLiteral("aimSlowdownPercent"), m_aimSlowdownPercent);
     settings.setValue(QStringLiteral("aimSpeedPercent"), m_aimSpeedPercent);
+    settings.setValue(QStringLiteral("aimMinimumDistance"), m_aimMinimumDistance);
+    settings.setValue(QStringLiteral("aimMaximumDistance"), m_aimMaximumDistance);
+    settings.setValue(QStringLiteral("aimFovDegrees"), m_aimFovDegrees);
+    settings.setValue(QStringLiteral("clickGuiWidthPercent"), m_clickGuiWidthPercent);
+    settings.setValue(QStringLiteral("clickGuiHeightPercent"), m_clickGuiHeightPercent);
+    settings.setValue(QStringLiteral("clickGuiOpacity"), m_clickGuiOpacity);
     settings.setValue(QStringLiteral("textGuiEnabled"), m_textGuiEnabled);
     settings.setValue(QStringLiteral("textGuiColor"), m_textGuiColor);
     settings.setValue(QStringLiteral("textGuiX"), m_textGuiX);
@@ -2401,7 +2501,14 @@ void OverlayManager::sendFeatureSnapshot()
                       + QByteArray::number(m_fireballEspFilled ? 1 : 0) + ' '
                       + QByteArray::number(m_longJumpEnabled ? 1 : 0) + ' '
                       + QByteArray::number(std::clamp(m_longJumpSpeedPercent, 25, 250)) + ' '
-                      + QByteArray::number(QColor(m_fireballEspColor).rgb() & 0xFFFFFFU) + '\n');
+                      + QByteArray::number(QColor(m_fireballEspColor).rgb() & 0xFFFFFFU) + ' '
+                      + QByteArray::number(std::clamp(m_aimMinimumDistance, 0, 64)) + ' '
+                      + QByteArray::number(std::clamp(m_aimMaximumDistance,
+                            std::max(1, m_aimMinimumDistance), 128)) + ' '
+                      + QByteArray::number(std::clamp(m_aimFovDegrees, 1, 360)) + ' '
+                      + QByteArray::number(std::clamp(m_clickGuiWidthPercent, 80, 150)) + ' '
+                      + QByteArray::number(std::clamp(m_clickGuiHeightPercent, 80, 150)) + ' '
+                      + QByteArray::number(std::clamp(m_clickGuiOpacity, 35, 100)) + '\n');
 }
 
 void OverlayManager::sendBindSnapshot()

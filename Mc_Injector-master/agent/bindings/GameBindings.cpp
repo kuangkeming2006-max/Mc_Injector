@@ -1989,7 +1989,14 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
     // expose the former while renaming one of the latter.
     if (aimCapability && (requested.aimAssist || m_aimSensitivityModified)) {
         const EntityMarker* target = nullptr;
-        double bestAngle = requested.aimSlowdownMode ? 8.0 : 35.0;
+        const double minimumDistance = static_cast<double>(std::clamp(
+            requested.aimMinimumDistance, 0, 64));
+        const double maximumDistance = static_cast<double>(std::clamp(
+            requested.aimMaximumDistance,
+            std::max(1, requested.aimMinimumDistance), 128));
+        const double maximumAngle = static_cast<double>(std::clamp(
+            requested.aimFovDegrees, 1, 360)) * 0.5;
+        double bestScore = std::numeric_limits<double>::max();
         float desiredYaw = yaw;
         float desiredPitch = pitch;
         const auto wrap = [](double value) noexcept {
@@ -2010,13 +2017,23 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
                 if (!validPlayer || entity.entityId == snapshot.entityId ||
                     (snapshot.ownTeam != 'u' &&
                      entity.teamColor == snapshot.ownTeam)) continue;
-                const double dx = entity.currentX - snapshot.x;
-                const double dz = entity.currentZ - snapshot.z;
+                // A short extrapolation hides the visible 20 Hz entity-step
+                // cadence without inventing a server-side rotation. The local
+                // player's real view is still the only state modified.
+                const double targetX = entity.currentX +
+                    (entity.currentX - entity.previousX) * 0.35;
+                const double targetZ = entity.currentZ +
+                    (entity.currentZ - entity.previousZ) * 0.35;
+                const double dx = targetX - snapshot.x;
+                const double dz = targetZ - snapshot.z;
                 const double dy =
                     (entity.bounds.minY + entity.bounds.maxY) * 0.5 -
                     (snapshot.y + 1.62);
                 const double horizontal = std::hypot(dx, dz);
                 if (horizontal < 0.1) continue;
+                const double distance = std::hypot(horizontal, dy);
+                if (distance < minimumDistance || distance > maximumDistance)
+                    continue;
                 const float targetYaw = static_cast<float>(
                     std::atan2(dz, dx) * 180.0 / aimPi - 90.0);
                 const float targetPitch = static_cast<float>(
@@ -2024,14 +2041,21 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
                 const double angle = std::hypot(
                     wrap(targetYaw - yaw),
                     static_cast<double>(targetPitch - pitch));
-                if (angle < bestAngle) {
-                    bestAngle = angle;
+                if (angle <= maximumAngle) {
+                    // Retain a still-valid target with mild hysteresis so two
+                    // nearby entities cannot make the view alternate every
+                    // sample. Angle remains the dominant selection metric.
+                    double score = angle + distance * 0.025;
+                    if (entity.entityId == m_aimTargetEntityId) score *= 0.72;
+                    if (score >= bestScore) continue;
+                    bestScore = score;
                     target = &entity;
                     desiredYaw = targetYaw;
                     desiredPitch = targetPitch;
                 }
             }
         }
+        m_aimTargetEntityId = target == nullptr ? -1 : target->entityId;
         if (requested.aimAssist && requested.aimSlowdownMode) {
             if (target != nullptr && !m_aimSensitivityModified) {
                 m_originalMouseSensitivity = env->GetFloatField(
@@ -2057,14 +2081,24 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
                 const double dt = m_lastGameplayTick == 0U ? 0.05 :
                     std::clamp(static_cast<double>(tickMilliseconds -
                         m_lastGameplayTick) / 1000.0, 0.001, 0.10);
-                const double gain = 2.0 + 18.0 * static_cast<double>(std::clamp(
+                const double speed = static_cast<double>(std::clamp(
                     requested.aimSpeedPercent, 1, 100)) / 100.0;
-                const float alpha = static_cast<float>(
-                    1.0 - std::exp(-gain * dt));
+                // Squared response makes low settings genuinely gentle. A
+                // per-second turn cap prevents any frame from snapping even
+                // after a hitch, while the exponential term stays frame-rate
+                // independent.
+                const double response = 0.30 + 7.70 * speed * speed;
+                const double alpha = 1.0 - std::exp(-response * dt);
+                const double maximumStep = (4.0 + 236.0 * speed * speed) * dt;
+                const double yawStep = std::clamp(
+                    wrap(desiredYaw - yaw) * alpha, -maximumStep, maximumStep);
+                const double pitchStep = std::clamp(
+                    static_cast<double>(desiredPitch - pitch) * alpha,
+                    -maximumStep, maximumStep);
                 env->SetFloatField(player, cache->rotationYaw,
-                    yaw + static_cast<float>(wrap(desiredYaw - yaw)) * alpha);
+                    yaw + static_cast<float>(yawStep));
                 env->SetFloatField(player, cache->rotationPitch,
-                    std::clamp(pitch + (desiredPitch - pitch) * alpha,
+                    std::clamp(pitch + static_cast<float>(pitchStep),
                                -90.0F, 90.0F));
             }
         }
@@ -2128,14 +2162,32 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
     const double directionZ =  std::cos(radians) * normalizedForward +
                               std::sin(radians) * normalizedStrafe;
 
+    // Use the motion that Minecraft actually calculated for this tick.  Key
+    // intent alone is insufficient while airborne (or after sprinting over a
+    // diagonal edge), because inertia can carry the player somewhere that no
+    // currently pressed key points at.
+    const double actualMotionX = env->GetDoubleField(
+        player, cache->motionFields[0U]);
+    const double actualMotionY = env->GetDoubleField(
+        player, cache->motionFields[1U]);
+    const double actualMotionZ = env->GetDoubleField(
+        player, cache->motionFields[2U]);
+    if (env->ExceptionCheck() == JNI_TRUE) return fail();
+
     const double sensitivity = static_cast<double>(std::clamp(
         requested.safewalkEdgeSensitivity, 0, 95)) / 100.0;
-    // Match Entity.moveEntity's edge-clipping intent, but predict a short step
-    // along the requested movement vector. Low sensitivity waits until the
-    // footprint is almost over the edge; high sensitivity looks farther ahead.
-    const double lookAhead = magnitude > 0.001 ? 0.012 + sensitivity * 0.145 : 0.0;
-    const double projectedX = directionX * lookAhead;
-    const double projectedZ = directionZ * lookAhead;
+    // Entity.moveEntity only clips sneak movement once the *whole translated
+    // AABB* has no collision one block below it.  Sensitivity therefore changes
+    // only how much of the already-computed motion is previewed; it must never
+    // turn a single unsupported corner into an edge.  Squaring the setting
+    // gives the low end useful fine control very close to the actual ledge.
+    const double previewFraction = 0.04 + sensitivity * sensitivity * 0.96;
+    const double fallbackStep = magnitude > 0.001
+        ? 0.004 + sensitivity * sensitivity * 0.020 : 0.0;
+    const double projectedX = std::abs(actualMotionX) > 0.001
+        ? actualMotionX * previewFraction : directionX * fallbackStep;
+    const double projectedZ = std::abs(actualMotionZ) > 0.001
+        ? actualMotionZ * previewFraction : directionZ * fallbackStep;
     constexpr double probeInset = 0.018;
     const std::array<int, 2U> supportX{
         static_cast<int>(std::floor(minX + projectedX + probeInset)),
@@ -2178,14 +2230,15 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
 
     constexpr std::uint8_t allSupports = 0x0FU;
     const bool anySolid = immediateAirMask != allSupports;
-    // A one-block descent is safe and must not force sneak. Only a projected
-    // footprint with two consecutive air blocks is treated as a real drop.
-    const bool atEdge = deepVoidMask != 0U &&
+    // A one-block descent is safe and must not force sneak. More importantly,
+    // match vanilla's collision test: one supported corner still supports the
+    // AABB, so crouch only when every footprint sample is air on both layers.
+    const bool atEdge = immediateAirMask == allSupports &&
+        deepVoidMask == allSupports &&
         (!movementCapability || onGround);
     const bool pitchAllowsSafewalk = pitch >= static_cast<float>(std::clamp(
         requested.safewalkMinimumPitch, -90, 90));
-    const bool supportPlaced = m_safewalkSneakForced &&
-        (m_safewalkSupportMask & static_cast<std::uint8_t>(~deepVoidMask)) != 0U;
+    const bool supportPlaced = m_safewalkSneakForced && !atEdge && anySolid;
     m_safewalkSupportMask = deepVoidMask;
 
     if (supportPlaced && m_safewalkReleaseAt == 0U) {
@@ -2313,7 +2366,7 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
         if (selectedSlot >= 0 && selectedStack != nullptr) {
             const double centerX = (minX + maxX) * 0.5;
             const double centerZ = (minZ + maxZ) * 0.5;
-            std::array<std::array<int, 3U>, 12U> targets{};
+            std::array<std::array<int, 3U>, 32U> targets{};
             std::size_t targetCount = 0U;
             const auto addTarget = [&](const double x, const double z) noexcept {
                 const std::array<int, 3U> candidate{
@@ -2323,21 +2376,55 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
                     if (targets[i] == candidate) return;
                 if (targetCount < targets.size()) targets[targetCount++] = candidate;
             };
-            // Centre samples cover cardinal motion. Leading AABB corners cover
-            // diagonal movement, and retaining the platform Y covers jumps.
-            for (const double lead : {0.92, 0.62, 0.32, 0.0})
-                addTarget(centerX + directionX * lead,
-                          centerZ + directionZ * lead);
+            // Start with the current footprint, then integrate the player's
+            // real velocity through several vanilla-like air ticks. This keeps
+            // diagonal sprint jumps covered even after the player releases or
+            // changes a movement key mid-air.
             constexpr double cornerInset = 0.025;
-            const double cornerLead = 0.58;
-            addTarget(minX + cornerInset + directionX * cornerLead,
-                      minZ + cornerInset + directionZ * cornerLead);
-            addTarget(minX + cornerInset + directionX * cornerLead,
-                      maxZ - cornerInset + directionZ * cornerLead);
-            addTarget(maxX - cornerInset + directionX * cornerLead,
-                      minZ + cornerInset + directionZ * cornerLead);
-            addTarget(maxX - cornerInset + directionX * cornerLead,
-                      maxZ - cornerInset + directionZ * cornerLead);
+            const double halfWidthX = std::max(0.0,
+                (maxX - minX) * 0.5 - cornerInset);
+            const double halfWidthZ = std::max(0.0,
+                (maxZ - minZ) * 0.5 - cornerInset);
+            const auto addFootprint = [&](const double x,
+                                          const double z) noexcept {
+                addTarget(x, z);
+                addTarget(x - halfWidthX, z - halfWidthZ);
+                addTarget(x - halfWidthX, z + halfWidthZ);
+                addTarget(x + halfWidthX, z - halfWidthZ);
+                addTarget(x + halfWidthX, z + halfWidthZ);
+            };
+            addFootprint(centerX, centerZ);
+
+            double simulatedX = centerX;
+            double simulatedY = minY;
+            double simulatedZ = centerZ;
+            double simulatedMotionX = actualMotionX;
+            double simulatedMotionY = actualMotionY;
+            double simulatedMotionZ = actualMotionZ;
+            if (std::hypot(simulatedMotionX, simulatedMotionZ) < 0.012 &&
+                magnitude > 0.001) {
+                simulatedMotionX = directionX * 0.10;
+                simulatedMotionZ = directionZ * 0.10;
+            }
+            for (int predictionTick = 0; predictionTick < 6; ++predictionTick) {
+                simulatedX += simulatedMotionX;
+                simulatedY += simulatedMotionY;
+                simulatedZ += simulatedMotionZ;
+                addFootprint(simulatedX, simulatedZ);
+
+                // 1.8.x EntityLivingBase air motion approximation. Input is a
+                // small acceleration/fallback; existing inertia remains the
+                // dominant signal and therefore also covers jump momentum.
+                if (magnitude > 0.001) {
+                    simulatedMotionX += directionX * 0.012;
+                    simulatedMotionZ += directionZ * 0.012;
+                }
+                simulatedMotionX *= 0.91;
+                simulatedMotionZ *= 0.91;
+                simulatedMotionY = (simulatedMotionY - 0.08) * 0.98;
+                if (simulatedY <= static_cast<double>(m_scaffoldPlatformY) +
+                                  1.02 && predictionTick >= 1) break;
+            }
             constexpr std::array<std::array<int, 4U>, 5U> neighbours{{
                 {{0,-1,0,1}}, {{0,0,-1,3}}, {{0,0,1,2}},
                 {{-1,0,0,5}}, {{1,0,0,4}}}};
