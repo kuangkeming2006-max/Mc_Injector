@@ -74,6 +74,12 @@ public:
     Q_PROPERTY(int flySpeedPercent READ flySpeedPercent WRITE setFlySpeedPercent NOTIFY featureSettingsChanged)
     Q_PROPERTY(bool bhopEnabled READ bhopEnabled WRITE setBhopEnabled NOTIFY featureSettingsChanged)
     Q_PROPERTY(bool bhopAutoJump READ bhopAutoJump WRITE setBhopAutoJump NOTIFY featureSettingsChanged)
+    Q_PROPERTY(int bhopAirSpeedPercent READ bhopAirSpeedPercent WRITE setBhopAirSpeedPercent NOTIFY featureSettingsChanged)
+    Q_PROPERTY(bool fireballEspEnabled READ fireballEspEnabled WRITE setFireballEspEnabled NOTIFY featureSettingsChanged)
+    Q_PROPERTY(bool fireballEspFilled READ fireballEspFilled WRITE setFireballEspFilled NOTIFY featureSettingsChanged)
+    Q_PROPERTY(QString fireballEspColor READ fireballEspColor WRITE setFireballEspColor NOTIFY featureSettingsChanged)
+    Q_PROPERTY(bool longJumpEnabled READ longJumpEnabled WRITE setLongJumpEnabled NOTIFY featureSettingsChanged)
+    Q_PROPERTY(int longJumpSpeedPercent READ longJumpSpeedPercent WRITE setLongJumpSpeedPercent NOTIFY featureSettingsChanged)
     Q_PROPERTY(bool aimAssistEnabled READ aimAssistEnabled WRITE setAimAssistEnabled NOTIFY featureSettingsChanged)
     Q_PROPERTY(bool aimSlowdownMode READ aimSlowdownMode WRITE setAimSlowdownMode NOTIFY featureSettingsChanged)
     Q_PROPERTY(int aimSlowdownPercent READ aimSlowdownPercent WRITE setAimSlowdownPercent NOTIFY featureSettingsChanged)
@@ -165,6 +171,12 @@ public:
     [[nodiscard]] int flySpeedPercent() const noexcept { return m_flySpeedPercent; }
     [[nodiscard]] bool bhopEnabled() const noexcept { return m_bhopEnabled; }
     [[nodiscard]] bool bhopAutoJump() const noexcept { return m_bhopAutoJump; }
+    [[nodiscard]] int bhopAirSpeedPercent() const noexcept { return m_bhopAirSpeedPercent; }
+    [[nodiscard]] bool fireballEspEnabled() const noexcept { return m_fireballEspEnabled; }
+    [[nodiscard]] bool fireballEspFilled() const noexcept { return m_fireballEspFilled; }
+    [[nodiscard]] QString fireballEspColor() const { return m_fireballEspColor; }
+    [[nodiscard]] bool longJumpEnabled() const noexcept { return m_longJumpEnabled; }
+    [[nodiscard]] int longJumpSpeedPercent() const noexcept { return m_longJumpSpeedPercent; }
     [[nodiscard]] bool aimAssistEnabled() const noexcept { return m_aimAssistEnabled; }
     [[nodiscard]] bool aimSlowdownMode() const noexcept { return m_aimSlowdownMode; }
     [[nodiscard]] int aimSlowdownPercent() const noexcept { return m_aimSlowdownPercent; }
@@ -251,6 +263,12 @@ public slots:
     void setFlySpeedPercent(int speed);
     void setBhopEnabled(bool enabled);
     void setBhopAutoJump(bool enabled);
+    void setBhopAirSpeedPercent(int speed);
+    void setFireballEspEnabled(bool enabled);
+    void setFireballEspFilled(bool enabled);
+    void setFireballEspColor(const QString &color);
+    void setLongJumpEnabled(bool enabled);
+    void setLongJumpSpeedPercent(int speed);
     void setAimAssistEnabled(bool enabled);
     void setAimSlowdownMode(bool enabled);
     void setAimSlowdownPercent(int coefficient);
@@ -458,6 +476,14 @@ private:
     int m_flySpeedPercent = 100;
     bool m_bhopEnabled = false;
     bool m_bhopAutoJump = true;
+    int m_bhopAirSpeedPercent = 100;
+    quint64 m_featureHotkeysPackedA = 0U;
+    quint64 m_featureHotkeysPackedB = 0U;
+    bool m_fireballEspEnabled = false;
+    bool m_fireballEspFilled = true;
+    QString m_fireballEspColor = QStringLiteral("#FF9D3D");
+    bool m_longJumpEnabled = false;
+    int m_longJumpSpeedPercent = 100;
     bool m_aimAssistEnabled = false;
     bool m_aimSlowdownMode = true;
     int m_aimSlowdownPercent = 45;

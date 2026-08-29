@@ -64,6 +64,8 @@ struct MappingDictionary final {
     std::string livingSignature;
     std::string entityName;
     std::string entitySignature;
+    std::string fireballName;
+    std::string fireballSignature;
     std::string aabbName;
     std::string aabbSignature;
     std::string worldName;

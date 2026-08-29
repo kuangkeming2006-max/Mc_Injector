@@ -756,6 +756,9 @@ MC_OVERLAY_BOOL_SETTER(setScaffoldEnabled, m_scaffoldEnabled)
 MC_OVERLAY_BOOL_SETTER(setFlyEnabled, m_flyEnabled)
 MC_OVERLAY_BOOL_SETTER(setBhopEnabled, m_bhopEnabled)
 MC_OVERLAY_BOOL_SETTER(setBhopAutoJump, m_bhopAutoJump)
+MC_OVERLAY_BOOL_SETTER(setFireballEspEnabled, m_fireballEspEnabled)
+MC_OVERLAY_BOOL_SETTER(setFireballEspFilled, m_fireballEspFilled)
+MC_OVERLAY_BOOL_SETTER(setLongJumpEnabled, m_longJumpEnabled)
 MC_OVERLAY_BOOL_SETTER(setAimAssistEnabled, m_aimAssistEnabled)
 MC_OVERLAY_BOOL_SETTER(setAimSlowdownMode, m_aimSlowdownMode)
 MC_OVERLAY_BOOL_SETTER(setTextGuiEnabled, m_textGuiEnabled)
@@ -791,6 +794,30 @@ void OverlayManager::setFlySpeedPercent(const int speed)
     const int bounded = std::clamp(speed, 10, 500);
     if (m_flySpeedPercent == bounded) return;
     m_flySpeedPercent = bounded;
+    storeFeatureSettings(); emit featureSettingsChanged(); sendFeatureSnapshot();
+}
+
+void OverlayManager::setBhopAirSpeedPercent(const int speed)
+{
+    const int bounded = std::clamp(speed, 10, 300);
+    if (m_bhopAirSpeedPercent == bounded) return;
+    m_bhopAirSpeedPercent = bounded;
+    storeFeatureSettings(); emit featureSettingsChanged(); sendFeatureSnapshot();
+}
+
+void OverlayManager::setLongJumpSpeedPercent(const int speed)
+{
+    const int bounded = std::clamp(speed, 25, 250);
+    if (m_longJumpSpeedPercent == bounded) return;
+    m_longJumpSpeedPercent = bounded;
+    storeFeatureSettings(); emit featureSettingsChanged(); sendFeatureSnapshot();
+}
+
+void OverlayManager::setFireballEspColor(const QString &color)
+{
+    const QString normalized = normalizedRgbColor(color);
+    if (normalized.isEmpty() || normalized == m_fireballEspColor) return;
+    m_fireballEspColor = normalized;
     storeFeatureSettings(); emit featureSettingsChanged(); sendFeatureSnapshot();
 }
 
@@ -1537,7 +1564,7 @@ void OverlayManager::processAgentLine(const QByteArray &line)
             emit interactiveChanged();
         }
     } else if (type == QByteArrayLiteral("FEATURE_STATE_CHANGED")) {
-        if (fields.size() != 66) return;
+        if (fields.size() != 74) return;
         std::array<bool, 32U> values{};
         for (int index = 0; index < 32; ++index) {
             const QByteArray token = fields.at(index + 1);
@@ -1572,6 +1599,10 @@ void OverlayManager::processAgentLine(const QByteArray &line)
         bool safewalkHotkeyOk = false, flySpeedOk = false;
         bool aimSlowdownOk = false, aimSpeedOk = false;
         bool textColorOk = false, textXOk = false, textYOk = false;
+        bool bhopAirSpeedOk = false, hotkeysAOk = false, hotkeysBOk = false;
+        bool fireballEnabledOk = false, fireballFilledOk = false;
+        bool longJumpEnabledOk = false, longJumpSpeedOk = false;
+        bool fireballColorOk = false;
         const int defenseRadius = fields.at(33).toInt(&defenseRadiusOk);
         const int threatRadius = fields.at(34).toInt(&threatRadiusOk);
         const int bedHotkey = fields.at(35).toInt(&bedHotkeyOk);
@@ -1606,6 +1637,22 @@ void OverlayManager::processAgentLine(const QByteArray &line)
         const quint32 textColor = fields.at(63).toUInt(&textColorOk);
         const int textX = fields.at(64).toInt(&textXOk);
         const int textY = fields.at(65).toInt(&textYOk);
+        const int bhopAirSpeed = fields.at(66).toInt(&bhopAirSpeedOk);
+        const quint64 hotkeysPackedA = fields.at(67).toULongLong(&hotkeysAOk);
+        const quint64 hotkeysPackedB = fields.at(68).toULongLong(&hotkeysBOk);
+        const int fireballEnabled = fields.at(69).toInt(&fireballEnabledOk);
+        const int fireballFilled = fields.at(70).toInt(&fireballFilledOk);
+        const int longJumpEnabled = fields.at(71).toInt(&longJumpEnabledOk);
+        const int longJumpSpeed = fields.at(72).toInt(&longJumpSpeedOk);
+        const quint32 fireballColor = fields.at(73).toUInt(&fireballColorOk);
+        const auto validHotkeyPack = [](const quint64 packed,
+                                        const int count) noexcept {
+            for (int index = 0; index < count; ++index) {
+                const int key = static_cast<int>((packed >> (index * 8)) & 0xFFU);
+                if ((key > 0 && key < 8) || key > 254) return false;
+            }
+            return true;
+        };
         if (!defenseRadiusOk || defenseRadius < 3 || defenseRadius > 10 ||
             !threatRadiusOk || threatRadius < 3 || threatRadius > 32 ||
             !bedHotkeyOk || bedHotkey < 8 || bedHotkey > 254 ||
@@ -1640,6 +1687,14 @@ void OverlayManager::processAgentLine(const QByteArray &line)
             !textColorOk || textColor > 0xFFFFFFU ||
             !textXOk || textX < -1 || textX > 1000 ||
             !textYOk || textY < -1 || textY > 1000) return;
+        if (!bhopAirSpeedOk || bhopAirSpeed < 10 || bhopAirSpeed > 300 ||
+            !hotkeysAOk || !hotkeysBOk || !validHotkeyPack(hotkeysPackedA, 8) ||
+            !validHotkeyPack(hotkeysPackedB, 7) ||
+            !fireballEnabledOk || fireballEnabled < 0 || fireballEnabled > 1 ||
+            !fireballFilledOk || fireballFilled < 0 || fireballFilled > 1 ||
+            !longJumpEnabledOk || longJumpEnabled < 0 || longJumpEnabled > 1 ||
+            !longJumpSpeedOk || longJumpSpeed < 25 || longJumpSpeed > 250 ||
+            !fireballColorOk || fireballColor > 0xFFFFFFU) return;
         const QString playerColorName = QStringLiteral("#%1")
             .arg(playerColor, 6, 16, QLatin1Char('0')).toUpper();
         const QString bedColorName = QStringLiteral("#%1")
@@ -1656,6 +1711,8 @@ void OverlayManager::processAgentLine(const QByteArray &line)
             .arg(hypixelRailColor, 6, 16, QLatin1Char('0')).toUpper();
         const QString textColorName = QStringLiteral("#%1")
             .arg(textColor, 6, 16, QLatin1Char('0')).toUpper();
+        const QString fireballColorName = QStringLiteral("#%1")
+            .arg(fireballColor, 6, 16, QLatin1Char('0')).toUpper();
         const bool changed = m_espEnabled != values[0] ||
             m_entityEspEnabled != values[1] || m_bedEspEnabled != values[2] ||
             m_espLabelsEnabled != values[3] || m_hypixelPanelEnabled != values[4] ||
@@ -1706,7 +1763,15 @@ void OverlayManager::processAgentLine(const QByteArray &line)
             m_safewalkHotkey != safewalkHotkey ||
             m_flySpeedPercent != flySpeed ||
             m_aimSlowdownPercent != aimSlowdown || m_aimSpeedPercent != aimSpeed ||
-            m_textGuiColor != textColorName || m_textGuiX != textX || m_textGuiY != textY;
+            m_textGuiColor != textColorName || m_textGuiX != textX ||
+            m_textGuiY != textY || m_bhopAirSpeedPercent != bhopAirSpeed ||
+            m_featureHotkeysPackedA != hotkeysPackedA ||
+            m_featureHotkeysPackedB != hotkeysPackedB ||
+            m_fireballEspEnabled != (fireballEnabled != 0) ||
+            m_fireballEspFilled != (fireballFilled != 0) ||
+            m_longJumpEnabled != (longJumpEnabled != 0) ||
+            m_longJumpSpeedPercent != longJumpSpeed ||
+            m_fireballEspColor != fireballColorName;
         m_espEnabled = values[0];
         m_entityEspEnabled = values[1];
         m_bedEspEnabled = values[2];
@@ -1772,6 +1837,14 @@ void OverlayManager::processAgentLine(const QByteArray &line)
         m_textGuiColor = textColorName;
         m_textGuiX = textX;
         m_textGuiY = textY;
+        m_bhopAirSpeedPercent = bhopAirSpeed;
+        m_featureHotkeysPackedA = hotkeysPackedA;
+        m_featureHotkeysPackedB = hotkeysPackedB;
+        m_fireballEspEnabled = fireballEnabled != 0;
+        m_fireballEspFilled = fireballFilled != 0;
+        m_longJumpEnabled = longJumpEnabled != 0;
+        m_longJumpSpeedPercent = longJumpSpeed;
+        m_fireballEspColor = fireballColorName;
         if (changed) {
             storeFeatureSettings();
             emit featureSettingsChanged();
@@ -2073,6 +2146,23 @@ void OverlayManager::loadFeatureSettings()
         QStringLiteral("flySpeedPercent"), 100).toInt(), 10, 500);
     m_bhopEnabled = settings.value(QStringLiteral("bhopEnabled"), false).toBool();
     m_bhopAutoJump = settings.value(QStringLiteral("bhopAutoJump"), true).toBool();
+    m_bhopAirSpeedPercent = std::clamp(settings.value(
+        QStringLiteral("bhopAirSpeedPercent"), 100).toInt(), 10, 300);
+    m_featureHotkeysPackedA = settings.value(
+        QStringLiteral("featureHotkeysPackedA"), qulonglong(0)).toULongLong();
+    m_featureHotkeysPackedB = settings.value(
+        QStringLiteral("featureHotkeysPackedB"), qulonglong(0)).toULongLong();
+    m_fireballEspEnabled = settings.value(
+        QStringLiteral("fireballEspEnabled"), false).toBool();
+    m_fireballEspFilled = settings.value(
+        QStringLiteral("fireballEspFilled"), true).toBool();
+    m_longJumpEnabled = settings.value(
+        QStringLiteral("longJumpEnabled"), false).toBool();
+    m_longJumpSpeedPercent = std::clamp(settings.value(
+        QStringLiteral("longJumpSpeedPercent"), 100).toInt(), 25, 250);
+    // Migrate the old standalone Safewalk binding into the page-hotkey pack.
+    if (((m_featureHotkeysPackedA >> 32U) & 0xFFU) == 0U)
+        m_featureHotkeysPackedA |= (static_cast<quint64>(m_safewalkHotkey) << 32U);
     m_aimAssistEnabled = settings.value(
         QStringLiteral("aimAssistEnabled"), false).toBool();
     m_aimSlowdownMode = settings.value(
@@ -2117,6 +2207,8 @@ void OverlayManager::loadFeatureSettings()
         QStringLiteral("clickGuiAccentColor"), QStringLiteral("#825DE8")).toString());
     const QString savedTextGuiColor = normalizedRgbColor(settings.value(
         QStringLiteral("textGuiColor"), QStringLiteral("#7EE7FF")).toString());
+    const QString savedFireballColor = normalizedRgbColor(settings.value(
+        QStringLiteral("fireballEspColor"), QStringLiteral("#FF9D3D")).toString());
     m_playerEspColor = savedPlayerColor.isEmpty() ? QStringLiteral("#FF3B30") : savedPlayerColor;
     m_bedEspColor = savedBedColor.isEmpty() ? QStringLiteral("#FF5C68") : savedBedColor;
     m_bedDefensePanelColor = savedPanelColor.isEmpty()
@@ -2136,6 +2228,8 @@ void OverlayManager::loadFeatureSettings()
         ? QStringLiteral("#825DE8") : savedAccentColor;
     m_textGuiColor = savedTextGuiColor.isEmpty()
         ? QStringLiteral("#7EE7FF") : savedTextGuiColor;
+    m_fireballEspColor = savedFireballColor.isEmpty()
+        ? QStringLiteral("#FF9D3D") : savedFireballColor;
     settings.endGroup();
 }
 
@@ -2198,6 +2292,16 @@ void OverlayManager::flushFeatureSettings() const
     settings.setValue(QStringLiteral("flySpeedPercent"), m_flySpeedPercent);
     settings.setValue(QStringLiteral("bhopEnabled"), m_bhopEnabled);
     settings.setValue(QStringLiteral("bhopAutoJump"), m_bhopAutoJump);
+    settings.setValue(QStringLiteral("bhopAirSpeedPercent"), m_bhopAirSpeedPercent);
+    settings.setValue(QStringLiteral("featureHotkeysPackedA"),
+                      QVariant::fromValue<qulonglong>(m_featureHotkeysPackedA));
+    settings.setValue(QStringLiteral("featureHotkeysPackedB"),
+                      QVariant::fromValue<qulonglong>(m_featureHotkeysPackedB));
+    settings.setValue(QStringLiteral("fireballEspEnabled"), m_fireballEspEnabled);
+    settings.setValue(QStringLiteral("fireballEspFilled"), m_fireballEspFilled);
+    settings.setValue(QStringLiteral("fireballEspColor"), m_fireballEspColor);
+    settings.setValue(QStringLiteral("longJumpEnabled"), m_longJumpEnabled);
+    settings.setValue(QStringLiteral("longJumpSpeedPercent"), m_longJumpSpeedPercent);
     settings.setValue(QStringLiteral("aimAssistEnabled"), m_aimAssistEnabled);
     settings.setValue(QStringLiteral("aimSlowdownMode"), m_aimSlowdownMode);
     settings.setValue(QStringLiteral("aimSlowdownPercent"), m_aimSlowdownPercent);
@@ -2289,7 +2393,15 @@ void OverlayManager::sendFeatureSnapshot()
                       + QByteArray::number(std::clamp(m_aimSpeedPercent, 1, 100)) + ' '
                       + QByteArray::number(QColor(m_textGuiColor).rgb() & 0xFFFFFFU) + ' '
                       + QByteArray::number(std::clamp(m_textGuiX, -1, 1000)) + ' '
-                      + QByteArray::number(std::clamp(m_textGuiY, -1, 1000)) + '\n');
+                      + QByteArray::number(std::clamp(m_textGuiY, -1, 1000)) + ' '
+                      + QByteArray::number(std::clamp(m_bhopAirSpeedPercent, 10, 300)) + ' '
+                      + QByteArray::number(static_cast<qulonglong>(m_featureHotkeysPackedA)) + ' '
+                      + QByteArray::number(static_cast<qulonglong>(m_featureHotkeysPackedB)) + ' '
+                      + QByteArray::number(m_fireballEspEnabled ? 1 : 0) + ' '
+                      + QByteArray::number(m_fireballEspFilled ? 1 : 0) + ' '
+                      + QByteArray::number(m_longJumpEnabled ? 1 : 0) + ' '
+                      + QByteArray::number(std::clamp(m_longJumpSpeedPercent, 25, 250)) + ' '
+                      + QByteArray::number(QColor(m_fireballEspColor).rgb() & 0xFFFFFFU) + '\n');
 }
 
 void OverlayManager::sendBindSnapshot()

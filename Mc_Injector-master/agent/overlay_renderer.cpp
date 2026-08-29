@@ -460,6 +460,7 @@ const char* hotkeyName(const unsigned virtualKey) noexcept
 {
     static thread_local std::array<char, 64U> name{};
     switch (virtualKey) {
+    case 0U: return "Unbound";
     case VK_OEM_7: return "Apostrophe";
     case VK_INSERT: return "Insert";
     case VK_HOME: return "Home";
@@ -942,6 +943,10 @@ void OverlayRenderer::enqueueFeatureToasts(const FeatureSettings& before,
         enqueueToast("Safewalk", after.safewalkEnabled);
     if (before.aimAssistEnabled != after.aimAssistEnabled)
         enqueueToast("Aim Assist", after.aimAssistEnabled);
+    if (before.fireballEspEnabled != after.fireballEspEnabled)
+        enqueueToast("Fireball ESP", after.fireballEspEnabled);
+    if (before.longJumpEnabled != after.longJumpEnabled)
+        enqueueToast("LongJump", after.longJumpEnabled);
     if (before.textGuiEnabled != after.textGuiEnabled)
         enqueueToast("Text GUI", after.textGuiEnabled);
 }
@@ -1717,6 +1722,61 @@ bool OverlayRenderer::render(HDC const deviceContext,
     ImGui::NewFrame();
     m_backdropCapturedThisFrame = false;
 
+    // Feature hotkeys are sampled only while Minecraft owns foreground focus.
+    // While unfocused we mirror physical state into the edge latch, so a key
+    // used in another application cannot fire immediately on refocus.
+    const bool gameForeground = ::GetForegroundWindow() == window;
+    const FeatureSettings featuresBeforeHotkeys = m_features;
+    bool hotkeyFeatureChanged = false;
+    for (std::size_t index = 0U; index < m_features.featureHotkeys.size(); ++index) {
+        const int key = m_features.featureHotkeys[index];
+        const bool down = key >= 8 && key <= 254 &&
+            (::GetAsyncKeyState(key) & 0x8000) != 0;
+        if (gameForeground && !interactive && down && !m_featureHotkeyWasDown[index]) {
+            switch (index) {
+            case 0: m_features.entityEspEnabled = !m_features.entityEspEnabled; break;
+            case 1: m_features.bedEspEnabled = !m_features.bedEspEnabled; break;
+            case 2: m_features.nametagEnabled = !m_features.nametagEnabled; break;
+            case 3: m_features.bedThreatAlertsEnabled =
+                        !m_features.bedThreatAlertsEnabled; break;
+            case 4: m_features.safewalkEnabled = !m_features.safewalkEnabled; break;
+            case 5: m_features.scaffoldEnabled = !m_features.scaffoldEnabled; break;
+            case 6: m_features.flyEnabled = !m_features.flyEnabled; break;
+            case 7: m_features.bhopEnabled = !m_features.bhopEnabled; break;
+            case 8: m_features.aimAssistEnabled = !m_features.aimAssistEnabled; break;
+            case 9: m_features.hypixelPanelEnabled =
+                        !m_features.hypixelPanelEnabled; break;
+            case 10: m_features.debugChatEnabled = !m_features.debugChatEnabled; break;
+            case 11:
+                m_blacklist.panelEnabled = !m_blacklist.panelEnabled;
+                m_blacklistAction = {};
+                m_blacklistAction.type = BlacklistAction::Type::Settings;
+                m_blacklistAction.panelEnabled = m_blacklist.panelEnabled;
+                m_blacklistAction.matchAlertsEnabled = m_blacklist.matchAlertsEnabled;
+                m_blacklistAction.allowIdOnlyNicks = m_blacklist.allowIdOnlyNicks;
+                m_blacklistAction.showWithClickGui = m_blacklist.showWithClickGui;
+                m_blacklistAction.collapsed = m_blacklist.collapsed;
+                m_blacklistAction.panelOpacity = m_blacklist.panelOpacity;
+                m_blacklistAction.panelColor = m_blacklist.panelColor;
+                m_blacklistActionDirty = true;
+                enqueueToast("Blacklist", m_blacklist.panelEnabled);
+                break;
+            case 12: m_features.textGuiEnabled = !m_features.textGuiEnabled; break;
+            case 13: m_features.fireballEspEnabled =
+                         !m_features.fireballEspEnabled; break;
+            case 14: m_features.longJumpEnabled = !m_features.longJumpEnabled; break;
+            default: break;
+            }
+            if (index != 11U) hotkeyFeatureChanged = true;
+        }
+        m_featureHotkeyWasDown[index] = down;
+    }
+    if (hotkeyFeatureChanged) {
+        m_features.safewalkHotkey = m_features.featureHotkeys[4U];
+        m_featureSettingsDirty = true;
+        enqueueFeatureToasts(featuresBeforeHotkeys, m_features);
+    }
+
     const float targetGui = interactive ? 1.0F : 0.0F;
     const float delta = std::clamp(io.DeltaTime, 0.0F, 0.10F);
     // A lightly under-damped spring takes roughly half a second to settle. It
@@ -1912,7 +1972,8 @@ bool OverlayRenderer::render(HDC const deviceContext,
                 }
             }
         }
-        if (m_features.entityEspEnabled || m_features.nametagEnabled) {
+        if (m_features.entityEspEnabled || m_features.nametagEnabled ||
+            (m_features.fireballEspEnabled && snapshot.integratedSinglePlayer)) {
             const float partial = std::clamp(snapshot.camera.partialTicks, 0.0F, 1.0F);
             if (snapshot.entitySampleGeneration != m_lastEntitySampleGeneration) {
                 m_lastEntitySampleGeneration = snapshot.entitySampleGeneration;
@@ -1930,6 +1991,30 @@ bool OverlayRenderer::render(HDC const deviceContext,
                                       static_cast<double>(m_missedEntityTicks);
             for (std::uint32_t index = 0U; index < snapshot.entityMarkerCount; ++index) {
                 const EntityMarker& entity = snapshot.entityMarkers[index];
+                if (entity.fireball) {
+                    if (m_features.fireballEspEnabled &&
+                        snapshot.integratedSinglePlayer) {
+                        const double renderX = entity.previousX +
+                            (entity.currentX - entity.previousX) * renderTick;
+                        const double renderY = entity.previousY +
+                            (entity.currentY - entity.previousY) * renderTick;
+                        const double renderZ = entity.previousZ +
+                            (entity.currentZ - entity.previousZ) * renderTick;
+                        // EntityLargeFireball's collision box is visually much
+                        // larger than its core. A compact fixed cube protects
+                        // visibility while still tracking the projectile.
+                        constexpr double halfExtent = 0.24;
+                        const AxisAlignedBox fireballBox{
+                            renderX - halfExtent, renderY - halfExtent,
+                            renderZ - halfExtent, renderX + halfExtent,
+                            renderY + halfExtent, renderZ + halfExtent};
+                        drawProjectedBox(background, snapshot.camera, displaySize,
+                            fireballBox, packedRgbColor(m_features.fireballEspColor),
+                            m_features.labelsEnabled ? "Fireball" : "",
+                            m_features.fireballEspFilled);
+                    }
+                    continue;
+                }
                 if (m_features.entityEspPlayersOnly && !entity.player) continue;
                 const double renderX = entity.previousX +
                     (entity.currentX - entity.previousX) * renderTick;
@@ -2203,7 +2288,7 @@ bool OverlayRenderer::render(HDC const deviceContext,
     // settings. Categories are labels, never collapsing containers, so every
     // function remains one click away.
     constexpr float baseGuiWidth = 820.0F;
-    constexpr float baseGuiHeight = 580.0F;
+    constexpr float baseGuiHeight = 650.0F;
     constexpr float baseRailWidth = 198.0F;
     const float guiWidth = baseGuiWidth * uiScale;
     const float guiHeight = baseGuiHeight * uiScale;
@@ -2368,20 +2453,22 @@ bool OverlayRenderer::render(HDC const deviceContext,
                                 "Native workspace");
 
             struct NavItem final { const char* label; int page; float y; };
-            constexpr std::array<NavItem, 14U> navItems{{
+            constexpr std::array<NavItem, 16U> navItems{{
                 {"Player ESP", 0, 84.0F}, {"Bed ESP", 1, 109.0F},
-                {"Nametag", 2, 134.0F}, {"Bed Alert", 3, 180.0F},
-                {"Safewalk", 4, 226.0F}, {"Scaffold", 5, 251.0F},
-                {"Fly", 6, 276.0F}, {"BHop", 7, 301.0F},
-                {"Aim Assist", 8, 326.0F}, {"Player Stats", 9, 372.0F},
-                {"Debug", 10, 397.0F}, {"Blacklist", 11, 422.0F},
-                {"Text GUI", 12, 468.0F}, {"Interface", 13, 514.0F}}};
+                {"Nametag", 2, 134.0F}, {"Fireball ESP", 14, 159.0F},
+                {"Bed Alert", 3, 211.0F}, {"Safewalk", 4, 257.0F},
+                {"Scaffold", 5, 282.0F}, {"Fly", 6, 307.0F},
+                {"BHop", 7, 332.0F}, {"LongJump", 15, 357.0F},
+                {"Aim Assist", 8, 382.0F}, {"Player Stats", 9, 428.0F},
+                {"Debug", 10, 453.0F}, {"Blacklist", 11, 478.0F},
+                {"Text GUI", 12, 524.0F}, {"Interface", 13, 570.0F}}};
             constexpr std::array<std::pair<const char*, float>, 6U> navGroups{{
-                {"ESP", 68.0F}, {"ALERT", 164.0F}, {"SAFE", 210.0F},
-                {"DATA", 356.0F}, {"HUD", 452.0F},
-                {"APPLICATION", 498.0F}}};
-            const float targetNavY = navItems[static_cast<std::size_t>(
-                std::clamp(m_clickGuiPage, 0, 13))].y;
+                {"ESP", 68.0F}, {"ALERT", 195.0F}, {"SAFE", 241.0F},
+                {"DATA", 412.0F}, {"HUD", 508.0F},
+                {"APPLICATION", 554.0F}}};
+            float targetNavY = navItems.front().y;
+            for (const NavItem& item : navItems)
+                if (item.page == m_clickGuiPage) { targetNavY = item.y; break; }
             if (m_clickGuiNavPosition <= 0.0F) m_clickGuiNavPosition = targetNavY;
             m_clickGuiNavPosition += (targetNavY - m_clickGuiNavPosition) *
                 (1.0F - std::exp(-15.0F * delta));
@@ -2476,11 +2563,12 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     5.7F * uiScale, fadedGuiColor(guiRail), 24);
             }
 
-            constexpr std::array<const char*, 14U> pageTitles{{
+            constexpr std::array<const char*, 16U> pageTitles{{
                 "Player ESP", "Bed ESP", "Nametag", "Bed Alert",
                 "Safewalk", "Scaffold", "Fly", "BHop", "Aim Assist",
-                "Player Stats", "Debug", "Blacklist", "Text GUI", "Interface"}};
-            constexpr std::array<const char*, 14U> pageDescriptions{{
+                "Player Stats", "Debug", "Blacklist", "Text GUI", "Interface",
+                "Fireball ESP", "LongJump"}};
+            constexpr std::array<const char*, 16U> pageDescriptions{{
                 "Player outlines and teammate presentation",
                 "Bed geometry and defense material card",
                 "Confirmed-player identity and live health cards",
@@ -2494,8 +2582,10 @@ bool OverlayRenderer::render(HDC const deviceContext,
                 "Local diagnostics visible only to you",
                 "UUID-based player records and encounter warnings",
                 "Draggable enabled-feature list",
-                "Appearance, scale and input binding"}};
-            const int page = std::clamp(m_clickGuiPage, 0, 13);
+                "Appearance, scale and input binding",
+                "Compact local-world ghast fireball boxes",
+                "Single-player forward jump impulse"}};
+            const int page = std::clamp(m_clickGuiPage, 0, 15);
             const float contentX = windowPosition.x + (baseRailWidth + 22.0F) * uiScale;
             windowDraw->AddText(boldFont, ImGui::GetFontSize() * 1.16F,
                 ImVec2(contentX, windowPosition.y + 17.0F * uiScale),
@@ -2537,21 +2627,41 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     pageMasterAnimation = &m_toggleAnimation[4]; break;
             case 10: pageMaster = &m_features.debugChatEnabled;
                     pageMasterAnimation = &m_toggleAnimation[11]; break;
+            case 11: pageMaster = &m_blacklist.showWithClickGui;
+                     pageMasterAnimation = &m_toggleAnimation[33]; break;
             case 12: pageMaster = &m_features.textGuiEnabled;
                      pageMasterAnimation = &m_toggleAnimation[31]; break;
+            case 14: pageMaster = &m_features.fireballEspEnabled;
+                     pageMasterAnimation = &m_toggleAnimation[34]; break;
+            case 15: pageMaster = &m_features.longJumpEnabled;
+                     pageMasterAnimation = &m_toggleAnimation[35]; break;
             default: break;
             }
             if (pageMaster != nullptr && pageMasterAnimation != nullptr) {
                 ImGui::SetCursorScreenPos(ImVec2(
                     windowPosition.x + (baseGuiWidth - 126.0F) * uiScale,
                     windowPosition.y + 20.0F * uiScale));
-                changed |= animatedToggle("Enabled", *pageMaster,
-                                          *pageMasterAnimation, uiScale);
+                const bool masterChanged = animatedToggle(
+                    "Enabled", *pageMaster, *pageMasterAnimation, uiScale);
+                if (page == 11 && masterChanged) {
+                    m_blacklistAction = {};
+                    m_blacklistAction.type = BlacklistAction::Type::Settings;
+                    m_blacklistAction.panelEnabled = m_blacklist.panelEnabled;
+                    m_blacklistAction.matchAlertsEnabled = m_blacklist.matchAlertsEnabled;
+                    m_blacklistAction.allowIdOnlyNicks = m_blacklist.allowIdOnlyNicks;
+                    m_blacklistAction.showWithClickGui = m_blacklist.showWithClickGui;
+                    m_blacklistAction.collapsed = m_blacklist.collapsed;
+                    m_blacklistAction.panelOpacity = m_blacklist.panelOpacity;
+                    m_blacklistAction.panelColor = m_blacklist.panelColor;
+                    m_blacklistActionDirty = true;
+                } else {
+                    changed |= masterChanged;
+                }
             } else {
                 windowDraw->AddText(boldFont, ImGui::GetFontSize() * 0.78F,
                     ImVec2(windowPosition.x + (baseGuiWidth - 79.0F) * uiScale,
                            windowPosition.y + 27.0F * uiScale),
-                    fadedGuiColor(guiAccent), page == 11 ? "RECORDS" : "SYSTEM");
+                    fadedGuiColor(guiAccent), "SYSTEM");
             }
 
             auto beginHotkeyCapture = [&](const int target) noexcept {
@@ -2578,6 +2688,17 @@ bool OverlayRenderer::render(HDC const deviceContext,
                             changed = true;
                         } else if (m_hotkeyCaptureTarget == 4) {
                             m_features.safewalkHotkey = static_cast<int>(captured);
+                            changed = true;
+                        } else if (m_hotkeyCaptureTarget >= 100 &&
+                                   m_hotkeyCaptureTarget < 115) {
+                            const std::size_t featureIndex = static_cast<std::size_t>(
+                                m_hotkeyCaptureTarget - 100);
+                            for (int& configured : m_features.featureHotkeys)
+                                if (configured == static_cast<int>(captured)) configured = 0;
+                            m_features.featureHotkeys[featureIndex] =
+                                static_cast<int>(captured);
+                            if (featureIndex == 4U)
+                                m_features.safewalkHotkey = static_cast<int>(captured);
                             changed = true;
                         }
                     }
@@ -2632,6 +2753,16 @@ bool OverlayRenderer::render(HDC const deviceContext,
                 if (ImGui::Button(buttonText, ImVec2(126.0F * uiScale, 0.0F)))
                     beginHotkeyCapture(target);
             };
+
+            const int featureHotkeyIndex = page <= 12 ? page
+                : (page == 14 ? 13 : (page == 15 ? 14 : -1));
+            if (featureHotkeyIndex >= 0) {
+                hotkeyControl("Feature hotkey", 100 + featureHotkeyIndex,
+                    static_cast<unsigned>(std::max(0,
+                        m_features.featureHotkeys[static_cast<std::size_t>(
+                            featureHotkeyIndex)])));
+                ImGui::Spacing();
+            }
 
             if (page == 0) {
                 sectionTitle("TARGETS");
@@ -2766,11 +2897,8 @@ bool OverlayRenderer::render(HDC const deviceContext,
                 sectionTitle("EDGE ASSIST");
                 ImGui::TextWrapped(
                     "Crouch near an air edge while preserving Minecraft's physical sneak key state.");
-                hotkeyControl("Toggle bind", 4,
-                    static_cast<unsigned>(m_features.safewalkHotkey));
-                ImGui::Spacing();
                 ImGui::SetNextItemWidth(320.0F * uiScale);
-                changed |= ImGui::SliderInt("Late-edge sensitivity",
+                changed |= ImGui::SliderInt("Safety look-ahead",
                     &m_features.safewalkEdgeSensitivity, 0, 95, "%d%%",
                     ImGuiSliderFlags_AlwaysClamp);
                 ImGui::SetNextItemWidth(320.0F * uiScale);
@@ -2782,7 +2910,7 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     &m_features.safewalkReleaseDelayMs, 0, 750, "%d ms",
                     ImGuiSliderFlags_AlwaysClamp);
                 ImGui::TextDisabled(
-                    "Higher sensitivity waits until more of your footprint passes the edge.");
+                    "Low waits until the last safe margin; high anticipates the edge earlier.");
             } else if (page == 5) {
                 sectionTitle("AUTOMATIC PLACEMENT");
                 ImGui::TextWrapped(
@@ -2803,6 +2931,10 @@ bool OverlayRenderer::render(HDC const deviceContext,
                 sectionTitle("AIR CONTROL");
                 changed |= animatedToggle("Auto-jump on landing",
                     m_features.bhopAutoJump, m_toggleAnimation[32], uiScale);
+                ImGui::SetNextItemWidth(320.0F * uiScale);
+                changed |= ImGui::SliderInt("Air speed",
+                    &m_features.bhopAirSpeedPercent, 10, 300, "%d%%",
+                    ImGuiSliderFlags_AlwaysClamp);
                 ImGui::TextColored(ImVec4(1.0F, 0.42F, 0.34F, 1.0F),
                     "WARNING: Do not use this on a server. It can cause a ban.");
                 ImGui::TextDisabled("Airborne horizontal velocity follows current movement input.");
@@ -2942,11 +3074,8 @@ bool OverlayRenderer::render(HDC const deviceContext,
                 blacklistSettingsChanged |= animatedToggle(
                     "Show panel in game", m_blacklist.panelEnabled,
                     m_toggleAnimation[22], uiScale);
-                blacklistSettingsChanged |= animatedToggle(
-                    "Show together with Click GUI", m_blacklist.showWithClickGui,
-                    m_toggleAnimation[33], uiScale);
                 ImGui::TextDisabled(
-                    "When disabled, records remain available on this page after opening the Click GUI.");
+                    "The page master controls whether the panel stays visible with Click GUI.");
                 std::array<float, 3U> blacklistColor = unpackRgb(m_blacklist.panelColor);
                 ImGui::SetNextItemWidth(220.0F * uiScale);
                 if (ImGui::ColorEdit3("Panel background", blacklistColor.data(),
@@ -3094,6 +3223,33 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     m_features.textGuiY = -1;
                     changed = true;
                 }
+            } else if (page == 14) {
+                sectionTitle("PROJECTILE BOX");
+                ImGui::TextWrapped(
+                    "Tracks EntityFireball instances in an integrated single-player world. The compact box is intentionally smaller than the large-fireball collision volume.");
+                changed |= animatedToggle("Semi-transparent fill",
+                    m_features.fireballEspFilled, m_toggleAnimation[36], uiScale);
+                std::array<float, 3U> fireballColor = unpackRgb(
+                    m_features.fireballEspColor);
+                ImGui::SetNextItemWidth(220.0F * uiScale);
+                if (ImGui::ColorEdit3("Fireball color", fireballColor.data(),
+                        ImGuiColorEditFlags_NoInputs |
+                        ImGuiColorEditFlags_DisplayRGB)) {
+                    m_features.fireballEspColor = packRgb(fireballColor);
+                    changed = true;
+                }
+                ImGui::TextColored(ImVec4(1.0F, 0.58F, 0.30F, 1.0F),
+                    "LOCAL WORLD ONLY: automatically disabled on every multiplayer server.");
+            } else if (page == 15) {
+                sectionTitle("JUMP IMPULSE");
+                ImGui::SetNextItemWidth(320.0F * uiScale);
+                changed |= ImGui::SliderInt("Horizontal speed",
+                    &m_features.longJumpSpeedPercent, 25, 250, "%d%%",
+                    ImGuiSliderFlags_AlwaysClamp);
+                ImGui::TextWrapped(
+                    "Applies a forward jump impulse at the next grounded movement step, with a bounded cooldown.");
+                ImGui::TextColored(ImVec4(1.0F, 0.58F, 0.30F, 1.0F),
+                    "LOCAL WORLD ONLY: automatically disabled on every multiplayer server.");
             } else {
                 sectionTitle("INTERFACE SIZE");
                 constexpr std::array<const char*, 4U> sizeLabels{"S", "M", "L", "XL"};
@@ -3220,7 +3376,7 @@ bool OverlayRenderer::render(HDC const deviceContext,
     // avoiding competing per-row hover/cursor state.
     if (m_features.textGuiEnabled) {
         struct TextModule { const char* name; bool enabled; };
-        const std::array<TextModule, 12U> modules{{
+        const std::array<TextModule, 14U> modules{{
             {"Player ESP", m_features.entityEspEnabled},
             {"Bed ESP", m_features.bedEspEnabled},
             {"Nametag", m_features.nametagEnabled},
@@ -3232,19 +3388,26 @@ bool OverlayRenderer::render(HDC const deviceContext,
             {"Aim Assist", m_features.aimAssistEnabled},
             {"Player Stats", m_features.hypixelPanelEnabled},
             {"Debug", m_features.debugChatEnabled},
-            {"Blacklist", m_blacklist.panelEnabled}}};
-        int visibleCount = 0;
+            {"Blacklist", m_blacklist.panelEnabled},
+            {"Fireball ESP", m_features.fireballEspEnabled},
+            {"LongJump", m_features.longJumpEnabled}}};
+        float visibleRows = 0.0F;
         float maximumTextWidth = 0.0F;
-        for (const TextModule& module : modules) {
-            if (!module.enabled) continue;
-            ++visibleCount;
+        for (std::size_t index = 0U; index < modules.size(); ++index) {
+            advancePresentationSpring(m_textGuiModuleProgress[index],
+                                      m_textGuiModuleVelocity[index],
+                                      modules[index].enabled ? 1.0F : 0.0F, delta);
+            const float progress = std::clamp(
+                m_textGuiModuleProgress[index], 0.0F, 1.0F);
+            if (progress <= 0.004F) continue;
+            visibleRows += progress;
             maximumTextWidth = std::max(maximumTextWidth,
-                                        ImGui::CalcTextSize(module.name).x);
+                                        ImGui::CalcTextSize(modules[index].name).x);
         }
-        if (visibleCount > 0) {
+        if (visibleRows > 0.004F) {
             const float width = maximumTextWidth + 20.0F * uiScale;
             const float lineHeight = ImGui::GetTextLineHeight() + 3.0F * uiScale;
-            const float height = lineHeight * static_cast<float>(visibleCount) +
+            const float height = lineHeight * visibleRows +
                                  8.0F * uiScale;
             const float defaultX = std::max(5.0F, io.DisplaySize.x - width - 16.0F);
             const float defaultY = std::max(5.0F, io.DisplaySize.y * 0.18F);
@@ -3283,22 +3446,38 @@ bool OverlayRenderer::render(HDC const deviceContext,
                 const std::array<float, 3U> baseRgb =
                     unpackRgb(m_features.textGuiColor);
                 const ImVec4 base(baseRgb[0U], baseRgb[1U], baseRgb[2U], 1.0F);
-                int row = 0;
-                for (const TextModule& module : modules) {
-                    if (!module.enabled) continue;
-                    const float wave = 0.5F + 0.5F * std::sin(
-                        static_cast<float>(ImGui::GetTime()) * 2.2F +
-                        static_cast<float>(row) * 0.62F);
-                    const ImVec4 flowing(
-                        base.x + (1.0F - base.x) * wave * 0.34F,
-                        base.y + (1.0F - base.y) * wave * 0.34F,
-                        base.z + (1.0F - base.z) * wave * 0.34F, 1.0F);
+                float rowY = textY + 4.0F * uiScale;
+                for (std::size_t moduleIndex = 0U;
+                     moduleIndex < modules.size(); ++moduleIndex) {
+                    const TextModule& module = modules[moduleIndex];
+                    const float progress = std::clamp(
+                        m_textGuiModuleProgress[moduleIndex], 0.0F, 1.0F);
+                    if (progress <= 0.004F) continue;
+                    const float eased = progress * progress * (3.0F - 2.0F * progress);
                     const ImVec2 textSize = ImGui::CalcTextSize(module.name);
-                    textDraw->AddText(
-                        ImVec2(textX + width - textSize.x - 4.0F * uiScale,
-                               textY + 4.0F * uiScale + lineHeight * row),
-                        ImGui::ColorConvertFloat4ToU32(flowing), module.name);
-                    ++row;
+                    float glyphX = textX + width - textSize.x - 4.0F * uiScale +
+                                   (1.0F - eased) * 18.0F * uiScale;
+                    const float glyphY = rowY + (1.0F - eased) * 4.0F * uiScale;
+                    // A character-phase highlight creates an actual flowing
+                    // sheen instead of tinting the entire row at once.
+                    for (std::size_t characterIndex = 0U;
+                         module.name[characterIndex] != '\0'; ++characterIndex) {
+                        char glyph[2]{module.name[characterIndex], '\0'};
+                        const float wave = 0.5F + 0.5F * std::sin(
+                            static_cast<float>(ImGui::GetTime()) * 3.0F -
+                            static_cast<float>(characterIndex) * 0.48F +
+                            static_cast<float>(moduleIndex) * 0.31F);
+                        const ImVec4 flowing(
+                            base.x + (1.0F - base.x) * wave * 0.58F,
+                            base.y + (1.0F - base.y) * wave * 0.58F,
+                            base.z + (1.0F - base.z) * wave * 0.58F, eased);
+                        textDraw->AddText(ImVec2(glyphX + 1.0F, glyphY + 1.0F),
+                            IM_COL32(0, 0, 0, static_cast<int>(120.0F * eased)), glyph);
+                        textDraw->AddText(ImVec2(glyphX, glyphY),
+                            ImGui::ColorConvertFloat4ToU32(flowing), glyph);
+                        glyphX += ImGui::CalcTextSize(glyph).x;
+                    }
+                    rowY += lineHeight * progress;
                 }
             }
             ImGui::End();
@@ -3809,12 +3988,11 @@ bool OverlayRenderer::render(HDC const deviceContext,
             }
         }
     }
-    // panelEnabled controls the always-on HUD surface. Even when it is off,
-    // opening the Blacklist settings page should temporarily reveal the same
-    // panel for review/editing, then dismiss it with the normal spring/blur
-    // transition when the Click GUI closes or leaves the page.
+    // showWithClickGui applies to the whole Click GUI session rather than only
+    // the Blacklist settings page, so navigation never unexpectedly dismisses
+    // the panel while the user is reviewing another category.
     const bool blacklistPanelTarget = m_blacklist.panelEnabled ||
-        (m_blacklist.showWithClickGui && interactive && m_clickGuiPage == 11);
+        (m_blacklist.showWithClickGui && interactive);
     advancePresentationSpring(m_blacklistPanelProgress,
                               m_blacklistPanelVelocity,
                               blacklistPanelTarget ? 1.0F : 0.0F, delta);

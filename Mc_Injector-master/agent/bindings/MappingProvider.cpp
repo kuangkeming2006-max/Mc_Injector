@@ -195,6 +195,8 @@ private:
     mapping.livingSignature = "Lnet/minecraft/entity/EntityLivingBase;";
     mapping.entityName = "net.minecraft.entity.Entity";
     mapping.entitySignature = "Lnet/minecraft/entity/Entity;";
+    mapping.fireballName = "net.minecraft.entity.projectile.EntityFireball";
+    mapping.fireballSignature = "Lnet/minecraft/entity/projectile/EntityFireball;";
     mapping.aabbName = "net.minecraft.util.AxisAlignedBB";
     mapping.aabbSignature = "Lnet/minecraft/util/AxisAlignedBB;";
     mapping.worldName = "net.minecraft.world.World";
@@ -378,6 +380,8 @@ private:
     mapping.livingSignature = "Lpr;";
     mapping.entityName = "pk";
     mapping.entitySignature = "Lpk;";
+    mapping.fireballName = "ws";
+    mapping.fireballSignature = "Lws;";
     mapping.aabbName = "aug";
     mapping.aabbSignature = "Laug;";
     mapping.worldName = "adm";

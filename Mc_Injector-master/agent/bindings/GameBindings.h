@@ -52,6 +52,7 @@ struct EntityMarker final {
     // roster (UUID first, exact name as a compatibility fallback).  Renderers
     // use this to exclude shop NPCs and other player-shaped entities.
     bool confirmedPlayer = false;
+    bool fireball = false;
     // OpenGL texture name owned by Minecraft's TextureManager in the same
     // context used by the SwapBuffers hook.  The agent never deletes it.
     std::uint32_t skinTextureId = 0U;
@@ -123,6 +124,7 @@ struct GameSnapshot final {
     AxisAlignedBox bounds{};
     jint loadedEntities = 0;
     bool singlePlayer = false;
+    bool integratedSinglePlayer = false;
     bool hypixelServer = false;
     std::array<EntityMarker, MaxEntityMarkers> entityMarkers{};
     std::uint32_t entityMarkerCount = 0U;
@@ -162,13 +164,16 @@ struct GameplaySettings final {
     bool bhop = false;
     bool bhopAutoJump = true;
     bool aimAssist = false;
+    bool longJump = false;
     bool aimSlowdownMode = true;
     int safewalkReleaseDelayMs = 120;
     int safewalkEdgeSensitivity = 55;
     int safewalkMinimumPitch = -5;
     int flySpeedPercent = 100;
+    int bhopAirSpeedPercent = 100;
     int aimSlowdownPercent = 45;
     int aimSpeedPercent = 35;
+    int longJumpSpeedPercent = 100;
 };
 
 // Minecraft 1.8.9-only JNI binding cache. Only jclass global references and
@@ -379,7 +384,13 @@ private:
     std::uint8_t m_safewalkSupportMask = 0U;
     std::uint64_t m_safewalkReleaseAt = 0U;
     std::uint64_t m_lastScaffoldPlacementTick = 0U;
+    // Scaffold keeps the last supported block layer while the player is in
+    // the air. Recomputing this from minY during a jump raises the target one
+    // block and is the source of the old diagonal/jump gaps.
+    int m_scaffoldPlatformY = 0;
+    bool m_scaffoldPlatformYValid = false;
     std::uint64_t m_lastGameplayTick = 0U;
+    std::uint64_t m_lastLongJumpTick = 0U;
     bool m_aimSensitivityModified = false;
     float m_originalMouseSensitivity = 0.5F;
 };

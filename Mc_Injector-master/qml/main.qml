@@ -526,19 +526,15 @@ ApplicationWindow {
                         id: navPill
                         anchors.fill: parent
                         radius: 20
-                        color: app.activeRoute === modelData.route
-                               ? app.primaryContainer
-                               : "transparent"
+                        color: "transparent"
                         scale: navMouse.pressed ? 0.985 : 1
                         transformOrigin: Item.Center
+                        // A selected row becomes inactive while the pointer is
+                        // still resting on it after navigation. Suppress that
+                        // synthetic hover until the pointer actually exits;
+                        // otherwise it appears as the old tab flashing dark.
+                        property bool suppressHoverUntilExit: false
 
-                        Behavior on color {
-                            ColorAnimation {
-                                duration: 260
-                                easing.type: Easing.BezierSpline
-                                easing.bezierCurve: [0.2, 0.0, 0.0, 1.0, 1.0, 1.0]
-                            }
-                        }
                         Behavior on scale {
                             NumberAnimation {
                                 duration: 240
@@ -550,9 +546,24 @@ ApplicationWindow {
                         Rectangle {
                             anchors.fill: parent
                             radius: navPill.radius
+                            color: app.primaryContainer
+                            opacity: app.activeRoute === modelData.route ? 1 : 0
+                            Behavior on opacity {
+                                NumberAnimation {
+                                    duration: 260
+                                    easing.type: Easing.BezierSpline
+                                    easing.bezierCurve: [0.2, 0.0, 0.0, 1.0, 1.0, 1.0]
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: navPill.radius
                             color: app.hoverColor
                             opacity: app.activeRoute !== modelData.route
-                                     && navMouse.containsMouse ? 1 : 0
+                                     && navMouse.containsMouse
+                                     && !navPill.suppressHoverUntilExit ? 1 : 0
                             Behavior on opacity {
                                 NumberAnimation {
                                     duration: 220
@@ -566,7 +577,7 @@ ApplicationWindow {
                             id: navRipple
                             anchors.fill: parent
                             rippleColor: app.primaryColor
-                            peakOpacity: 0.07
+                            peakOpacity: 0.0
                             cornerRadius: navPill.radius
                         }
 
@@ -633,7 +644,11 @@ ApplicationWindow {
                             const point = mapToItem(navPill, mouse.x, mouse.y)
                             navRipple.burst(point.x, point.y)
                         }
-                        onClicked: app.activeRoute = modelData.route
+                        onExited: navPill.suppressHoverUntilExit = false
+                        onClicked: {
+                            navPill.suppressHoverUntilExit = true
+                            app.activeRoute = modelData.route
+                        }
                     }
                 }
             }

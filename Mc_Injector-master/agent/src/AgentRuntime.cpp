@@ -107,6 +107,20 @@ std::uint32_t packFeatures(const FeatureSettings& settings) noexcept
         (settings.allowHypixelMovement ? 0x80000000U : 0U));
 }
 
+std::uint64_t packFeatureHotkeys(const FeatureSettings& settings,
+                                 const std::size_t first) noexcept
+{
+    std::uint64_t packed = 0U;
+    for (std::size_t offset = 0U; offset < 8U; ++offset) {
+        const std::size_t index = first + offset;
+        if (index >= settings.featureHotkeys.size()) break;
+        const auto key = static_cast<std::uint64_t>(std::clamp(
+            settings.featureHotkeys[index], 0, 254));
+        packed |= key << (offset * 8U);
+    }
+    return packed;
+}
+
 FeatureSettings unpackFeatures(const std::uint32_t bits,
                                const int defenseRadius = 6,
                                const int threatRadius = 8,
@@ -140,7 +154,15 @@ FeatureSettings unpackFeatures(const std::uint32_t bits,
                                 const int aimSpeedPercent = 35,
                                 const std::uint32_t textGuiColor = 0x7EE7FFU,
                                 const int textGuiX = -1,
-                                const int textGuiY = -1) noexcept
+                                const int textGuiY = -1,
+                                const int bhopAirSpeedPercent = 100,
+                                const std::uint64_t hotkeysPackedA = 0U,
+                                const std::uint64_t hotkeysPackedB = 0U,
+                                const bool fireballEspEnabled = false,
+                                const bool fireballEspFilled = true,
+                                const bool longJumpEnabled = false,
+                                const int longJumpSpeedPercent = 100,
+                                const std::uint32_t fireballEspColor = 0xFF9D3DU) noexcept
 {
     FeatureSettings s;
     s.espEnabled = (bits & 0x01U) != 0U;
@@ -208,6 +230,21 @@ FeatureSettings unpackFeatures(const std::uint32_t bits,
     s.textGuiColor = textGuiColor & 0xFFFFFFU;
     s.textGuiX = std::clamp(textGuiX, -1, 1000);
     s.textGuiY = std::clamp(textGuiY, -1, 1000);
+    s.bhopAirSpeedPercent = std::clamp(bhopAirSpeedPercent, 10, 300);
+    for (std::size_t index = 0U; index < s.featureHotkeys.size(); ++index) {
+        const std::uint64_t packed = index < 8U ? hotkeysPackedA : hotkeysPackedB;
+        const std::size_t offset = index < 8U ? index : index - 8U;
+        s.featureHotkeys[index] = static_cast<int>((packed >> (offset * 8U)) & 0xFFU);
+    }
+    // Preserve the legacy Safewalk binding as a migration source. New builds
+    // keep both fields synchronized, while old settings remain usable.
+    if (s.featureHotkeys[4U] == 0) s.featureHotkeys[4U] = s.safewalkHotkey;
+    else s.safewalkHotkey = s.featureHotkeys[4U];
+    s.fireballEspEnabled = fireballEspEnabled;
+    s.fireballEspFilled = fireballEspFilled;
+    s.longJumpEnabled = longJumpEnabled;
+    s.longJumpSpeedPercent = std::clamp(longJumpSpeedPercent, 25, 250);
+    s.fireballEspColor = fireballEspColor & 0xFFFFFFU;
     return s;
 }
 
@@ -698,8 +735,16 @@ void AgentRuntime::telemetryMain() noexcept
                 m_featureChangedAimSpeedPercent.load(std::memory_order_acquire),
                 m_featureChangedTextGuiColor.load(std::memory_order_acquire),
                 m_featureChangedTextGuiX.load(std::memory_order_acquire),
-                m_featureChangedTextGuiY.load(std::memory_order_acquire));
-            FixedLine<720U> line;
+                m_featureChangedTextGuiY.load(std::memory_order_acquire),
+                m_featureChangedBhopAirSpeedPercent.load(std::memory_order_acquire),
+                m_featureChangedHotkeysPackedA.load(std::memory_order_acquire),
+                m_featureChangedHotkeysPackedB.load(std::memory_order_acquire),
+                m_featureChangedFireballEspEnabled.load(std::memory_order_acquire),
+                m_featureChangedFireballEspFilled.load(std::memory_order_acquire),
+                m_featureChangedLongJumpEnabled.load(std::memory_order_acquire),
+                m_featureChangedLongJumpSpeedPercent.load(std::memory_order_acquire),
+                m_featureChangedFireballEspColor.load(std::memory_order_acquire));
+            FixedLine<860U> line;
             if (line.append("FEATURE_STATE_CHANGED ") &&
                 line.appendInteger(settings.espEnabled ? 1 : 0) && line.append(' ') &&
                 line.appendInteger(settings.entityEspEnabled ? 1 : 0) && line.append(' ') &&
@@ -765,7 +810,15 @@ void AgentRuntime::telemetryMain() noexcept
                 line.appendInteger(settings.aimSpeedPercent) && line.append(' ') &&
                 line.appendInteger(settings.textGuiColor) && line.append(' ') &&
                 line.appendInteger(settings.textGuiX) && line.append(' ') &&
-                line.appendInteger(settings.textGuiY) &&
+                line.appendInteger(settings.textGuiY) && line.append(' ') &&
+                line.appendInteger(settings.bhopAirSpeedPercent) && line.append(' ') &&
+                line.appendInteger(packFeatureHotkeys(settings, 0U)) && line.append(' ') &&
+                line.appendInteger(packFeatureHotkeys(settings, 8U)) && line.append(' ') &&
+                line.appendInteger(settings.fireballEspEnabled ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.fireballEspFilled ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.longJumpEnabled ? 1 : 0) && line.append(' ') &&
+                line.appendInteger(settings.longJumpSpeedPercent) && line.append(' ') &&
+                line.appendInteger(settings.fireballEspColor) &&
                 m_ipc->sendLine(line.view())) {
                 sentFeatureChangedRevision = featureRevision;
             }
@@ -1054,6 +1107,20 @@ void AgentRuntime::queueFeatureChanged(const FeatureSettings& settings) noexcept
                             std::memory_order_release);
     m_flySpeedPercent.store(std::clamp(settings.flySpeedPercent, 10, 500),
                             std::memory_order_release);
+    m_bhopAirSpeedPercent.store(
+        std::clamp(settings.bhopAirSpeedPercent, 10, 300),
+        std::memory_order_release);
+    m_featureHotkeysPackedA.store(packFeatureHotkeys(settings, 0U),
+                                  std::memory_order_release);
+    m_featureHotkeysPackedB.store(packFeatureHotkeys(settings, 8U),
+                                  std::memory_order_release);
+    m_fireballEspEnabled.store(settings.fireballEspEnabled, std::memory_order_release);
+    m_fireballEspFilled.store(settings.fireballEspFilled, std::memory_order_release);
+    m_longJumpEnabled.store(settings.longJumpEnabled, std::memory_order_release);
+    m_longJumpSpeedPercent.store(std::clamp(settings.longJumpSpeedPercent, 25, 250),
+                                 std::memory_order_release);
+    m_fireballEspColor.store(settings.fireballEspColor & 0xFFFFFFU,
+                             std::memory_order_release);
     m_aimSlowdownPercent.store(std::clamp(settings.aimSlowdownPercent, 5, 95),
                                std::memory_order_release);
     m_aimSpeedPercent.store(std::clamp(settings.aimSpeedPercent, 1, 100),
@@ -1128,6 +1195,24 @@ void AgentRuntime::queueFeatureChanged(const FeatureSettings& settings) noexcept
     m_featureChangedFlySpeedPercent.store(
         std::clamp(settings.flySpeedPercent, 10, 500),
         std::memory_order_relaxed);
+    m_featureChangedBhopAirSpeedPercent.store(
+        std::clamp(settings.bhopAirSpeedPercent, 10, 300),
+        std::memory_order_relaxed);
+    m_featureChangedHotkeysPackedA.store(packFeatureHotkeys(settings, 0U),
+                                         std::memory_order_relaxed);
+    m_featureChangedHotkeysPackedB.store(packFeatureHotkeys(settings, 8U),
+                                         std::memory_order_relaxed);
+    m_featureChangedFireballEspEnabled.store(settings.fireballEspEnabled,
+                                              std::memory_order_relaxed);
+    m_featureChangedFireballEspFilled.store(settings.fireballEspFilled,
+                                             std::memory_order_relaxed);
+    m_featureChangedLongJumpEnabled.store(settings.longJumpEnabled,
+                                           std::memory_order_relaxed);
+    m_featureChangedLongJumpSpeedPercent.store(
+        std::clamp(settings.longJumpSpeedPercent, 25, 250),
+        std::memory_order_relaxed);
+    m_featureChangedFireballEspColor.store(settings.fireballEspColor & 0xFFFFFFU,
+                                            std::memory_order_relaxed);
     m_featureChangedAimSlowdownPercent.store(
         std::clamp(settings.aimSlowdownPercent, 5, 95),
         std::memory_order_relaxed);
@@ -1273,6 +1358,14 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
         std::uint32_t textGuiColor = 0U;
         int textGuiX = 0;
         int textGuiY = 0;
+        int bhopAirSpeedPercent = 0;
+        std::uint64_t hotkeysPackedA = 0U;
+        std::uint64_t hotkeysPackedB = 0U;
+        std::string fireballEnabledToken;
+        std::string fireballFilledToken;
+        std::string longJumpEnabledToken;
+        int longJumpSpeedPercent = 0;
+        std::uint32_t fireballEspColor = 0U;
         bool featureTokensRead = true;
         for (std::string& token : tokens) {
             if (!(stream >> token)) {
@@ -1291,7 +1384,11 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
                >> safewalkReleaseDelayMs >> safewalkEdgeSensitivity
                >> safewalkMinimumPitch >> safewalkHotkey >> flySpeedPercent
                >> aimSlowdownPercent >> aimSpeedPercent >> textGuiColor
-               >> textGuiX >> textGuiY) ||
+               >> textGuiX >> textGuiY >> bhopAirSpeedPercent
+               >> hotkeysPackedA >> hotkeysPackedB
+               >> fireballEnabledToken >> fireballFilledToken
+               >> longJumpEnabledToken >> longJumpSpeedPercent
+               >> fireballEspColor) ||
             (stream >> trailing)) {
             (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE expected-thirty-two-flags-and-layout");
             return true;
@@ -1329,10 +1426,22 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
             aimSpeedPercent < 1 || aimSpeedPercent > 100 ||
             textGuiColor > 0xFFFFFFU || textGuiX < -1 || textGuiX > 1000 ||
             textGuiY < -1 || textGuiY > 1000 ||
+            bhopAirSpeedPercent < 10 || bhopAirSpeedPercent > 300 ||
             hypixelFontIndex < 0 || hypixelFontIndex > 3 ||
             nametagRange < 4 || nametagRange > 128 ||
             nametagSizeIndex < 0 || nametagSizeIndex > 3) {
             (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE invalid-radius-bind-opacity-or-color");
+            return true;
+        }
+        bool fireballEnabled = false;
+        bool fireballFilled = false;
+        bool longJumpEnabled = false;
+        if (!parseFlag(fireballEnabledToken, fireballEnabled) ||
+            !parseFlag(fireballFilledToken, fireballFilled) ||
+            !parseFlag(longJumpEnabledToken, longJumpEnabled) ||
+            longJumpSpeedPercent < 25 || longJumpSpeedPercent > 250 ||
+            fireballEspColor > 0xFFFFFFU) {
+            (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE invalid-local-feature");
             return true;
         }
         settings.espEnabled = values[0];
@@ -1400,6 +1509,25 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
         settings.textGuiColor = textGuiColor;
         settings.textGuiX = textGuiX;
         settings.textGuiY = textGuiY;
+        settings.bhopAirSpeedPercent = bhopAirSpeedPercent;
+        for (std::size_t index = 0U; index < settings.featureHotkeys.size(); ++index) {
+            const std::uint64_t packed = index < 8U ? hotkeysPackedA : hotkeysPackedB;
+            const std::size_t offset = index < 8U ? index : index - 8U;
+            const int key = static_cast<int>((packed >> (offset * 8U)) & 0xFFU);
+            if ((key > 0 && key < 8) || key > 254) {
+                (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE invalid-feature-hotkey");
+                return true;
+            }
+            settings.featureHotkeys[index] = key;
+        }
+        if (settings.featureHotkeys[4U] == 0)
+            settings.featureHotkeys[4U] = safewalkHotkey;
+        settings.safewalkHotkey = settings.featureHotkeys[4U];
+        settings.fireballEspEnabled = fireballEnabled;
+        settings.fireballEspFilled = fireballFilled;
+        settings.longJumpEnabled = longJumpEnabled;
+        settings.longJumpSpeedPercent = longJumpSpeedPercent;
+        settings.fireballEspColor = fireballEspColor;
         m_featureBits.store(packFeatures(settings), std::memory_order_release);
         m_bedDefenseRadius.store(defenseRadius, std::memory_order_release);
         m_bedThreatRadius.store(threatRadius, std::memory_order_release);
@@ -1438,6 +1566,18 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
         m_textGuiColor.store(textGuiColor, std::memory_order_release);
         m_textGuiX.store(textGuiX, std::memory_order_release);
         m_textGuiY.store(textGuiY, std::memory_order_release);
+        m_bhopAirSpeedPercent.store(bhopAirSpeedPercent,
+                                    std::memory_order_release);
+        m_featureHotkeysPackedA.store(packFeatureHotkeys(settings, 0U),
+                                      std::memory_order_release);
+        m_featureHotkeysPackedB.store(packFeatureHotkeys(settings, 8U),
+                                      std::memory_order_release);
+        m_fireballEspEnabled.store(fireballEnabled, std::memory_order_release);
+        m_fireballEspFilled.store(fireballFilled, std::memory_order_release);
+        m_longJumpEnabled.store(longJumpEnabled, std::memory_order_release);
+        m_longJumpSpeedPercent.store(longJumpSpeedPercent,
+                                     std::memory_order_release);
+        m_fireballEspColor.store(fireballEspColor, std::memory_order_release);
         (void)m_ipc->sendLine("FEATURE_STATE_APPLIED");
         return true;
     }
@@ -1913,7 +2053,15 @@ void AgentRuntime::beforeSwapBuffers(HDC const deviceContext)
         m_aimSpeedPercent.load(std::memory_order_acquire),
         m_textGuiColor.load(std::memory_order_acquire),
         m_textGuiX.load(std::memory_order_acquire),
-        m_textGuiY.load(std::memory_order_acquire));
+        m_textGuiY.load(std::memory_order_acquire),
+        m_bhopAirSpeedPercent.load(std::memory_order_acquire),
+        m_featureHotkeysPackedA.load(std::memory_order_acquire),
+        m_featureHotkeysPackedB.load(std::memory_order_acquire),
+        m_fireballEspEnabled.load(std::memory_order_acquire),
+        m_fireballEspFilled.load(std::memory_order_acquire),
+        m_longJumpEnabled.load(std::memory_order_acquire),
+        m_longJumpSpeedPercent.load(std::memory_order_acquire),
+        m_fireballEspColor.load(std::memory_order_acquire));
     const bool interactiveNow = m_interactive.load(std::memory_order_acquire);
     if (env != nullptr) {
         if (interactiveNow && !m_gameInputReleased) {
@@ -1953,18 +2101,6 @@ void AgentRuntime::beforeSwapBuffers(HDC const deviceContext)
     }
     GameSnapshot snapshot = m_bindings->snapshot(tickMilliseconds);
 
-    if (!interactiveNow) {
-        const bool safewalkHotkeyDown =
-            (::GetAsyncKeyState(activeFeatures.safewalkHotkey) & 0x8000) != 0;
-        if (safewalkHotkeyDown && !m_safewalkHotkeyWasDown) {
-            activeFeatures.safewalkEnabled = !activeFeatures.safewalkEnabled;
-            queueFeatureChanged(activeFeatures);
-        }
-        m_safewalkHotkeyWasDown = safewalkHotkeyDown;
-    } else {
-        m_safewalkHotkeyWasDown = false;
-    }
-
     // Server guard is evaluated from currentServerData.serverIP and therefore
     // remains active in lobbies and during respawn. The explicit override is
     // persisted separately and never inferred from a feature hotkey.
@@ -1979,6 +2115,17 @@ void AgentRuntime::beforeSwapBuffers(HDC const deviceContext)
             "[Movement Guard] Fly/BHop/Scaffold were disabled on Hypixel.");
     }
 
+    // New local diagnostics are fail-closed. A warning cannot be used as an
+    // override: only an integrated single-player server may execute them.
+    if (!snapshot.integratedSinglePlayer &&
+        (activeFeatures.longJumpEnabled || activeFeatures.fireballEspEnabled)) {
+        activeFeatures.longJumpEnabled = false;
+        activeFeatures.fireballEspEnabled = false;
+        queueFeatureChanged(activeFeatures);
+        m_bindings->enqueueDebugChatLine(
+            "[Local Guard] LongJump/Fireball ESP require an integrated single-player world.");
+    }
+
     if (env != nullptr) {
         GameplaySettings gameplay{};
         gameplay.safewalk = activeFeatures.safewalkEnabled && !interactiveNow;
@@ -1987,13 +2134,17 @@ void AgentRuntime::beforeSwapBuffers(HDC const deviceContext)
         gameplay.bhop = activeFeatures.bhopEnabled && !interactiveNow;
         gameplay.bhopAutoJump = activeFeatures.bhopAutoJump;
         gameplay.aimAssist = activeFeatures.aimAssistEnabled && !interactiveNow;
+        gameplay.longJump = activeFeatures.longJumpEnabled && !interactiveNow &&
+                            snapshot.integratedSinglePlayer;
         gameplay.aimSlowdownMode = activeFeatures.aimSlowdownMode;
         gameplay.safewalkReleaseDelayMs = activeFeatures.safewalkReleaseDelayMs;
         gameplay.safewalkEdgeSensitivity = activeFeatures.safewalkEdgeSensitivity;
         gameplay.safewalkMinimumPitch = activeFeatures.safewalkMinimumPitch;
         gameplay.flySpeedPercent = activeFeatures.flySpeedPercent;
+        gameplay.bhopAirSpeedPercent = activeFeatures.bhopAirSpeedPercent;
         gameplay.aimSlowdownPercent = activeFeatures.aimSlowdownPercent;
         gameplay.aimSpeedPercent = activeFeatures.aimSpeedPercent;
+        gameplay.longJumpSpeedPercent = activeFeatures.longJumpSpeedPercent;
         (void)m_bindings->updateGameplay(env, gameplay, snapshot,
                                          tickMilliseconds);
     }

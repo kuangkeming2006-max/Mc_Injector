@@ -17,6 +17,7 @@ namespace mcoverlay {
 struct OverlayInputState;
 
 struct FeatureSettings final {
+    static constexpr std::size_t FeatureHotkeyCount = 15U;
     bool espEnabled = true;
     bool entityEspEnabled = true;
     bool entityEspPlayersOnly = false;
@@ -49,6 +50,9 @@ struct FeatureSettings final {
     bool aimAssistEnabled = false;
     bool aimSlowdownMode = true;
     bool textGuiEnabled = false;
+    bool fireballEspEnabled = false;
+    bool fireballEspFilled = true;
+    bool longJumpEnabled = false;
     // High-risk movement helpers fail closed on Hypixel. This explicit,
     // persisted opt-in is intentionally separate from each feature switch so
     // an accidental hotkey press can never silently override the server guard.
@@ -77,6 +81,8 @@ struct FeatureSettings final {
     int safewalkMinimumPitch = -5;
     int safewalkHotkey = VK_F8;
     int flySpeedPercent = 100;
+    int bhopAirSpeedPercent = 100;
+    int longJumpSpeedPercent = 100;
     int aimSlowdownPercent = 45;
     int aimSpeedPercent = 35;
     int textGuiX = -1;
@@ -91,8 +97,12 @@ struct FeatureSettings final {
     std::uint32_t nametagPanelColor = 0x101218U;
     std::uint32_t clickGuiAccentColor = 0x825DE8U;
     std::uint32_t textGuiColor = 0x7EE7FFU;
+    std::uint32_t fireballEspColor = 0xFF9D3DU;
     int nametagPanelOpacity = 82;
     int hypixelRailOpacity = 100;
+    // Page master hotkeys in navigation order, excluding Interface. Zero is
+    // deliberately "Unbound"; configured keys are persisted by Controller.
+    std::array<int, FeatureHotkeyCount> featureHotkeys{};
 
     [[nodiscard]] bool operator==(const FeatureSettings&) const noexcept = default;
 };
@@ -296,7 +306,7 @@ private:
     int m_previousClickGuiPage = 0;
     float m_clickGuiPageProgress = 1.0F;
     float m_clickGuiNavPosition = 0.0F;
-    std::array<float, 14U> m_clickGuiNavHover{};
+    std::array<float, 16U> m_clickGuiNavHover{};
     float m_clickGuiThemeProgress = 0.0F;
     bool m_statsPanelTransformDirty = false;
     bool m_statsPanelDragging = false;
@@ -326,6 +336,9 @@ private:
     int m_blacklistResizeStartWidth = 100;
     int m_blacklistResizeStartHeight = 100;
     bool m_safewalkHotkeyWasDown = false;
+    std::array<bool, FeatureSettings::FeatureHotkeyCount> m_featureHotkeyWasDown{};
+    std::array<float, 14U> m_textGuiModuleProgress{};
+    std::array<float, 14U> m_textGuiModuleVelocity{};
     bool m_scaffoldBlockedNoticeShown = false;
     bool m_textGuiDragging = false;
     float m_textGuiDragOffsetX = 0.0F;

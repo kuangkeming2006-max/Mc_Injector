@@ -27,6 +27,7 @@ struct GameBindings::BindingCache final {
     jclass playerClass = nullptr;
     jclass livingClass = nullptr;
     jclass entityClass = nullptr;
+    jclass fireballClass = nullptr;
     jclass aabbClass = nullptr;
     jclass worldClass = nullptr;
     jclass worldClientClass = nullptr;
@@ -592,6 +593,7 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
     jclass player = nullptr;
     jclass living = nullptr;
     jclass entity = nullptr;
+    jclass fireball = nullptr;
     jclass aabb = nullptr;
     jclass world = nullptr;
     jclass worldClient = nullptr;
@@ -678,6 +680,9 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
         return true;
     };
 
+    const bool fireballClassLoaded = loadFeatureClass(
+        fireball, profile.fireballName, "Fireball ESP", "EntityFireball");
+
     const bool sidebarClassesLoaded =
         loadFeatureClass(scoreboard, profile.scoreboardName, "Sidebar", "Scoreboard") &&
         loadFeatureClass(scoreObjective, profile.scoreObjectiveName, "Sidebar", "ScoreObjective") &&
@@ -712,11 +717,12 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
         loadFeatureClass(textureObject, profile.textureObjectName,
                          "Player skin", "ITextureObject");
 
+    const bool gameSettingsClassLoaded = loadFeatureClass(
+        gameSettings, profile.gameSettingsName, "Aim/Movement", "GameSettings");
+    const bool keyBindingClassLoaded = loadFeatureClass(
+        keyBinding, profile.keyBindingName, "Safewalk", "KeyBinding");
     const bool safewalkClassesLoaded =
-        loadFeatureClass(gameSettings, profile.gameSettingsName,
-                         "Safewalk", "GameSettings") &&
-        loadFeatureClass(keyBinding, profile.keyBindingName,
-                         "Safewalk", "KeyBinding");
+        gameSettingsClassLoaded && keyBindingClassLoaded;
 
     const bool serverDataClassLoaded = loadFeatureClass(
         serverData, profile.serverDataName, "Server guard", "ServerData");
@@ -1144,17 +1150,49 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
                   profile.label + " (auxiliary mapping did not resolve).");
     }
 
-    bool safewalkCapability = safewalkClassesLoaded &&
-        !profile.gameSettingsField.empty() && !profile.keyBindSneakField.empty() &&
-        !profile.getKeyCode.empty() && !profile.setKeyBindState.empty() &&
-        !profile.rotationPitchField.empty() && !profile.isAirBlock.empty();
-    if (safewalkCapability) {
-        safewalkCapability =
+    // Resolve the minimal Aim Assist surface independently. Previously these
+    // four fields lived inside the all-or-nothing movement/scaffold chain, so a
+    // missing ItemBlock/PlayerController mapping silently disabled aim on an
+    // otherwise supported transformed client.
+    bool aimCapability = gameSettingsClassLoaded &&
+        !profile.gameSettingsField.empty() &&
+        !profile.mouseSensitivityField.empty() &&
+        !profile.rotationYawField.empty() &&
+        !profile.rotationPitchField.empty();
+    if (aimCapability) {
+        aimCapability =
             lookupRequired(env, candidate.gameSettingsField, [&] {
                 return env->GetFieldID(minecraft,
                     profile.gameSettingsField.c_str(),
                     profile.gameSettingsSignature.c_str());
             }) &&
+            lookupRequired(env, candidate.mouseSensitivity, [&] {
+                return env->GetFieldID(gameSettings,
+                    profile.mouseSensitivityField.c_str(), "F");
+            }) &&
+            lookupRequired(env, candidate.rotationYaw, [&] {
+                return env->GetFieldID(entity,
+                    profile.rotationYawField.c_str(), "F");
+            }) &&
+            lookupRequired(env, candidate.rotationPitch, [&] {
+                return env->GetFieldID(entity,
+                    profile.rotationPitchField.c_str(), "F");
+            });
+    }
+    if (!aimCapability) {
+        candidate.gameSettingsField = nullptr;
+        candidate.mouseSensitivity = nullptr;
+        candidate.rotationYaw = nullptr;
+        candidate.rotationPitch = nullptr;
+        log::info(std::string("Aim capability disabled for profile: ") +
+                  profile.label + " (minimal mapping did not resolve).");
+    }
+
+    bool safewalkCapability = safewalkClassesLoaded && aimCapability &&
+        !profile.keyBindSneakField.empty() && !profile.getKeyCode.empty() &&
+        !profile.setKeyBindState.empty() && !profile.isAirBlock.empty();
+    if (safewalkCapability) {
+        safewalkCapability =
             lookupRequired(env, candidate.keyBindSneakField, [&] {
                 return env->GetFieldID(gameSettings,
                     profile.keyBindSneakField.c_str(),
@@ -1168,21 +1206,15 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
                 return env->GetStaticMethodID(keyBinding,
                     profile.setKeyBindState.c_str(), "(IZ)V");
             }) &&
-            lookupRequired(env, candidate.rotationPitch, [&] {
-                return env->GetFieldID(entity,
-                    profile.rotationPitchField.c_str(), "F");
-            }) &&
             lookupRequired(env, candidate.isAirBlock, [&] {
                 return env->GetMethodID(world, profile.isAirBlock.c_str(),
                     (std::string("(") + profile.blockPosSignature + ")Z").c_str());
             });
     }
     if (!safewalkCapability) {
-        candidate.gameSettingsField = nullptr;
         candidate.keyBindSneakField = nullptr;
         candidate.getKeyCode = nullptr;
         candidate.setKeyBindState = nullptr;
-        candidate.rotationPitch = nullptr;
         candidate.isAirBlock = nullptr;
         log::info(std::string("Safewalk capability disabled for profile: ") +
                   profile.label + " (auxiliary mapping did not resolve).");
@@ -1232,14 +1264,6 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
             profile.itemStackSignature + profile.blockPosSignature +
             profile.enumFacingSignature + profile.vec3Signature + ")Z";
         movementCapability = movementCapability &&
-            lookupRequired(env, candidate.mouseSensitivity, [&] {
-                return env->GetFieldID(gameSettings,
-                    profile.mouseSensitivityField.c_str(), "F");
-            }) &&
-            lookupRequired(env, candidate.rotationYaw, [&] {
-                return env->GetFieldID(entity,
-                    profile.rotationYawField.c_str(), "F");
-            }) &&
             lookupRequired(env, candidate.onGround, [&] {
                 return env->GetFieldID(entity,
                     profile.onGroundField.c_str(), "Z");
@@ -1296,8 +1320,6 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
     if (!movementCapability) {
         candidate.movementKeyFields.fill(nullptr);
         candidate.motionFields.fill(nullptr);
-        candidate.mouseSensitivity = nullptr;
-        candidate.rotationYaw = nullptr;
         candidate.onGround = nullptr;
         candidate.jump = nullptr;
         candidate.playerControllerField = nullptr;
@@ -1364,6 +1386,8 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
         !makeGlobal(chatComponent, candidate.chatComponentClass)) {
         return false;
     }
+    if (fireballClassLoaded && !makeGlobal(fireball, candidate.fireballClass))
+        candidate.fireballClass = nullptr;
 
     bool tabCapability = tabClassesLoaded &&
         !profile.getNetHandler.empty() && !profile.getPlayerInfoMap.empty() &&
@@ -1417,19 +1441,28 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
         }
     };
 
+    if (aimCapability &&
+        !makeGlobal(gameSettings, candidate.gameSettingsClass)) {
+        aimCapability = false;
+        safewalkCapability = false;
+        movementCapability = false;
+        clearGlobal(candidate.gameSettingsClass);
+        candidate.gameSettingsField = nullptr;
+        candidate.mouseSensitivity = nullptr;
+        candidate.rotationYaw = nullptr;
+        candidate.rotationPitch = nullptr;
+        log::info(std::string("Aim capability disabled for profile: ") +
+                  profile.label + " (failed to publish GameSettings class).");
+    }
+
     if (safewalkCapability) {
-        safewalkCapability =
-            makeGlobal(gameSettings, candidate.gameSettingsClass) &&
-            makeGlobal(keyBinding, candidate.keyBindingClass);
+        safewalkCapability = makeGlobal(keyBinding, candidate.keyBindingClass);
         if (!safewalkCapability) {
             movementCapability = false;
-            clearGlobal(candidate.gameSettingsClass);
             clearGlobal(candidate.keyBindingClass);
-            candidate.gameSettingsField = nullptr;
             candidate.keyBindSneakField = nullptr;
             candidate.getKeyCode = nullptr;
             candidate.setKeyBindState = nullptr;
-            candidate.rotationPitch = nullptr;
             candidate.isAirBlock = nullptr;
             log::info(std::string("Safewalk capability disabled for profile: ") +
                       profile.label + " (failed to publish class references).");
@@ -1468,8 +1501,6 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
             clearGlobal(candidate.vec3Class);
             candidate.movementKeyFields.fill(nullptr);
             candidate.motionFields.fill(nullptr);
-            candidate.mouseSensitivity = nullptr;
-            candidate.rotationYaw = nullptr;
             candidate.onGround = nullptr;
             candidate.jump = nullptr;
             candidate.playerControllerField = nullptr;
@@ -1870,6 +1901,11 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
     BindingCache* const cache =
         m_resolutionPhase.load(std::memory_order_acquire) == ResolutionPhase::Resolved
         ? m_cache.get() : nullptr;
+    const bool aimCapability = cache != nullptr &&
+        cache->minecraftClass != nullptr && cache->isMainThread != nullptr &&
+        cache->playerField != nullptr && cache->gameSettingsField != nullptr &&
+        cache->mouseSensitivity != nullptr && cache->rotationYaw != nullptr &&
+        cache->rotationPitch != nullptr;
     const bool safewalkCapability = cache != nullptr &&
         cache->gameSettingsClass != nullptr && cache->keyBindingClass != nullptr &&
         cache->gameSettingsField != nullptr && cache->keyBindSneakField != nullptr &&
@@ -1905,11 +1941,13 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
         cache->movementKeyFields[0U] != nullptr && cache->motionFields[0U] != nullptr &&
         cache->mouseSensitivity != nullptr && cache->rotationYaw != nullptr &&
         cache->onGround != nullptr && cache->jump != nullptr;
-    const bool anyRequested = requested.safewalk || requested.scaffold ||
-        requested.fly || requested.bhop || requested.aimAssist;
+    const bool movementRequested = requested.safewalk || requested.scaffold ||
+        requested.fly || requested.bhop || requested.longJump;
+    const bool anyRequested = movementRequested || requested.aimAssist;
     if ((!anyRequested && !m_aimSensitivityModified) ||
-        (!safewalkCapability && !movementCapability)) {
+        (!aimCapability && !movementCapability)) {
         (void)releaseForcedSneak();
+        m_scaffoldPlatformYValid = false;
         return false;
     }
     if (env->PushLocalFrame(96) < 0) {
@@ -1938,14 +1976,115 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
     if (env->ExceptionCheck() == JNI_TRUE || mainThread != JNI_TRUE) return fail();
 
     jobject player = env->GetObjectField(minecraft, cache->playerField);
-    jobject world = env->GetObjectField(minecraft, cache->worldField);
     jobject settings = env->GetObjectField(minecraft, cache->gameSettingsField);
-    if (env->ExceptionCheck() == JNI_TRUE || player == nullptr || world == nullptr ||
+    if (env->ExceptionCheck() == JNI_TRUE || player == nullptr ||
         settings == nullptr) return fail();
+    const jfloat pitch = env->GetFloatField(player, cache->rotationPitch);
+    const jfloat yaw = env->GetFloatField(player, cache->rotationYaw);
+    if (env->ExceptionCheck() == JNI_TRUE) return fail();
+
+    // Aim assistance needs only the player rotation and GameSettings
+    // sensitivity mappings. It must not inherit Safewalk/Scaffold's block,
+    // inventory or controller requirements: transformed clients commonly
+    // expose the former while renaming one of the latter.
+    if (aimCapability && (requested.aimAssist || m_aimSensitivityModified)) {
+        const EntityMarker* target = nullptr;
+        double bestAngle = requested.aimSlowdownMode ? 8.0 : 35.0;
+        float desiredYaw = yaw;
+        float desiredPitch = pitch;
+        const auto wrap = [](double value) noexcept {
+            while (value > 180.0) value -= 360.0;
+            while (value < -180.0) value += 360.0;
+            return value;
+        };
+        constexpr double aimPi = 3.14159265358979323846;
+        if (requested.aimAssist) {
+            for (std::uint32_t index = 0U;
+                 index < snapshot.entityMarkerCount; ++index) {
+                const EntityMarker& entity = snapshot.entityMarkers[index];
+                // TAB membership is authoritative on Hypixel and excludes NPCs.
+                // A real World.playerEntities member is sufficient in local and
+                // other non-match worlds where a persistent TAB roster may not exist.
+                const bool validPlayer = entity.confirmedPlayer ||
+                    (!snapshot.hypixelServer && !snapshot.matchActive && entity.player);
+                if (!validPlayer || entity.entityId == snapshot.entityId ||
+                    (snapshot.ownTeam != 'u' &&
+                     entity.teamColor == snapshot.ownTeam)) continue;
+                const double dx = entity.currentX - snapshot.x;
+                const double dz = entity.currentZ - snapshot.z;
+                const double dy =
+                    (entity.bounds.minY + entity.bounds.maxY) * 0.5 -
+                    (snapshot.y + 1.62);
+                const double horizontal = std::hypot(dx, dz);
+                if (horizontal < 0.1) continue;
+                const float targetYaw = static_cast<float>(
+                    std::atan2(dz, dx) * 180.0 / aimPi - 90.0);
+                const float targetPitch = static_cast<float>(
+                    -std::atan2(dy, horizontal) * 180.0 / aimPi);
+                const double angle = std::hypot(
+                    wrap(targetYaw - yaw),
+                    static_cast<double>(targetPitch - pitch));
+                if (angle < bestAngle) {
+                    bestAngle = angle;
+                    target = &entity;
+                    desiredYaw = targetYaw;
+                    desiredPitch = targetPitch;
+                }
+            }
+        }
+        if (requested.aimAssist && requested.aimSlowdownMode) {
+            if (target != nullptr && !m_aimSensitivityModified) {
+                m_originalMouseSensitivity = env->GetFloatField(
+                    settings, cache->mouseSensitivity);
+                m_aimSensitivityModified = env->ExceptionCheck() != JNI_TRUE;
+            }
+            if (target != nullptr && m_aimSensitivityModified) {
+                env->SetFloatField(settings, cache->mouseSensitivity,
+                    m_originalMouseSensitivity * static_cast<float>(std::clamp(
+                        requested.aimSlowdownPercent, 5, 95)) / 100.0F);
+            } else if (m_aimSensitivityModified) {
+                env->SetFloatField(settings, cache->mouseSensitivity,
+                                   m_originalMouseSensitivity);
+                m_aimSensitivityModified = false;
+            }
+        } else {
+            if (m_aimSensitivityModified) {
+                env->SetFloatField(settings, cache->mouseSensitivity,
+                                   m_originalMouseSensitivity);
+                m_aimSensitivityModified = false;
+            }
+            if (requested.aimAssist && target != nullptr) {
+                const double dt = m_lastGameplayTick == 0U ? 0.05 :
+                    std::clamp(static_cast<double>(tickMilliseconds -
+                        m_lastGameplayTick) / 1000.0, 0.001, 0.10);
+                const double gain = 2.0 + 18.0 * static_cast<double>(std::clamp(
+                    requested.aimSpeedPercent, 1, 100)) / 100.0;
+                const float alpha = static_cast<float>(
+                    1.0 - std::exp(-gain * dt));
+                env->SetFloatField(player, cache->rotationYaw,
+                    yaw + static_cast<float>(wrap(desiredYaw - yaw)) * alpha);
+                env->SetFloatField(player, cache->rotationPitch,
+                    std::clamp(pitch + (desiredPitch - pitch) * alpha,
+                               -90.0F, 90.0F));
+            }
+        }
+        if (env->ExceptionCheck() == JNI_TRUE) return fail();
+    }
+
+    // Aim-only operation intentionally stops here. The remainder reads block
+    // support, movement keys and inventory/controller mappings.
+    if (!movementRequested || !movementCapability) {
+        (void)releaseForcedSneak();
+        m_scaffoldPlatformYValid = false;
+        m_lastGameplayTick = tickMilliseconds;
+        return finish(requested.aimAssist && aimCapability);
+    }
+
+    jobject world = env->GetObjectField(minecraft, cache->worldField);
+    if (env->ExceptionCheck() == JNI_TRUE || world == nullptr) return fail();
     jobject sneakBinding = env->GetObjectField(settings, cache->keyBindSneakField);
     if (env->ExceptionCheck() == JNI_TRUE || sneakBinding == nullptr) return fail();
     const jint keyCode = env->CallIntMethod(sneakBinding, cache->getKeyCode);
-    const jfloat pitch = env->GetFloatField(player, cache->rotationPitch);
     jobject bounds = env->CallObjectMethod(player, cache->getBounds);
     if (env->ExceptionCheck() == JNI_TRUE || keyCode <= 0 || bounds == nullptr)
         return fail();
@@ -1957,24 +2096,56 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
     const double maxZ = env->GetDoubleField(bounds, cache->maxZ);
     if (env->ExceptionCheck() == JNI_TRUE) return fail();
 
-    const double footprintWidth = std::max(0.05, maxX - minX);
-    const double footprintDepth = std::max(0.05, maxZ - minZ);
+    // Read physical movement once and reuse it for edge prediction, movement
+    // modules and scaffold targeting. This mirrors Minecraft's movement-input
+    // stage and avoids one-frame disagreement between those systems.
+    std::array<bool, 6U> input{}; // forward, back, left, right, jump, sneak
+    if (movementCapability) {
+        for (std::size_t index = 0U; index < 5U; ++index) {
+            jobject binding = env->GetObjectField(settings,
+                cache->movementKeyFields[index]);
+            if (env->ExceptionCheck() == JNI_TRUE || binding == nullptr) return fail();
+            const jint code = env->CallIntMethod(binding, cache->getKeyCode);
+            if (env->ExceptionCheck() == JNI_TRUE) return fail();
+            (void)queryLwjglKeyDown(env, code, input[index]);
+        }
+        (void)queryLwjglKeyDown(env, keyCode, input[5U]);
+    }
+    const bool onGround = movementCapability &&
+        env->GetBooleanField(player, cache->onGround) == JNI_TRUE;
+    if (env->ExceptionCheck() == JNI_TRUE) return fail();
+    const double forward = (input[0U] ? 1.0 : 0.0) - (input[1U] ? 1.0 : 0.0);
+    // Minecraft's positive moveStrafing direction is left. The previous
+    // right-minus-left expression inverted A and D for every movement module.
+    const double strafe = (input[2U] ? 1.0 : 0.0) - (input[3U] ? 1.0 : 0.0);
+    const double magnitude = std::hypot(forward, strafe);
+    const double normalizedForward = magnitude > 0.001 ? forward / magnitude : 0.0;
+    const double normalizedStrafe = magnitude > 0.001 ? strafe / magnitude : 0.0;
+    constexpr double pi = 3.14159265358979323846;
+    const double radians = static_cast<double>(yaw) * pi / 180.0;
+    const double directionX = -std::sin(radians) * normalizedForward +
+                              std::cos(radians) * normalizedStrafe;
+    const double directionZ =  std::cos(radians) * normalizedForward +
+                              std::sin(radians) * normalizedStrafe;
+
     const double sensitivity = static_cast<double>(std::clamp(
         requested.safewalkEdgeSensitivity, 0, 95)) / 100.0;
-    // 0% matches the old corner probes. Higher values move the probes toward
-    // the footprint centre, so crouch is delayed until more of the player has
-    // crossed the edge. 95% intentionally stops just short of a single-point
-    // probe to preserve stable mixed-support detection.
-    const double insetX = 0.015 + std::max(0.0, footprintWidth * 0.5 - 0.025) * sensitivity;
-    const double insetZ = 0.015 + std::max(0.0, footprintDepth * 0.5 - 0.025) * sensitivity;
+    // Match Entity.moveEntity's edge-clipping intent, but predict a short step
+    // along the requested movement vector. Low sensitivity waits until the
+    // footprint is almost over the edge; high sensitivity looks farther ahead.
+    const double lookAhead = magnitude > 0.001 ? 0.012 + sensitivity * 0.145 : 0.0;
+    const double projectedX = directionX * lookAhead;
+    const double projectedZ = directionZ * lookAhead;
+    constexpr double probeInset = 0.018;
     const std::array<int, 2U> supportX{
-        static_cast<int>(std::floor(minX + insetX)),
-        static_cast<int>(std::floor(maxX - insetX))};
+        static_cast<int>(std::floor(minX + projectedX + probeInset)),
+        static_cast<int>(std::floor(maxX + projectedX - probeInset))};
     const std::array<int, 2U> supportZ{
-        static_cast<int>(std::floor(minZ + insetZ)),
-        static_cast<int>(std::floor(maxZ - insetZ))};
+        static_cast<int>(std::floor(minZ + projectedZ + probeInset)),
+        static_cast<int>(std::floor(maxZ + projectedZ - probeInset))};
     const int supportY = static_cast<int>(std::floor(minY - 0.06));
-    std::uint8_t airMask = 0U;
+    std::uint8_t immediateAirMask = 0U;
+    std::uint8_t deepVoidMask = 0U;
     std::uint8_t bit = 1U;
     for (const int x : supportX) {
         for (const int z : supportZ) {
@@ -1988,20 +2159,34 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
             const jboolean air = env->CallBooleanMethod(world, cache->isAirBlock,
                                                         position);
             if (env->ExceptionCheck() == JNI_TRUE) return fail();
-            if (air == JNI_TRUE) airMask = static_cast<std::uint8_t>(airMask | bit);
+            if (air == JNI_TRUE) {
+                immediateAirMask = static_cast<std::uint8_t>(immediateAirMask | bit);
+                jobject deepPosition = env->NewObject(cache->blockPosClass,
+                    cache->blockPosConstructor, static_cast<jint>(x),
+                    static_cast<jint>(supportY - 1), static_cast<jint>(z));
+                if (env->ExceptionCheck() == JNI_TRUE || deepPosition == nullptr)
+                    return fail();
+                const jboolean deepAir = env->CallBooleanMethod(
+                    world, cache->isAirBlock, deepPosition);
+                if (env->ExceptionCheck() == JNI_TRUE) return fail();
+                if (deepAir == JNI_TRUE)
+                    deepVoidMask = static_cast<std::uint8_t>(deepVoidMask | bit);
+            }
             bit = static_cast<std::uint8_t>(bit << 1U);
         }
     }
 
     constexpr std::uint8_t allSupports = 0x0FU;
-    const bool anyAir = airMask != 0U;
-    const bool anySolid = airMask != allSupports;
-    const bool atEdge = anyAir && anySolid;
+    const bool anySolid = immediateAirMask != allSupports;
+    // A one-block descent is safe and must not force sneak. Only a projected
+    // footprint with two consecutive air blocks is treated as a real drop.
+    const bool atEdge = deepVoidMask != 0U &&
+        (!movementCapability || onGround);
     const bool pitchAllowsSafewalk = pitch >= static_cast<float>(std::clamp(
         requested.safewalkMinimumPitch, -90, 90));
     const bool supportPlaced = m_safewalkSneakForced &&
-        (m_safewalkSupportMask & static_cast<std::uint8_t>(~airMask)) != 0U;
-    m_safewalkSupportMask = airMask;
+        (m_safewalkSupportMask & static_cast<std::uint8_t>(~deepVoidMask)) != 0U;
+    m_safewalkSupportMask = deepVoidMask;
 
     if (supportPlaced && m_safewalkReleaseAt == 0U) {
         m_safewalkReleaseAt = tickMilliseconds + static_cast<std::uint64_t>(
@@ -2030,31 +2215,6 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
 
     if (!movementCapability) return finish(m_safewalkSneakForced);
 
-    std::array<bool, 6U> input{}; // forward, back, left, right, jump, sneak
-    for (std::size_t index = 0U; index < 5U; ++index) {
-        jobject binding = env->GetObjectField(settings,
-            cache->movementKeyFields[index]);
-        if (env->ExceptionCheck() == JNI_TRUE || binding == nullptr) return fail();
-        const jint code = env->CallIntMethod(binding, cache->getKeyCode);
-        if (env->ExceptionCheck() == JNI_TRUE) return fail();
-        (void)queryLwjglKeyDown(env, code, input[index]);
-    }
-    (void)queryLwjglKeyDown(env, keyCode, input[5U]);
-    const float yaw = env->GetFloatField(player, cache->rotationYaw);
-    const bool onGround = env->GetBooleanField(player, cache->onGround) == JNI_TRUE;
-    if (env->ExceptionCheck() == JNI_TRUE) return fail();
-    const double forward = (input[0U] ? 1.0 : 0.0) - (input[1U] ? 1.0 : 0.0);
-    const double strafe = (input[3U] ? 1.0 : 0.0) - (input[2U] ? 1.0 : 0.0);
-    const double magnitude = std::hypot(forward, strafe);
-    const double normalizedForward = magnitude > 0.001 ? forward / magnitude : 0.0;
-    const double normalizedStrafe = magnitude > 0.001 ? strafe / magnitude : 0.0;
-    constexpr double pi = 3.14159265358979323846;
-    const double radians = static_cast<double>(yaw) * pi / 180.0;
-    const double directionX = -std::sin(radians) * normalizedForward +
-                              std::cos(radians) * normalizedStrafe;
-    const double directionZ =  std::cos(radians) * normalizedForward +
-                              std::sin(radians) * normalizedStrafe;
-
     if (requested.fly) {
         const double speed = 0.34 * static_cast<double>(std::clamp(
             requested.flySpeedPercent, 10, 500)) / 100.0;
@@ -2065,19 +2225,45 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
         env->SetDoubleField(player, cache->motionFields[1U], vertical);
         if (env->ExceptionCheck() == JNI_TRUE) return fail();
     } else if (requested.bhop && magnitude > 0.001) {
+        const double airSpeed = 0.30 * static_cast<double>(std::clamp(
+            requested.bhopAirSpeedPercent, 10, 300)) / 100.0;
         if (onGround && requested.bhopAutoJump) {
             env->CallVoidMethod(player, cache->jump);
             if (env->ExceptionCheck() == JNI_TRUE) return fail();
+            // EntityLivingBase.jump applies the vanilla sprint impulse. Clamp
+            // only excess speed on the landing/jump frame so Auto Jump cannot
+            // create a one-tick boost, while preserving slower player motion.
+            const double jumpX = env->GetDoubleField(player, cache->motionFields[0U]);
+            const double jumpZ = env->GetDoubleField(player, cache->motionFields[2U]);
+            const double jumpHorizontal = std::hypot(jumpX, jumpZ);
+            if (jumpHorizontal > airSpeed && jumpHorizontal > 0.0001) {
+                const double scale = airSpeed / jumpHorizontal;
+                env->SetDoubleField(player, cache->motionFields[0U], jumpX * scale);
+                env->SetDoubleField(player, cache->motionFields[2U], jumpZ * scale);
+            }
         } else if (!onGround) {
-            constexpr double airSpeed = 0.30;
             env->SetDoubleField(player, cache->motionFields[0U], directionX * airSpeed);
             env->SetDoubleField(player, cache->motionFields[2U], directionZ * airSpeed);
             if (env->ExceptionCheck() == JNI_TRUE) return fail();
         }
+    } else if (requested.longJump && onGround && magnitude > 0.001 &&
+               tickMilliseconds - m_lastLongJumpTick >= 650U) {
+        const double speed = 0.72 * static_cast<double>(std::clamp(
+            requested.longJumpSpeedPercent, 25, 250)) / 100.0;
+        env->SetDoubleField(player, cache->motionFields[0U], directionX * speed);
+        env->SetDoubleField(player, cache->motionFields[1U], 0.42);
+        env->SetDoubleField(player, cache->motionFields[2U], directionZ * speed);
+        if (env->ExceptionCheck() == JNI_TRUE) return fail();
+        m_lastLongJumpTick = tickMilliseconds;
     }
 
     if (requested.scaffold && magnitude > 0.001 &&
         tickMilliseconds - m_lastScaffoldPlacementTick >= 45U) {
+        const int supportLayer = static_cast<int>(std::floor(minY - 0.06));
+        if (!m_scaffoldPlatformYValid || onGround) {
+            m_scaffoldPlatformY = supportLayer;
+            m_scaffoldPlatformYValid = true;
+        }
         jobject inventory = env->GetObjectField(player, cache->inventoryField);
         jobject controller = env->GetObjectField(minecraft,
             cache->playerControllerField);
@@ -2125,20 +2311,39 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
             }
         }
         if (selectedSlot >= 0 && selectedStack != nullptr) {
-            const double lead = 0.72;
-            const int currentX = static_cast<int>(std::floor(snapshot.x));
-            const int currentY = static_cast<int>(std::floor(minY - 0.06));
-            const int currentZ = static_cast<int>(std::floor(snapshot.z));
-            std::array<std::array<int, 3U>, 2U> targets{{
-                {static_cast<int>(std::floor(snapshot.x + directionX * lead)),
-                 currentY,
-                 static_cast<int>(std::floor(snapshot.z + directionZ * lead))},
-                {currentX, currentY, currentZ}}};
+            const double centerX = (minX + maxX) * 0.5;
+            const double centerZ = (minZ + maxZ) * 0.5;
+            std::array<std::array<int, 3U>, 12U> targets{};
+            std::size_t targetCount = 0U;
+            const auto addTarget = [&](const double x, const double z) noexcept {
+                const std::array<int, 3U> candidate{
+                    static_cast<int>(std::floor(x)), m_scaffoldPlatformY,
+                    static_cast<int>(std::floor(z))};
+                for (std::size_t i = 0; i < targetCount; ++i)
+                    if (targets[i] == candidate) return;
+                if (targetCount < targets.size()) targets[targetCount++] = candidate;
+            };
+            // Centre samples cover cardinal motion. Leading AABB corners cover
+            // diagonal movement, and retaining the platform Y covers jumps.
+            for (const double lead : {0.92, 0.62, 0.32, 0.0})
+                addTarget(centerX + directionX * lead,
+                          centerZ + directionZ * lead);
+            constexpr double cornerInset = 0.025;
+            const double cornerLead = 0.58;
+            addTarget(minX + cornerInset + directionX * cornerLead,
+                      minZ + cornerInset + directionZ * cornerLead);
+            addTarget(minX + cornerInset + directionX * cornerLead,
+                      maxZ - cornerInset + directionZ * cornerLead);
+            addTarget(maxX - cornerInset + directionX * cornerLead,
+                      minZ + cornerInset + directionZ * cornerLead);
+            addTarget(maxX - cornerInset + directionX * cornerLead,
+                      maxZ - cornerInset + directionZ * cornerLead);
             constexpr std::array<std::array<int, 4U>, 5U> neighbours{{
                 {{0,-1,0,1}}, {{0,0,-1,3}}, {{0,0,1,2}},
                 {{-1,0,0,5}}, {{1,0,0,4}}}};
             bool placed = false;
-            for (const auto& target : targets) {
+            for (std::size_t targetIndex = 0U; targetIndex < targetCount; ++targetIndex) {
+                const auto& target = targets[targetIndex];
                 jobject targetPos = env->NewObject(cache->blockPosClass,
                     cache->blockPosConstructor, target[0U], target[1U], target[2U]);
                 if (targetPos == nullptr || env->ExceptionCheck() == JNI_TRUE) return fail();
@@ -2176,84 +2381,13 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
                 if (placed) break;
             }
         }
+    } else if (!requested.scaffold) {
+        m_scaffoldPlatformYValid = false;
     }
 
-    if (requested.aimAssist) {
-        const EntityMarker* target = nullptr;
-        double bestAngle = requested.aimSlowdownMode ? 8.0 : 35.0;
-        float desiredYaw = yaw;
-        float desiredPitch = pitch;
-        const auto wrap = [](double value) noexcept {
-            while (value > 180.0) value -= 360.0;
-            while (value < -180.0) value += 360.0;
-            return value;
-        };
-        for (std::uint32_t index = 0U; index < snapshot.entityMarkerCount; ++index) {
-            const EntityMarker& entity = snapshot.entityMarkers[index];
-            if (!entity.confirmedPlayer || entity.entityId == snapshot.entityId ||
-                (snapshot.ownTeam != 'u' && entity.teamColor == snapshot.ownTeam)) continue;
-            const double dx = entity.currentX - snapshot.x;
-            const double dz = entity.currentZ - snapshot.z;
-            const double dy = (entity.bounds.minY + entity.bounds.maxY) * 0.5 -
-                              (snapshot.y + 1.62);
-            const double horizontal = std::hypot(dx, dz);
-            if (horizontal < 0.1) continue;
-            const float tyaw = static_cast<float>(std::atan2(dz, dx) * 180.0 / pi - 90.0);
-            const float tpitch = static_cast<float>(-
-                std::atan2(dy, horizontal) * 180.0 / pi);
-            const double angle = std::hypot(wrap(tyaw - yaw),
-                                            static_cast<double>(tpitch - pitch));
-            if (angle < bestAngle) {
-                bestAngle = angle;
-                target = &entity;
-                desiredYaw = tyaw;
-                desiredPitch = tpitch;
-            }
-        }
-        if (requested.aimSlowdownMode) {
-            if (target != nullptr && !m_aimSensitivityModified) {
-                m_originalMouseSensitivity = env->GetFloatField(
-                    settings, cache->mouseSensitivity);
-                m_aimSensitivityModified = env->ExceptionCheck() != JNI_TRUE;
-            }
-            if (target != nullptr && m_aimSensitivityModified) {
-                env->SetFloatField(settings, cache->mouseSensitivity,
-                    m_originalMouseSensitivity * static_cast<float>(std::clamp(
-                        requested.aimSlowdownPercent, 5, 95)) / 100.0F);
-            } else if (m_aimSensitivityModified) {
-                env->SetFloatField(settings, cache->mouseSensitivity,
-                                   m_originalMouseSensitivity);
-                m_aimSensitivityModified = false;
-            }
-        } else {
-            if (m_aimSensitivityModified) {
-                env->SetFloatField(settings, cache->mouseSensitivity,
-                                   m_originalMouseSensitivity);
-                m_aimSensitivityModified = false;
-            }
-            if (target != nullptr) {
-                const double dt = m_lastGameplayTick == 0U ? 0.05 :
-                    std::clamp(static_cast<double>(tickMilliseconds -
-                        m_lastGameplayTick) / 1000.0, 0.001, 0.10);
-                const double gain = 2.0 + 18.0 * static_cast<double>(std::clamp(
-                    requested.aimSpeedPercent, 1, 100)) / 100.0;
-                const float alpha = static_cast<float>(1.0 - std::exp(-gain * dt));
-                env->SetFloatField(player, cache->rotationYaw,
-                    yaw + static_cast<float>(wrap(desiredYaw - yaw)) * alpha);
-                env->SetFloatField(player, cache->rotationPitch,
-                    std::clamp(pitch + (desiredPitch - pitch) * alpha,
-                               -90.0F, 90.0F));
-            }
-        }
-    } else if (m_aimSensitivityModified) {
-        env->SetFloatField(settings, cache->mouseSensitivity,
-                           m_originalMouseSensitivity);
-        m_aimSensitivityModified = false;
-    }
-    if (env->ExceptionCheck() == JNI_TRUE) return fail();
     m_lastGameplayTick = tickMilliseconds;
     return finish(m_safewalkSneakForced || requested.scaffold || requested.fly ||
-                  requested.bhop || requested.aimAssist);
+                  requested.bhop || requested.aimAssist || requested.longJump);
 }
 
 void GameBindings::enqueueDebugChatLine(const std::string_view line) noexcept
@@ -3245,25 +3379,34 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
     const jint loadedEntityCount = loadedEntities == nullptr
         ? 0 : env->CallIntMethod(loadedEntities, cache->listSize);
     if (env->ExceptionCheck() == JNI_TRUE) return failJni();
+    jboolean integratedSinglePlayer = env->CallBooleanMethod(
+        minecraft, cache->isSingleplayer);
+    if (env->ExceptionCheck() == JNI_TRUE) {
+        env->ExceptionClear();
+        integratedSinglePlayer = JNI_FALSE;
+    }
     const jboolean singlePlayer = JNI_TRUE;
-    if (env->ExceptionCheck() == JNI_TRUE) return failJni();
     if (!std::isfinite(health) || !std::isfinite(maxHealth)) return failJni();
 
     m_snapshot.singlePlayer = singlePlayer == JNI_TRUE;
+    m_snapshot.integratedSinglePlayer = integratedSinglePlayer == JNI_TRUE;
 
-    auto readEntityMarker = [&](jobject const entity, EntityMarker& marker) noexcept {
+    auto readEntityMarker = [&](jobject const entity, EntityMarker& marker,
+                                const bool livingEntity) noexcept {
         marker = {};
         marker.entityId = env->CallIntMethod(entity, cache->getEntityId);
         if (env->ExceptionCheck() == JNI_TRUE) {
             env->ExceptionClear();
             return false;
         }
-        marker.health = env->CallFloatMethod(entity, cache->getHealth);
-        marker.maxHealth = env->CallFloatMethod(entity, cache->getMaxHealth);
-        if (env->ExceptionCheck() == JNI_TRUE) {
-            env->ExceptionClear();
-            marker.health = 0.0F;
-            marker.maxHealth = 0.0F;
+        if (livingEntity) {
+            marker.health = env->CallFloatMethod(entity, cache->getHealth);
+            marker.maxHealth = env->CallFloatMethod(entity, cache->getMaxHealth);
+            if (env->ExceptionCheck() == JNI_TRUE) {
+                env->ExceptionClear();
+                marker.health = 0.0F;
+                marker.maxHealth = 0.0F;
+            }
         }
         if (cache->isInvisible != nullptr) {
             marker.invisible = env->CallBooleanMethod(entity, cache->isInvisible) == JNI_TRUE;
@@ -3483,10 +3626,13 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
                 if (entity == nullptr) continue;
                 const bool isLocalPlayer = env->IsSameObject(entity, player) == JNI_TRUE;
                 const bool isLiving = env->IsInstanceOf(entity, cache->livingClass) == JNI_TRUE;
+                const bool isFireball = cache->fireballClass != nullptr &&
+                    env->IsInstanceOf(entity, cache->fireballClass) == JNI_TRUE;
                 if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
-                if (!isLocalPlayer && isLiving) {
+                if (!isLocalPlayer && (isLiving || isFireball)) {
                     EntityMarker marker;
-                    if (readEntityMarker(entity, marker)) {
+                    if (readEntityMarker(entity, marker, isLiving)) {
+                        marker.fireball = isFireball;
                         if (playerObjects != nullptr) {
                             const jsize playerLimit = std::min<jsize>(
                                 env->GetArrayLength(playerObjects), 64);
@@ -4220,6 +4366,7 @@ void GameBindings::deleteGlobalRefs(JNIEnv* const env, BindingCache& cache) noex
     if (cache.playerClass != nullptr) env->DeleteGlobalRef(cache.playerClass);
     if (cache.livingClass != nullptr) env->DeleteGlobalRef(cache.livingClass);
     if (cache.entityClass != nullptr) env->DeleteGlobalRef(cache.entityClass);
+    if (cache.fireballClass != nullptr) env->DeleteGlobalRef(cache.fireballClass);
     if (cache.aabbClass != nullptr) env->DeleteGlobalRef(cache.aabbClass);
     if (cache.worldClass != nullptr) env->DeleteGlobalRef(cache.worldClass);
     if (cache.worldClientClass != nullptr) env->DeleteGlobalRef(cache.worldClientClass);
@@ -4283,6 +4430,7 @@ void GameBindings::deleteGlobalRefs(JNIEnv* const env, BindingCache& cache) noex
     cache.playerClass = nullptr;
     cache.livingClass = nullptr;
     cache.entityClass = nullptr;
+    cache.fireballClass = nullptr;
     cache.aabbClass = nullptr;
     cache.worldClass = nullptr;
     cache.worldClientClass = nullptr;
