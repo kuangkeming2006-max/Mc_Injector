@@ -172,6 +172,7 @@ target_link_libraries(McOverlayAgent PRIVATE
     advapi32
     dwmapi
     gdi32
+    imm32
     opengl32
     user32)
 

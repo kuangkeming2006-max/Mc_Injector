@@ -1615,7 +1615,7 @@ void OverlayManager::processAgentLine(const QByteArray &line)
             emit interactiveChanged();
         }
     } else if (type == QByteArrayLiteral("FEATURE_STATE_CHANGED")) {
-        if (fields.size() != 80) return;
+        if (fields.size() != 85) return;
         std::array<bool, 32U> values{};
         for (int index = 0; index < 32; ++index) {
             const QByteArray token = fields.at(index + 1);
@@ -1657,6 +1657,9 @@ void OverlayManager::processAgentLine(const QByteArray &line)
         bool aimMinimumDistanceOk = false, aimMaximumDistanceOk = false;
         bool aimFovOk = false, clickGuiWidthOk = false;
         bool clickGuiHeightOk = false, clickGuiOpacityOk = false;
+        bool extraBitsOk = false, textGuiAlignmentOk = false;
+        bool localMobReachOk = false, localAttackDelayOk = false;
+        bool localVelocityPercentOk = false;
         const int defenseRadius = fields.at(33).toInt(&defenseRadiusOk);
         const int threatRadius = fields.at(34).toInt(&threatRadiusOk);
         const int bedHotkey = fields.at(35).toInt(&bedHotkeyOk);
@@ -1705,6 +1708,12 @@ void OverlayManager::processAgentLine(const QByteArray &line)
         const int clickGuiWidthPercent = fields.at(77).toInt(&clickGuiWidthOk);
         const int clickGuiHeightPercent = fields.at(78).toInt(&clickGuiHeightOk);
         const int clickGuiOpacity = fields.at(79).toInt(&clickGuiOpacityOk);
+        const quint32 extraBits = fields.at(80).toUInt(&extraBitsOk);
+        const int textGuiAlignment = fields.at(81).toInt(&textGuiAlignmentOk);
+        const int localMobReach = fields.at(82).toInt(&localMobReachOk);
+        const int localAttackDelayMs = fields.at(83).toInt(&localAttackDelayOk);
+        const int localVelocityPercent = fields.at(84).toInt(
+            &localVelocityPercentOk);
         const auto validHotkeyPack = [](const quint64 packed,
                                         const int count) noexcept {
             for (int index = 0; index < count; ++index) {
@@ -1763,7 +1772,13 @@ void OverlayManager::processAgentLine(const QByteArray &line)
             clickGuiWidthPercent < 80 || clickGuiWidthPercent > 150 ||
             !clickGuiHeightOk || clickGuiHeightPercent < 80 ||
             clickGuiHeightPercent > 150 || !clickGuiOpacityOk ||
-            clickGuiOpacity < 35 || clickGuiOpacity > 100) return;
+            clickGuiOpacity < 35 || clickGuiOpacity > 100 ||
+            !extraBitsOk || extraBits > 0xFFU || !textGuiAlignmentOk ||
+            textGuiAlignment < 0 || textGuiAlignment > 2 ||
+            !localMobReachOk || localMobReach < 3 || localMobReach > 10 ||
+            !localAttackDelayOk || localAttackDelayMs < 100 ||
+            localAttackDelayMs > 1500 || !localVelocityPercentOk ||
+            localVelocityPercent < 0 || localVelocityPercent > 100) return;
         const QString playerColorName = QStringLiteral("#%1")
             .arg(playerColor, 6, 16, QLatin1Char('0')).toUpper();
         const QString bedColorName = QStringLiteral("#%1")
@@ -1846,7 +1861,12 @@ void OverlayManager::processAgentLine(const QByteArray &line)
             m_aimFovDegrees != aimFovDegrees ||
             m_clickGuiWidthPercent != clickGuiWidthPercent ||
             m_clickGuiHeightPercent != clickGuiHeightPercent ||
-            m_clickGuiOpacity != clickGuiOpacity;
+            m_clickGuiOpacity != clickGuiOpacity ||
+            m_featureExtraBits != extraBits ||
+            m_textGuiAlignment != textGuiAlignment ||
+            m_localMobReach != localMobReach ||
+            m_localAttackDelayMs != localAttackDelayMs ||
+            m_localVelocityPercent != localVelocityPercent;
         m_espEnabled = values[0];
         m_entityEspEnabled = values[1];
         m_bedEspEnabled = values[2];
@@ -1926,6 +1946,11 @@ void OverlayManager::processAgentLine(const QByteArray &line)
         m_clickGuiWidthPercent = clickGuiWidthPercent;
         m_clickGuiHeightPercent = clickGuiHeightPercent;
         m_clickGuiOpacity = clickGuiOpacity;
+        m_featureExtraBits = extraBits;
+        m_textGuiAlignment = textGuiAlignment;
+        m_localMobReach = localMobReach;
+        m_localAttackDelayMs = localAttackDelayMs;
+        m_localVelocityPercent = localVelocityPercent;
         if (changed) {
             storeFeatureSettings();
             emit featureSettingsChanged();
@@ -2265,6 +2290,16 @@ void OverlayManager::loadFeatureSettings()
         QStringLiteral("clickGuiHeightPercent"), 100).toInt(), 80, 150);
     m_clickGuiOpacity = std::clamp(settings.value(
         QStringLiteral("clickGuiOpacity"), 96).toInt(), 35, 100);
+    m_featureExtraBits = settings.value(
+        QStringLiteral("featureExtraBits"), 0x43U).toUInt() & 0xFFU;
+    m_textGuiAlignment = std::clamp(settings.value(
+        QStringLiteral("textGuiAlignment"), 2).toInt(), 0, 2);
+    m_localMobReach = std::clamp(settings.value(
+        QStringLiteral("localMobReach"), 4).toInt(), 3, 10);
+    m_localAttackDelayMs = std::clamp(settings.value(
+        QStringLiteral("localAttackDelayMs"), 500).toInt(), 100, 1500);
+    m_localVelocityPercent = std::clamp(settings.value(
+        QStringLiteral("localVelocityPercent"), 100).toInt(), 0, 100);
     m_textGuiEnabled = settings.value(
         QStringLiteral("textGuiEnabled"), false).toBool();
     m_textGuiX = std::clamp(settings.value(
@@ -2406,6 +2441,11 @@ void OverlayManager::flushFeatureSettings() const
     settings.setValue(QStringLiteral("clickGuiWidthPercent"), m_clickGuiWidthPercent);
     settings.setValue(QStringLiteral("clickGuiHeightPercent"), m_clickGuiHeightPercent);
     settings.setValue(QStringLiteral("clickGuiOpacity"), m_clickGuiOpacity);
+    settings.setValue(QStringLiteral("featureExtraBits"), m_featureExtraBits);
+    settings.setValue(QStringLiteral("textGuiAlignment"), m_textGuiAlignment);
+    settings.setValue(QStringLiteral("localMobReach"), m_localMobReach);
+    settings.setValue(QStringLiteral("localAttackDelayMs"), m_localAttackDelayMs);
+    settings.setValue(QStringLiteral("localVelocityPercent"), m_localVelocityPercent);
     settings.setValue(QStringLiteral("textGuiEnabled"), m_textGuiEnabled);
     settings.setValue(QStringLiteral("textGuiColor"), m_textGuiColor);
     settings.setValue(QStringLiteral("textGuiX"), m_textGuiX);
@@ -2508,7 +2548,12 @@ void OverlayManager::sendFeatureSnapshot()
                       + QByteArray::number(std::clamp(m_aimFovDegrees, 1, 360)) + ' '
                       + QByteArray::number(std::clamp(m_clickGuiWidthPercent, 80, 150)) + ' '
                       + QByteArray::number(std::clamp(m_clickGuiHeightPercent, 80, 150)) + ' '
-                      + QByteArray::number(std::clamp(m_clickGuiOpacity, 35, 100)) + '\n');
+                      + QByteArray::number(std::clamp(m_clickGuiOpacity, 35, 100)) + ' '
+                      + QByteArray::number(m_featureExtraBits & 0xFFU) + ' '
+                      + QByteArray::number(std::clamp(m_textGuiAlignment, 0, 2)) + ' '
+                      + QByteArray::number(std::clamp(m_localMobReach, 3, 10)) + ' '
+                      + QByteArray::number(std::clamp(m_localAttackDelayMs, 100, 1500)) + ' '
+                      + QByteArray::number(std::clamp(m_localVelocityPercent, 0, 100)) + '\n');
 }
 
 void OverlayManager::sendBindSnapshot()

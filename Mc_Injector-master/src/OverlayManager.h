@@ -512,6 +512,11 @@ private:
     int m_clickGuiWidthPercent = 100;
     int m_clickGuiHeightPercent = 100;
     int m_clickGuiOpacity = 96;
+    quint32 m_featureExtraBits = 0x43U;
+    int m_textGuiAlignment = 2;
+    int m_localMobReach = 4;
+    int m_localAttackDelayMs = 500;
+    int m_localVelocityPercent = 100;
     bool m_textGuiEnabled = false;
     QString m_textGuiColor = QStringLiteral("#7EE7FF");
     int m_textGuiX = -1;

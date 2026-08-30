@@ -193,8 +193,11 @@ private:
     mapping.playerSignature = "Lnet/minecraft/client/entity/EntityPlayerSP;";
     mapping.livingName = "net.minecraft.entity.EntityLivingBase";
     mapping.livingSignature = "Lnet/minecraft/entity/EntityLivingBase;";
+    mapping.hostileName = "net.minecraft.entity.monster.IMob";
+    mapping.hostileSignature = "Lnet/minecraft/entity/monster/IMob;";
     mapping.entityName = "net.minecraft.entity.Entity";
     mapping.entitySignature = "Lnet/minecraft/entity/Entity;";
+    mapping.entityPlayerSignature = "Lnet/minecraft/entity/player/EntityPlayer;";
     mapping.fireballName = "net.minecraft.entity.projectile.EntityFireball";
     mapping.fireballSignature = "Lnet/minecraft/entity/projectile/EntityFireball;";
     mapping.aabbName = "net.minecraft.util.AxisAlignedBB";
@@ -297,6 +300,7 @@ private:
     mapping.getCurrentServerData = "func_147104_D";
     mapping.serverIpField = "field_78845_b";
     mapping.playerControllerField = "field_71442_b";
+    mapping.attackEntity = "func_78764_a";
     mapping.currentItemField = "field_70461_c";
     mapping.mainInventoryField = "field_70462_a";
     mapping.getBlockFromItem = "func_179223_d";
@@ -378,8 +382,11 @@ private:
     mapping.playerSignature = "Lbew;";
     mapping.livingName = "pr";
     mapping.livingSignature = "Lpr;";
+    mapping.hostileName = "vq";
+    mapping.hostileSignature = "Lvq;";
     mapping.entityName = "pk";
     mapping.entitySignature = "Lpk;";
+    mapping.entityPlayerSignature = "Lwn;";
     mapping.fireballName = "ws";
     mapping.fireballSignature = "Lws;";
     mapping.aabbName = "aug";
@@ -480,6 +487,7 @@ private:
     mapping.getCurrentServerData = "D";
     mapping.serverIpField = "b";
     mapping.playerControllerField = "c";
+    mapping.attackEntity = "a";
     mapping.currentItemField = "c";
     mapping.mainInventoryField = "a";
     mapping.getBlockFromItem = "d";
@@ -785,7 +793,8 @@ bool MappingDictionary::validate(std::string* const error) const noexcept
         }
     }
 
-    const std::array<std::pair<std::string_view, std::string_view>, 24U> featureClasses{{
+    const std::array<std::pair<std::string_view, std::string_view>, 25U> featureClasses{{
+        {hostileName, hostileSignature},
         {scoreboardName, scoreboardSignature}, {scoreObjectiveName, scoreObjectiveSignature},
         {scoreName, scoreSignature}, {scorePlayerTeamName, scorePlayerTeamSignature},
         {netHandlerName, netHandlerSignature},
@@ -825,6 +834,11 @@ bool MappingDictionary::validate(std::string* const error) const noexcept
          teamSignature.back() != ';')) {
         return reject("invalid Team JNI signature");
     }
+    if (entityPlayerSignature.size() < 3U ||
+        entityPlayerSignature.front() != 'L' ||
+        entityPlayerSignature.back() != ';') {
+        return reject("invalid EntityPlayer JNI signature");
+    }
 
     if ((getMinecraft.empty() && minecraftInstanceField.empty()) ||
         (!getMinecraft.empty() && !minecraftInstanceField.empty())) {
@@ -834,7 +848,7 @@ bool MappingDictionary::validate(std::string* const error) const noexcept
         (!getLoadedEntities.empty() && !loadedEntitiesField.empty())) {
         return reject("mapping must define exactly one loaded-entity accessor");
     }
-    const std::array<std::string_view, 76U> members{{
+    const std::array<std::string_view, 77U> members{{
         playerField, getHealth, getMaxHealth, getEntityId,
         getBounds, isMainThread, isSingleplayer, worldField, getLoadedEntities,
         playerEntitiesField, getName, isInvisible, getDisplayName, getFormattedText,
@@ -854,7 +868,7 @@ bool MappingDictionary::validate(std::string* const error) const noexcept
         getGlTextureId, gameSettingsField, keyBindSneakField, getKeyCode,
         setKeyBindState, mouseSensitivityField, rotationYawField,
         rotationPitchField, onGroundField, jump, isAirBlock,
-        getCurrentServerData, serverIpField, playerControllerField,
+        getCurrentServerData, serverIpField, playerControllerField, attackEntity,
         currentItemField, mainInventoryField, getBlockFromItem,
         getIdFromBlock, getFacingByIndex, onPlayerRightClick}};
     for (const std::string_view member : members) {

@@ -128,6 +128,14 @@ private:
     std::atomic<int> m_clickGuiWidthPercent{100};
     std::atomic<int> m_clickGuiHeightPercent{100};
     std::atomic<int> m_clickGuiOpacity{96};
+    // Extra feature switches deliberately live outside the saturated legacy
+    // 32-bit feature mask. Bits: nearest, text line, knockback, bow,
+    // local-hostile aura, local incoming-velocity scaling.
+    std::atomic<std::uint32_t> m_featureExtraBits{0x43U};
+    std::atomic<int> m_textGuiAlignment{2};
+    std::atomic<int> m_localMobReach{4};
+    std::atomic<int> m_localAttackDelayMs{500};
+    std::atomic<int> m_localVelocityPercent{100};
     std::atomic<std::uint32_t> m_textGuiColor{0x7EE7FFU};
     std::atomic<int> m_textGuiX{-1};
     std::atomic<int> m_textGuiY{-1};
@@ -232,6 +240,11 @@ private:
     std::atomic<int> m_featureChangedClickGuiWidthPercent{100};
     std::atomic<int> m_featureChangedClickGuiHeightPercent{100};
     std::atomic<int> m_featureChangedClickGuiOpacity{96};
+    std::atomic<std::uint32_t> m_featureChangedExtraBits{0x03U};
+    std::atomic<int> m_featureChangedTextGuiAlignment{2};
+    std::atomic<int> m_featureChangedLocalMobReach{4};
+    std::atomic<int> m_featureChangedLocalAttackDelayMs{500};
+    std::atomic<int> m_featureChangedLocalVelocityPercent{100};
     std::atomic<std::uint32_t> m_featureChangedTextGuiColor{0x7EE7FFU};
     std::atomic<int> m_featureChangedTextGuiX{-1};
     std::atomic<int> m_featureChangedTextGuiY{-1};

@@ -7,17 +7,21 @@
 #include <imgui_impl_win32.h>
 
 #include <gl/GL.h>
+#include <imm.h>
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <ctime>
 #include <functional>
 #include <new>
+#include <string>
 #include <utility>
 
 #define STB_IMAGE_IMPLEMENTATION
@@ -57,9 +61,111 @@ struct OverlayInputState final {
     bool mouseDown[5]{};
     bool captureKeysPrimed = false;
     std::array<bool, 256U> keyDown{};
+    // Legacy IMM messages are delivered on the game window thread, which can
+    // differ from Lunar's OpenGL presentation thread. Fixed buffers plus this
+    // lock make the handoff allocation-free and race-free.
+    SRWLOCK imeLock = SRWLOCK_INIT;
+    std::array<wchar_t, 80U> imeName{};
+    std::array<wchar_t, 128U> imeComposition{};
+    std::array<std::array<wchar_t, 64U>, 9U> imeCandidates{};
+    std::uint32_t imeCandidateCount = 0U;
+    std::uint32_t imeCandidateSelection = 0U;
+    bool imeComposing = false;
+    std::atomic<std::uint64_t> imeRevision{0U};
 };
 
 namespace {
+
+void updateImeState(OverlayInputState& input, const HWND window,
+                    const UINT message, const LPARAM lParam) noexcept
+{
+    std::array<wchar_t, 80U> name{};
+    std::array<wchar_t, 128U> composition{};
+    std::array<std::array<wchar_t, 64U>, 9U> candidates{};
+    std::uint32_t candidateCount = 0U;
+    std::uint32_t candidateSelection = 0U;
+    bool composing = false;
+
+    DWORD processId = 0U;
+    const DWORD threadId = ::GetWindowThreadProcessId(window, &processId);
+    const HKL layout = message == WM_INPUTLANGCHANGE
+        ? reinterpret_cast<HKL>(lParam) : ::GetKeyboardLayout(threadId);
+    if (layout != nullptr) {
+        const UINT described = ::ImmGetDescriptionW(
+            layout, name.data(), static_cast<UINT>(name.size()));
+        if (described == 0U) {
+            const LANGID language = LOWORD(reinterpret_cast<ULONG_PTR>(layout));
+            (void)::GetLocaleInfoW(MAKELCID(language, SORT_DEFAULT),
+                LOCALE_SLOCALIZEDDISPLAYNAME, name.data(),
+                static_cast<int>(name.size()));
+        }
+    }
+
+    const bool clearComposition = message == WM_IME_ENDCOMPOSITION;
+    HIMC const ime = ::ImmGetContext(window);
+    if (ime != nullptr && !clearComposition) {
+        const LONG bytes = ::ImmGetCompositionStringW(
+            ime, GCS_COMPSTR, composition.data(),
+            static_cast<DWORD>((composition.size() - 1U) * sizeof(wchar_t)));
+        if (bytes > 0) {
+            composition[std::min<std::size_t>(
+                static_cast<std::size_t>(bytes) / sizeof(wchar_t),
+                composition.size() - 1U)] = L'\0';
+            composing = true;
+        }
+
+        std::array<unsigned char, 8192U> candidateBytes{};
+        const DWORD required = ::ImmGetCandidateListW(ime, 0U, nullptr, 0U);
+        if (required >= sizeof(CANDIDATELIST) &&
+            required <= candidateBytes.size()) {
+            auto* const list = reinterpret_cast<CANDIDATELIST*>(
+                candidateBytes.data());
+            if (::ImmGetCandidateListW(ime, 0U, list,
+                    static_cast<DWORD>(candidateBytes.size())) > 0U) {
+                const DWORD pageStart = std::min(list->dwPageStart, list->dwCount);
+                const DWORD pageCount = std::min<DWORD>(
+                    std::min(list->dwPageSize, list->dwCount - pageStart),
+                    static_cast<DWORD>(candidates.size()));
+                for (DWORD index = 0U; index < pageCount; ++index) {
+                    const DWORD sourceIndex = pageStart + index;
+                    if (offsetof(CANDIDATELIST, dwOffset) +
+                        (static_cast<std::size_t>(sourceIndex) + 1U) *
+                            sizeof(DWORD) > required) continue;
+                    const DWORD offset = list->dwOffset[sourceIndex];
+                    if (offset >= required) continue;
+                    const auto* const source = reinterpret_cast<const wchar_t*>(
+                        candidateBytes.data() + offset);
+                    std::size_t length = 0U;
+                    const std::size_t availableCharacters =
+                        (required - offset) / sizeof(wchar_t);
+                    while (length + 1U < candidates[index].size() &&
+                           length < availableCharacters &&
+                           source[length] != L'\0') {
+                        candidates[index][length] = source[length];
+                        ++length;
+                    }
+                    ++candidateCount;
+                }
+                if (list->dwSelection >= pageStart &&
+                    list->dwSelection < pageStart + pageCount) {
+                    candidateSelection = list->dwSelection - pageStart;
+                }
+                composing = composing || candidateCount != 0U;
+            }
+        }
+        ::ImmReleaseContext(window, ime);
+    }
+
+    ::AcquireSRWLockExclusive(&input.imeLock);
+    input.imeName = name;
+    input.imeComposition = composition;
+    input.imeCandidates = candidates;
+    input.imeCandidateCount = candidateCount;
+    input.imeCandidateSelection = candidateSelection;
+    input.imeComposing = composing;
+    ::ReleaseSRWLockExclusive(&input.imeLock);
+    input.imeRevision.fetch_add(1U, std::memory_order_release);
+}
 
 void advancePresentationSpring(float& value, float& velocity,
                                const float target, const float delta) noexcept
@@ -949,6 +1055,16 @@ void OverlayRenderer::enqueueFeatureToasts(const FeatureSettings& before,
         enqueueToast("LongJump", after.longJumpEnabled);
     if (before.textGuiEnabled != after.textGuiEnabled)
         enqueueToast("Text GUI", after.textGuiEnabled);
+    if (before.knockbackPredictionEnabled != after.knockbackPredictionEnabled)
+        enqueueToast("Knockback Prediction", after.knockbackPredictionEnabled);
+    if (before.bowPredictionEnabled != after.bowPredictionEnabled)
+        enqueueToast("Bow Prediction", after.bowPredictionEnabled);
+    if (before.localMobAuraEnabled != after.localMobAuraEnabled)
+        enqueueToast("Local Mob Aura", after.localMobAuraEnabled);
+    if (before.localVelocityEnabled != after.localVelocityEnabled)
+        enqueueToast("Local Velocity", after.localVelocityEnabled);
+    if (before.fullscreenImeFixEnabled != after.fullscreenImeFixEnabled)
+        enqueueToast("Fullscreen IME", after.fullscreenImeFixEnabled);
 }
 
 void OverlayRenderer::updateBedThreatAlerts(const GameSnapshot& snapshot) noexcept
@@ -1327,6 +1443,27 @@ bool OverlayRenderer::initialize(HWND const window, HGLRC const context) noexcep
         }
         if (m_boldFonts[index] == nullptr) m_boldFonts[index] = m_fonts[index];
     }
+    // One dedicated CJK font is enough for the transient IME card. Building
+    // four full CJK atlases would waste substantial memory inside the game.
+    std::array<char, MAX_PATH> imeFontPath{};
+    if (windowsLength > 0U && windowsLength + 18U < imeFontPath.size()) {
+        std::snprintf(imeFontPath.data(), imeFontPath.size(),
+                      "%s\\Fonts\\msyh.ttc", windowsDirectory);
+        if (::GetFileAttributesA(imeFontPath.data()) == INVALID_FILE_ATTRIBUTES) {
+            std::snprintf(imeFontPath.data(), imeFontPath.size(),
+                          "%s\\Fonts\\msjh.ttc", windowsDirectory);
+        }
+    }
+    if (imeFontPath[0U] != '\0' &&
+        ::GetFileAttributesA(imeFontPath.data()) != INVALID_FILE_ATTRIBUTES) {
+        ImFontConfig imeConfig{};
+        imeConfig.OversampleH = 2;
+        imeConfig.OversampleV = 2;
+        imeConfig.PixelSnapH = false;
+        m_imeFont = io.Fonts->AddFontFromFileTTF(
+            imeFontPath.data(), 22.0F, &imeConfig,
+            io.Fonts->GetGlyphRangesChineseSimplifiedCommon());
+    }
 
     m_appliedGuiScaleIndex = -1;
     m_animatedGuiScale = guiScaleForIndex(m_guiScaleIndex);
@@ -1337,6 +1474,7 @@ bool OverlayRenderer::initialize(HWND const window, HGLRC const context) noexcep
         m_imguiContext = nullptr;
         m_fonts = {};
         m_boldFonts = {};
+        m_imeFont = nullptr;
         return false;
     }
     if (!ImGui_ImplOpenGL2_Init()) {
@@ -1345,11 +1483,15 @@ bool OverlayRenderer::initialize(HWND const window, HGLRC const context) noexcep
         m_imguiContext = nullptr;
         m_fonts = {};
         m_boldFonts = {};
+        m_imeFont = nullptr;
         return false;
     }
 
     m_inputState->imguiContext.store(m_imguiContext, std::memory_order_release);
     m_inputState->window.store(window, std::memory_order_release);
+    updateImeState(*m_inputState, window, WM_INPUTLANGCHANGE,
+        reinterpret_cast<LPARAM>(::GetKeyboardLayout(
+            ::GetWindowThreadProcessId(window, nullptr))));
     m_inputState->acceptImGuiMessages.store(true, std::memory_order_release);
     m_inputState->fallbackPrimed = false;
     DWORD windowProcessId = 0U;
@@ -1464,6 +1606,7 @@ void OverlayRenderer::shutdownWithCurrentContext() noexcept
     m_imguiContext = nullptr;
     m_fonts = {};
     m_boldFonts = {};
+    m_imeFont = nullptr;
     m_blurTexture = 0U;
     m_bedTexture = 0U;
     m_blurWidth = 0;
@@ -1503,6 +1646,7 @@ void OverlayRenderer::abandonForContextChange() noexcept
     m_imguiContext = nullptr;
     m_fonts = {};
     m_boldFonts = {};
+    m_imeFont = nullptr;
     // The old HGLRC is unavailable, so its texture cannot be deleted here.
     // Drop the name to prevent a later context generation from deleting an
     // unrelated object which happens to reuse the same GLuint value.
@@ -1528,6 +1672,7 @@ void OverlayRenderer::abandonAfterWndProcDrainTimeout() noexcept
     m_imguiContext = nullptr;
     m_fonts = {};
     m_boldFonts = {};
+    m_imeFont = nullptr;
     m_blacklistTextures = {};
     m_cursorSessionActive = false;
     m_window = nullptr;
@@ -1639,6 +1784,125 @@ void OverlayRenderer::renderInventoryBlur(const float strength) noexcept
     ::glMatrixMode(GL_PROJECTION);
     ::glPopMatrix();
     ::glPopAttrib();
+}
+
+void OverlayRenderer::renderImeOverlay(const float deltaSeconds,
+                                       const float uiScale) noexcept
+{
+    if (m_inputState == nullptr) return;
+    std::array<wchar_t, 80U> name{};
+    std::array<wchar_t, 128U> composition{};
+    std::array<std::array<wchar_t, 64U>, 9U> candidates{};
+    std::uint32_t candidateCount = 0U;
+    std::uint32_t candidateSelection = 0U;
+    bool composing = false;
+    ::AcquireSRWLockShared(&m_inputState->imeLock);
+    name = m_inputState->imeName;
+    composition = m_inputState->imeComposition;
+    candidates = m_inputState->imeCandidates;
+    candidateCount = m_inputState->imeCandidateCount;
+    candidateSelection = m_inputState->imeCandidateSelection;
+    composing = m_inputState->imeComposing;
+    ::ReleaseSRWLockShared(&m_inputState->imeLock);
+
+    const std::uint64_t revision = m_inputState->imeRevision.load(
+        std::memory_order_acquire);
+    const std::uint64_t now = ::GetTickCount64();
+    if (revision != m_lastImeRevision) {
+        m_lastImeRevision = revision;
+        m_lastImeActivityTick = now;
+    }
+    const bool recentlyChanged = m_lastImeActivityTick != 0U &&
+        now - m_lastImeActivityTick < 2200U;
+    const bool visible = m_features.fullscreenImeFixEnabled &&
+        (composing || recentlyChanged);
+    const float target = visible ? 1.0F : 0.0F;
+    m_imePanelProgress += (target - m_imePanelProgress) *
+        (1.0F - std::exp(-12.0F * std::clamp(deltaSeconds, 0.0F, 0.05F)));
+    if (m_imePanelProgress < 0.002F) return;
+
+    const auto toUtf8 = [](const wchar_t* const source,
+                           char* const destination,
+                           const int capacity) noexcept {
+        destination[0] = '\0';
+        if (source == nullptr || source[0] == L'\0') return;
+        (void)::WideCharToMultiByte(CP_UTF8, 0, source, -1,
+            destination, capacity, nullptr, nullptr);
+        destination[capacity - 1] = '\0';
+    };
+    std::array<char, 240U> nameUtf8{};
+    std::array<char, 384U> compositionUtf8{};
+    std::array<std::array<char, 192U>, 9U> candidateUtf8{};
+    toUtf8(name.data(), nameUtf8.data(), static_cast<int>(nameUtf8.size()));
+    toUtf8(composition.data(), compositionUtf8.data(),
+           static_cast<int>(compositionUtf8.size()));
+    for (std::size_t index = 0U; index < candidateUtf8.size(); ++index) {
+        toUtf8(candidates[index].data(), candidateUtf8[index].data(),
+               static_cast<int>(candidateUtf8[index].size()));
+    }
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImDrawList* const draw = ImGui::GetForegroundDrawList();
+    const float eased = m_imePanelProgress * m_imePanelProgress *
+        (3.0F - 2.0F * m_imePanelProgress);
+    const float width = std::min(660.0F * uiScale,
+                                 io.DisplaySize.x - 24.0F * uiScale);
+    const float rowHeight = candidateCount == 0U ? 0.0F : 35.0F * uiScale;
+    const float height = (compositionUtf8[0U] != '\0' ? 92.0F : 66.0F) *
+        uiScale + rowHeight;
+    const ImVec2 minimum((io.DisplaySize.x - width) * 0.5F,
+        (-height - 12.0F * uiScale) * (1.0F - eased) + 18.0F * uiScale);
+    const ImVec2 maximum(minimum.x + width, minimum.y + height);
+    const int alpha = static_cast<int>(238.0F * eased);
+    draw->AddRectFilled(ImVec2(minimum.x - 5.0F * uiScale,
+                              minimum.y + 8.0F * uiScale),
+                        ImVec2(maximum.x + 5.0F * uiScale,
+                              maximum.y + 12.0F * uiScale),
+                        IM_COL32(0, 0, 0, static_cast<int>(54.0F * eased)),
+                        20.0F * uiScale);
+    draw->AddRectFilled(minimum, maximum,
+        IM_COL32(20, 21, 28, alpha), 18.0F * uiScale);
+    draw->AddRectFilled(minimum,
+        ImVec2(minimum.x + 5.0F * uiScale, maximum.y),
+        IM_COL32(114, 224, 210, static_cast<int>(255.0F * eased)),
+        18.0F * uiScale, ImDrawFlags_RoundCornersLeft);
+    ImFont* const font = m_imeFont != nullptr ? m_imeFont : ImGui::GetFont();
+    const float fontSize = (m_imeFont != nullptr ? 22.0F : ImGui::GetFontSize()) *
+        uiScale;
+    draw->AddText(font, fontSize * 0.70F,
+        ImVec2(minimum.x + 22.0F * uiScale, minimum.y + 12.0F * uiScale),
+        IM_COL32(174, 180, 194, static_cast<int>(255.0F * eased)),
+        nameUtf8[0U] != '\0' ? nameUtf8.data() : "Input method");
+    if (compositionUtf8[0U] != '\0') {
+        draw->AddText(font, fontSize,
+            ImVec2(minimum.x + 22.0F * uiScale,
+                   minimum.y + 34.0F * uiScale),
+            IM_COL32(248, 249, 252, static_cast<int>(255.0F * eased)),
+            compositionUtf8.data());
+    }
+    if (candidateCount != 0U) {
+        const float top = maximum.y - rowHeight;
+        const float cellWidth = (width - 28.0F * uiScale) /
+            static_cast<float>(candidateCount);
+        for (std::uint32_t index = 0U; index < candidateCount; ++index) {
+            const float left = minimum.x + 14.0F * uiScale +
+                cellWidth * static_cast<float>(index);
+            if (index == candidateSelection) {
+                draw->AddRectFilled(ImVec2(left, top + 2.0F * uiScale),
+                    ImVec2(left + cellWidth - 4.0F * uiScale,
+                           maximum.y - 5.0F * uiScale),
+                    IM_COL32(55, 184, 170, static_cast<int>(105.0F * eased)),
+                    9.0F * uiScale);
+            }
+            char numbered[224]{};
+            std::snprintf(numbered, sizeof(numbered), "%u %s",
+                index + 1U, candidateUtf8[index].data());
+            draw->AddText(font, fontSize * 0.76F,
+                ImVec2(left + 7.0F * uiScale, top + 8.0F * uiScale),
+                IM_COL32(236, 239, 244, static_cast<int>(255.0F * eased)),
+                numbered);
+        }
+    }
 }
 
 bool OverlayRenderer::render(HDC const deviceContext,
@@ -1793,6 +2057,7 @@ bool OverlayRenderer::render(HDC const deviceContext,
     const float guiLinear = std::clamp(m_clickGuiProgress, 0.0F, 1.0F);
     const float guiEase = guiLinear * guiLinear * (3.0F - 2.0F * guiLinear);
     renderInventoryBlur(std::clamp(guiEase * 1.28F, 0.0F, 1.0F));
+    renderImeOverlay(delta, uiScale);
 
     updateBedThreatAlerts(snapshot);
 
@@ -2289,7 +2554,8 @@ bool OverlayRenderer::render(HDC const deviceContext,
         // snapshot. A detected impulse starts one animation; subsequent samples
         // refine its path without restarting it, then the landing box lingers.
         const double trajectoryNow = ImGui::GetTime();
-        if (snapshot.entitySampleGeneration != m_lastKnockbackGeneration) {
+        if (m_features.knockbackPredictionEnabled &&
+            snapshot.entitySampleGeneration != m_lastKnockbackGeneration) {
             m_lastKnockbackGeneration = snapshot.entitySampleGeneration;
             for (std::uint8_t predictionIndex = 0U;
                  predictionIndex < snapshot.knockbackTrajectoryCount;
@@ -2325,6 +2591,10 @@ bool OverlayRenderer::render(HDC const deviceContext,
             }
         }
         for (KnockbackVisual& visual : m_knockbackVisuals) {
+            if (!m_features.knockbackPredictionEnabled) {
+                visual.active = false;
+                continue;
+            }
             if (!visual.active || visual.trajectory.pointCount < 2U) continue;
             const KnockbackTrajectory& prediction = visual.trajectory;
             const float duration = std::max(0.28F,
@@ -2399,9 +2669,37 @@ bool OverlayRenderer::render(HDC const deviceContext,
         // The bow path is recomputed at a bounded cadence from the exact 1.8.9
         // charge/drag/gravity constants. The terminal marker turns red only
         // when the swept segment intersects a player AABB.
-        if (snapshot.bowTrajectory.active &&
+        if (m_features.bowPredictionEnabled && snapshot.bowTrajectory.active &&
             snapshot.bowTrajectory.pointCount >= 2U) {
-            const BowTrajectory& bow = snapshot.bowTrajectory;
+            const BowTrajectory& targetBow = snapshot.bowTrajectory;
+            if (!m_bowVisualInitialized || !m_bowVisualTrajectory.active) {
+                m_bowVisualTrajectory = targetBow;
+                m_bowVisualInitialized = true;
+            } else {
+                // JNI physics remains bounded to Minecraft's 20 TPS, while
+                // every OpenGL frame eases the already computed POD path
+                // toward the newest result. This preserves block collision
+                // accuracy without performing world JNI calls at 240 Hz.
+                const float blend = 1.0F - std::exp(-24.0F * delta);
+                const std::uint8_t common = std::min(
+                    m_bowVisualTrajectory.pointCount, targetBow.pointCount);
+                for (std::uint8_t point = 0U; point < common; ++point) {
+                    WorldPoint& visualPoint = m_bowVisualTrajectory.points[point];
+                    const WorldPoint& targetPoint = targetBow.points[point];
+                    visualPoint.x += (targetPoint.x - visualPoint.x) * blend;
+                    visualPoint.y += (targetPoint.y - visualPoint.y) * blend;
+                    visualPoint.z += (targetPoint.z - visualPoint.z) * blend;
+                }
+                for (std::uint8_t point = common; point < targetBow.pointCount; ++point)
+                    m_bowVisualTrajectory.points[point] = targetBow.points[point];
+                m_bowVisualTrajectory.pointCount = targetBow.pointCount;
+                m_bowVisualTrajectory.impact = targetBow.impact;
+                m_bowVisualTrajectory.impactEntityId = targetBow.impactEntityId;
+                m_bowVisualTrajectory.hasImpact = targetBow.hasImpact;
+                m_bowVisualTrajectory.impactPlayer = targetBow.impactPlayer;
+                m_bowVisualTrajectory.active = true;
+            }
+            const BowTrajectory& bow = m_bowVisualTrajectory;
             for (std::size_t point = 1U; point < bow.pointCount; ++point) {
                 const ScreenPoint first = projectPoint(snapshot.camera, displaySize,
                     bow.points[point - 1U].x, bow.points[point - 1U].y,
@@ -2426,6 +2724,9 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     impactBox, impactColor,
                     bow.impactPlayer ? "PLAYER IMPACT" : "IMPACT", true);
             }
+        } else {
+            m_bowVisualInitialized = false;
+            m_bowVisualTrajectory = {};
         }
     }
 
@@ -2608,24 +2909,29 @@ bool OverlayRenderer::render(HDC const deviceContext,
 
             struct NavItem final { const char* label; int page; float y; };
             const float railLayoutScale = std::clamp(
-                (baseGuiHeight - 80.0F - 68.0F) / (570.0F - 68.0F),
+                (baseGuiHeight - 80.0F - 68.0F) / (650.0F - 68.0F),
                 0.86F, 1.15F);
             const auto railY = [&](const float original) noexcept {
                 return 68.0F + (original - 68.0F) * railLayoutScale;
             };
-            const std::array<NavItem, 16U> navItems{{
-                {"Player ESP", 0, railY(84.0F)}, {"Bed ESP", 1, railY(109.0F)},
-                {"Nametag", 2, railY(134.0F)}, {"Fireball ESP", 14, railY(159.0F)},
-                {"Bed Alert", 3, railY(211.0F)}, {"Safewalk", 4, railY(257.0F)},
-                {"Scaffold", 5, railY(282.0F)}, {"Fly", 6, railY(307.0F)},
-                {"BHop", 7, railY(332.0F)}, {"LongJump", 15, railY(357.0F)},
-                {"Aim Assist", 8, railY(382.0F)}, {"Player Stats", 9, railY(428.0F)},
-                {"Debug", 10, railY(453.0F)}, {"Blacklist", 11, railY(478.0F)},
-                {"Text GUI", 12, railY(524.0F)}, {"Interface", 13, railY(570.0F)}}};
-            const std::array<std::pair<const char*, float>, 6U> navGroups{{
-                {"ESP", railY(68.0F)}, {"ALERT", railY(195.0F)},
-                {"SAFE", railY(241.0F)}, {"DATA", railY(412.0F)},
-                {"HUD", railY(508.0F)}, {"APPLICATION", railY(554.0F)}}};
+            const std::array<NavItem, 19U> navItems{{
+                {"Player ESP", 0, railY(84.0F)}, {"Bed ESP", 1, railY(108.0F)},
+                {"Nametag", 2, railY(132.0F)}, {"Fireball ESP", 14, railY(156.0F)},
+                {"Bed Alert", 3, railY(205.0F)}, {"Safewalk", 4, railY(250.0F)},
+                {"Scaffold", 5, railY(274.0F)}, {"Fly", 6, railY(298.0F)},
+                {"BHop", 7, railY(322.0F)}, {"LongJump", 15, railY(346.0F)},
+                {"Aim Assist", 8, railY(382.0F)}, {"Local Combat", 17, railY(406.0F)},
+                {"Prediction", 16, railY(443.0F)}, {"Player Stats", 9, railY(484.0F)},
+                {"Debug", 10, railY(508.0F)}, {"Blacklist", 11, railY(532.0F)},
+                {"Text GUI", 12, railY(574.0F)},
+                {"Fullscreen IME", 18, railY(612.0F)},
+                {"Interface", 13, railY(650.0F)}}};
+            const std::array<std::pair<const char*, float>, 9U> navGroups{{
+                {"ESP", railY(68.0F)}, {"ALERT", railY(189.0F)},
+                {"SAFE", railY(234.0F)}, {"COMBAT", railY(366.0F)},
+                {"PREDICTION", railY(427.0F)}, {"DATA", railY(468.0F)},
+                {"HUD", railY(558.0F)}, {"FIX", railY(596.0F)},
+                {"APPLICATION", railY(634.0F)}}};
             float targetNavY = navItems.front().y;
             for (const NavItem& item : navItems)
                 if (item.page == m_clickGuiPage) { targetNavY = item.y; break; }
@@ -2723,12 +3029,13 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     5.7F * uiScale, fadedGuiColor(guiRail), 24);
             }
 
-            constexpr std::array<const char*, 16U> pageTitles{{
+            constexpr std::array<const char*, 19U> pageTitles{{
                 "Player ESP", "Bed ESP", "Nametag", "Bed Alert",
                 "Safewalk", "Scaffold", "Fly", "BHop", "Aim Assist",
                 "Player Stats", "Debug", "Blacklist", "Text GUI", "Interface",
-                "Fireball ESP", "LongJump"}};
-            constexpr std::array<const char*, 16U> pageDescriptions{{
+                "Fireball ESP", "LongJump", "Prediction", "Local Combat",
+                "Fullscreen IME"}};
+            constexpr std::array<const char*, 19U> pageDescriptions{{
                 "Player outlines and teammate presentation",
                 "Bed geometry and defense material card",
                 "Confirmed-player identity and live health cards",
@@ -2744,8 +3051,11 @@ bool OverlayRenderer::render(HDC const deviceContext,
                 "Draggable enabled-feature list",
                 "Appearance, scale and input binding",
                 "Compact local-world ghast fireball boxes",
-                "Single-player forward jump impulse"}};
-            const int page = std::clamp(m_clickGuiPage, 0, 15);
+                "Single-player forward jump impulse",
+                "High-confidence knockback and smooth bow paths",
+                "Hard-gated integrated-world hostile-mob test tools",
+                "Windows IME status and candidate overlay for fullscreen"}};
+            const int page = std::clamp(m_clickGuiPage, 0, 18);
             const float contentX = windowPosition.x + (baseRailWidth + 22.0F) * uiScale;
             windowDraw->AddText(boldFont, ImGui::GetFontSize() * 1.16F,
                 ImVec2(contentX, windowPosition.y + 17.0F * uiScale),
@@ -2795,6 +3105,8 @@ bool OverlayRenderer::render(HDC const deviceContext,
                      pageMasterAnimation = &m_toggleAnimation[34]; break;
             case 15: pageMaster = &m_features.longJumpEnabled;
                      pageMasterAnimation = &m_toggleAnimation[35]; break;
+            case 18: pageMaster = &m_features.fullscreenImeFixEnabled;
+                     pageMasterAnimation = &m_toggleAnimation[44]; break;
             default: break;
             }
             if (pageMaster != nullptr && pageMasterAnimation != nullptr) {
@@ -3056,9 +3368,9 @@ bool OverlayRenderer::render(HDC const deviceContext,
             } else if (page == 4) {
                 sectionTitle("EDGE ASSIST");
                 ImGui::TextWrapped(
-                    "Crouch near an air edge while preserving Minecraft's physical sneak key state.");
+                    "Uses Minecraft's native inset-AABB ledge rule and the player's real next-tick motion, then holds the normal sneak key state.");
                 ImGui::SetNextItemWidth(320.0F * uiScale);
-                changed |= ImGui::SliderInt("Safety look-ahead",
+                changed |= ImGui::SliderInt("Edge timing",
                     &m_features.safewalkEdgeSensitivity, 0, 100, "%d%%",
                     ImGuiSliderFlags_AlwaysClamp);
                 ImGui::SetNextItemWidth(320.0F * uiScale);
@@ -3070,11 +3382,17 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     &m_features.safewalkReleaseDelayMs, 0, 750, "%d ms",
                     ImGuiSliderFlags_AlwaysClamp);
                 ImGui::TextDisabled(
-                    "Low waits until the last safe margin; high anticipates the edge earlier.");
+                    "0%% = earlier guard; 100%% = last safe body margin. Neither waits until the live hitbox is unsupported.");
             } else if (page == 5) {
                 sectionTitle("AUTOMATIC PLACEMENT");
                 ImGui::TextWrapped(
                     "Places a real hotbar block below/predictively ahead of your movement. Wool, planks, sandstone and stable building blocks are accepted; sand and gravel are always excluded.");
+                ImGui::Spacing();
+                changed |= animatedToggle("Keep placement on takeoff layer",
+                    m_features.scaffoldSameLayerOnly,
+                    m_toggleAnimation[43], uiScale);
+                ImGui::TextDisabled(
+                    "When enabled, jumping bridges forward on the takeoff layer instead of towering upward.");
                 ImGui::Spacing();
                 ImGui::TextColored(ImVec4(1.0F, 0.42F, 0.34F, 1.0F),
                     "WARNING: Do not use this on a server. It can cause a ban.");
@@ -3120,6 +3438,8 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     changed |= ImGui::SliderInt("Aim speed",
                         &m_features.aimSpeedPercent, 1, 100, "%d%%",
                         ImGuiSliderFlags_AlwaysClamp);
+                changed |= animatedToggle("Prioritize nearest target",
+                    m_features.aimNearestPriority, m_toggleAnimation[37], uiScale);
                 sectionTitle("TARGET WINDOW");
                 ImGui::SetNextItemWidth(320.0F * uiScale);
                 changed |= ImGui::SliderInt("Minimum distance",
@@ -3326,6 +3646,23 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     m_features.textGuiY = -1;
                     changed = true;
                 }
+                sectionTitle("LAYOUT");
+                changed |= animatedToggle("Left accent line",
+                    m_features.textGuiVerticalLine, m_toggleAnimation[38], uiScale);
+                ImGui::TextDisabled("Text alignment");
+                constexpr std::array<const char*, 3U> alignLabels{{
+                    "Left", "Center", "Right"}};
+                for (int alignment = 0; alignment < 3; ++alignment) {
+                    if (alignment != 0) ImGui::SameLine();
+                    const bool selected = m_features.textGuiAlignment == alignment;
+                    if (selected) ImGui::PushStyleColor(ImGuiCol_Button, guiAccent);
+                    if (ImGui::Button(alignLabels[static_cast<std::size_t>(alignment)],
+                        ImVec2(88.0F * uiScale, 0.0F)) && !selected) {
+                        m_features.textGuiAlignment = alignment;
+                        changed = true;
+                    }
+                    if (selected) ImGui::PopStyleColor();
+                }
             } else if (page == 14) {
                 sectionTitle("PROJECTILE BOX");
                 ImGui::TextWrapped(
@@ -3353,6 +3690,53 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     "Applies a forward jump impulse at the next grounded movement step, with a bounded cooldown.");
                 ImGui::TextColored(ImVec4(1.0F, 0.58F, 0.30F, 1.0F),
                     "LOCAL WORLD ONLY: automatically disabled on every multiplayer server.");
+            } else if (page == 16) {
+                sectionTitle("TRAJECTORY SOURCES");
+                changed |= animatedToggle("Knockback prediction",
+                    m_features.knockbackPredictionEnabled,
+                    m_toggleAnimation[39], uiScale);
+                ImGui::TextDisabled(
+                    "Requires health loss plus a newly airborne velocity impulse.");
+                changed |= animatedToggle("Bow prediction",
+                    m_features.bowPredictionEnabled,
+                    m_toggleAnimation[40], uiScale);
+                ImGui::TextDisabled(
+                    "20 TPS physics samples are blended every rendered frame.");
+            } else if (page == 17) {
+                sectionTitle("HOSTILE MOB LAB");
+                changed |= animatedToggle("Auto-attack hostile mobs",
+                    m_features.localMobAuraEnabled,
+                    m_toggleAnimation[41], uiScale);
+                ImGui::SetNextItemWidth(320.0F * uiScale);
+                changed |= ImGui::SliderInt("Local reach",
+                    &m_features.localMobReach, 3, 10, "%d blocks",
+                    ImGuiSliderFlags_AlwaysClamp);
+                ImGui::SetNextItemWidth(320.0F * uiScale);
+                changed |= ImGui::SliderInt("Attack interval",
+                    &m_features.localAttackDelayMs, 100, 1500, "%d ms",
+                    ImGuiSliderFlags_AlwaysClamp);
+                sectionTitle("LOCAL INCOMING VELOCITY");
+                changed |= animatedToggle("Scale local knockback",
+                    m_features.localVelocityEnabled,
+                    m_toggleAnimation[42], uiScale);
+                ImGui::SetNextItemWidth(320.0F * uiScale);
+                changed |= ImGui::SliderInt("Velocity retained",
+                    &m_features.localVelocityPercent, 0, 100, "%d%%",
+                    ImGuiSliderFlags_AlwaysClamp);
+                ImGui::TextColored(ImVec4(1.0F, 0.58F, 0.30F, 1.0F),
+                    "INTEGRATED SINGLE-PLAYER ONLY: Agent hard-disables this page elsewhere.");
+                ImGui::TextWrapped(
+                    "The attack helper accepts only non-player hostile candidates; it never targets players.");
+            } else if (page == 18) {
+                sectionTitle("WINDOWS INPUT METHOD BRIDGE");
+                ImGui::TextWrapped(
+                    "Mirrors the active Windows input method, live composition text and the current candidate page into the OpenGL frame. This keeps candidates visible in exclusive fullscreen without synthesizing input.");
+                ImGui::Spacing();
+                ImGui::TextDisabled(
+                    "The original IME remains the text owner. The overlay only observes WM_IME messages and never commits or replaces characters.");
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(0.42F, 0.84F, 0.78F, 1.0F),
+                    "Candidate card appears at the top-center while composing and briefly after an input-method switch.");
             } else {
                 sectionTitle("INTERFACE SIZE");
                 constexpr std::array<const char*, 4U> sizeLabels{"S", "M", "L", "XL"};
@@ -3661,7 +4045,7 @@ bool OverlayRenderer::render(HDC const deviceContext,
     // avoiding competing per-row hover/cursor state.
     if (m_features.textGuiEnabled) {
         struct TextModule { const char* name; bool enabled; };
-        const std::array<TextModule, 14U> modules{{
+        const std::array<TextModule, 18U> modules{{
             {"Player ESP", m_features.entityEspEnabled},
             {"Bed ESP", m_features.bedEspEnabled},
             {"Nametag", m_features.nametagEnabled},
@@ -3675,7 +4059,11 @@ bool OverlayRenderer::render(HDC const deviceContext,
             {"Debug", m_features.debugChatEnabled},
             {"Blacklist", m_blacklist.panelEnabled},
             {"Fireball ESP", m_features.fireballEspEnabled},
-            {"LongJump", m_features.longJumpEnabled}}};
+            {"LongJump", m_features.longJumpEnabled},
+            {"Knockback Prediction", m_features.knockbackPredictionEnabled},
+            {"Bow Prediction", m_features.bowPredictionEnabled},
+            {"Local Mob Aura", m_features.localMobAuraEnabled},
+            {"Local Velocity", m_features.localVelocityEnabled}}};
         ImFont* const textGuiFont = m_boldFonts[static_cast<std::size_t>(
             std::clamp(m_guiScaleIndex, 0, 3))] != nullptr
             ? m_boldFonts[static_cast<std::size_t>(
@@ -3718,7 +4106,9 @@ bool OverlayRenderer::render(HDC const deviceContext,
             // interpolated below, so individual glyphs never flash abruptly.
             m_textGuiNextShuffleTick = glyphClock + 720U;
         }
-        const float glyphBlend = 1.0F - std::exp(-6.2F * delta);
+        // Keep the 720 ms target shuffle cadence, but let each glyph breathe
+        // slowly toward its next luminance instead of flashing between masks.
+        const float glyphBlend = 1.0F - std::exp(-2.0F * delta);
         for (std::size_t moduleIndex = 0U; moduleIndex < modules.size(); ++moduleIndex)
             for (std::size_t character = 0U; character < 32U; ++character)
                 m_textGuiGlyphBrightness[moduleIndex][character] +=
@@ -3739,7 +4129,8 @@ bool OverlayRenderer::render(HDC const deviceContext,
                                         measureText(modules[index].name).x);
         }
         if (visibleRows > 0.004F) {
-            const float width = maximumTextWidth + 20.0F * uiScale;
+            const float width = maximumTextWidth +
+                (m_features.textGuiVerticalLine ? 28.0F : 20.0F) * uiScale;
             const float lineHeight = textGuiFontSize + 5.0F * uiScale;
             const float height = lineHeight * visibleRows +
                                  8.0F * uiScale;
@@ -3781,6 +4172,15 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     unpackRgb(m_features.textGuiColor);
                 const ImVec4 base(baseRgb[0U], baseRgb[1U], baseRgb[2U], 1.0F);
                 float rowY = textY + 4.0F * uiScale;
+                if (m_features.textGuiVerticalLine) {
+                    const ImU32 lineColor = ImGui::ColorConvertFloat4ToU32(
+                        ImVec4(base.x, base.y, base.z, 0.82F));
+                    textDraw->AddRectFilled(
+                        ImVec2(textX + 3.0F * uiScale, textY + 3.0F * uiScale),
+                        ImVec2(textX + 6.0F * uiScale,
+                               textY + height - 3.0F * uiScale),
+                        lineColor, 1.5F * uiScale);
+                }
                 for (std::size_t moduleIndex = 0U;
                      moduleIndex < modules.size(); ++moduleIndex) {
                     const TextModule& module = modules[moduleIndex];
@@ -3789,8 +4189,17 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     if (progress <= 0.004F) continue;
                     const float eased = progress * progress * (3.0F - 2.0F * progress);
                     const ImVec2 textSize = measureText(module.name);
-                    float glyphX = textX + width - textSize.x - 4.0F * uiScale +
-                                   (1.0F - eased) * 18.0F * uiScale;
+                    const float contentLeft = textX +
+                        (m_features.textGuiVerticalLine ? 11.0F : 4.0F) * uiScale;
+                    const float contentRight = textX + width - 4.0F * uiScale;
+                    float glyphX = contentLeft;
+                    if (m_features.textGuiAlignment == 1)
+                        glyphX = (contentLeft + contentRight - textSize.x) * 0.5F;
+                    else if (m_features.textGuiAlignment == 2)
+                        glyphX = contentRight - textSize.x;
+                    const float entryDirection = m_features.textGuiAlignment == 0
+                        ? -1.0F : 1.0F;
+                    glyphX += entryDirection * (1.0F - eased) * 18.0F * uiScale;
                     const float glyphY = rowY + (1.0F - eased) * 4.0F * uiScale;
                     // Half of the glyphs are bright and half are 50% dimmed.
                     // A continuously regenerated mask flows through a smooth
@@ -4737,6 +5146,11 @@ LRESULT OverlayRenderer::onWindowMessage(OverlayInputState& input,
                                          const LPARAM lParam,
                                          bool& handled) noexcept
 {
+    if (message == WM_INPUTLANGCHANGE || message == WM_IME_STARTCOMPOSITION ||
+        message == WM_IME_COMPOSITION || message == WM_IME_ENDCOMPOSITION ||
+        message == WM_IME_NOTIFY) {
+        updateImeState(input, window, message, lParam);
+    }
     const bool firstKeyDown = (message == WM_KEYDOWN || message == WM_SYSKEYDOWN) &&
                               (lParam & (1LL << 30)) == 0;
     if (firstKeyDown) {

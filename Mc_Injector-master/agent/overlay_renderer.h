@@ -44,12 +44,23 @@ struct FeatureSettings final {
     bool showTeammateArrows = true;
     bool safewalkEnabled = false;
     bool scaffoldEnabled = false;
+    bool scaffoldSameLayerOnly = true;
     bool flyEnabled = false;
     bool bhopEnabled = false;
     bool bhopAutoJump = true;
     bool aimAssistEnabled = false;
     bool aimSlowdownMode = true;
+    bool aimNearestPriority = true;
     bool textGuiEnabled = false;
+    bool textGuiVerticalLine = true;
+    bool knockbackPredictionEnabled = false;
+    bool bowPredictionEnabled = false;
+    // These controls are enforced again inside GameBindings. They can never
+    // execute unless Minecraft owns an integrated single-player server, and
+    // the attack helper only accepts a living non-player hostile candidate.
+    bool localMobAuraEnabled = false;
+    bool localVelocityEnabled = false;
+    bool fullscreenImeFixEnabled = false;
     bool fireballEspEnabled = false;
     bool fireballEspFilled = true;
     bool longJumpEnabled = false;
@@ -88,6 +99,10 @@ struct FeatureSettings final {
     int aimMinimumDistance = 0;
     int aimMaximumDistance = 16;
     int aimFovDegrees = 90;
+    int textGuiAlignment = 2; // 0=left, 1=center, 2=right
+    int localMobReach = 4;
+    int localAttackDelayMs = 500;
+    int localVelocityPercent = 100;
     int clickGuiWidthPercent = 100;
     int clickGuiHeightPercent = 100;
     int clickGuiOpacity = 96;
@@ -241,6 +256,7 @@ private:
     void pollFallbackInput() noexcept;
     void captureBackdropTexture() noexcept;
     void renderInventoryBlur(float strength) noexcept;
+    void renderImeOverlay(float deltaSeconds, float uiScale) noexcept;
     void applyGuiScaleStyle(float scale, int fontIndex) noexcept;
     void enqueueFeatureToasts(const FeatureSettings& before,
                               const FeatureSettings& after) noexcept;
@@ -300,6 +316,7 @@ private:
     float m_animatedGuiScale = 1.25F;
     std::array<ImFont*, 4U> m_fonts{};
     std::array<ImFont*, 4U> m_boldFonts{};
+    ImFont* m_imeFont = nullptr;
     unsigned m_menuHotkey = VK_OEM_7;
     bool m_menuHotkeyDirty = false;
     bool m_guiScaleDirty = false;
@@ -312,7 +329,10 @@ private:
     int m_previousClickGuiPage = 0;
     float m_clickGuiPageProgress = 1.0F;
     float m_clickGuiNavPosition = 0.0F;
-    std::array<float, 16U> m_clickGuiNavHover{};
+    std::array<float, 19U> m_clickGuiNavHover{};
+    std::uint64_t m_lastImeRevision = 0U;
+    std::uint64_t m_lastImeActivityTick = 0U;
+    float m_imePanelProgress = 0.0F;
     float m_clickGuiThemeProgress = 0.0F;
     bool m_statsPanelTransformDirty = false;
     bool m_statsPanelDragging = false;
@@ -345,10 +365,10 @@ private:
     int m_blacklistResizeStartHeight = 100;
     bool m_safewalkHotkeyWasDown = false;
     std::array<bool, FeatureSettings::FeatureHotkeyCount> m_featureHotkeyWasDown{};
-    std::array<float, 14U> m_textGuiModuleProgress{};
-    std::array<float, 14U> m_textGuiModuleVelocity{};
-    std::array<std::array<float, 32U>, 14U> m_textGuiGlyphBrightness{};
-    std::array<std::array<float, 32U>, 14U> m_textGuiGlyphTargets{};
+    std::array<float, 18U> m_textGuiModuleProgress{};
+    std::array<float, 18U> m_textGuiModuleVelocity{};
+    std::array<std::array<float, 32U>, 18U> m_textGuiGlyphBrightness{};
+    std::array<std::array<float, 32U>, 18U> m_textGuiGlyphTargets{};
     std::uint64_t m_textGuiNextShuffleTick = 0U;
     bool m_textGuiGlyphsInitialized = false;
     bool m_scaffoldBlockedNoticeShown = false;
@@ -404,6 +424,8 @@ private:
     std::array<KnockbackVisual, GameSnapshot::MaxKnockbackTrajectories>
         m_knockbackVisuals{};
     std::uint64_t m_lastKnockbackGeneration = 0U;
+    BowTrajectory m_bowVisualTrajectory{};
+    bool m_bowVisualInitialized = false;
     std::uint64_t m_lastEntitySampleGeneration = 0U;
     float m_lastEntityPartialTicks = 0.0F;
     unsigned m_missedEntityTicks = 0U;

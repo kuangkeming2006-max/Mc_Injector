@@ -62,8 +62,15 @@ struct MappingDictionary final {
     std::string playerSignature;
     std::string livingName;
     std::string livingSignature;
+    // Hostile marker interface used by the hard single-player combat test.
+    // IsInstanceOf(IMob) is intentionally stricter than class-name heuristics.
+    std::string hostileName;
+    std::string hostileSignature;
     std::string entityName;
     std::string entitySignature;
+    // PlayerControllerMP::attackEntity accepts EntityPlayer rather than the
+    // client-only EntityPlayerSP subclass stored in playerSignature.
+    std::string entityPlayerSignature;
     std::string fireballName;
     std::string fireballSignature;
     std::string aabbName;
@@ -222,6 +229,7 @@ struct MappingDictionary final {
     std::string getCurrentServerData;
     std::string serverIpField;
     std::string playerControllerField;
+    std::string attackEntity;
     std::string currentItemField;
     std::string mainInventoryField;
     std::string getBlockFromItem;

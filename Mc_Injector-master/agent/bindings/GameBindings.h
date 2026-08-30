@@ -47,6 +47,8 @@ struct EntityMarker final {
     float maxHealth = 0.0F;
     double distance = 0.0;
     bool player = false;
+    bool hostile = false;
+    bool onGround = false;
     bool invisible = false;
     bool hasArmor = false;
     std::uint8_t protectionLevel = 0U;
@@ -194,12 +196,16 @@ struct GameSnapshot final {
 struct GameplaySettings final {
     bool safewalk = false;
     bool scaffold = false;
+    bool scaffoldSameLayerOnly = true;
     bool fly = false;
     bool bhop = false;
     bool bhopAutoJump = true;
     bool aimAssist = false;
     bool longJump = false;
     bool aimSlowdownMode = true;
+    bool aimNearestPriority = true;
+    bool localMobAura = false;
+    bool localVelocity = false;
     int safewalkReleaseDelayMs = 120;
     int safewalkEdgeSensitivity = 55;
     int safewalkMinimumPitch = -5;
@@ -211,6 +217,9 @@ struct GameplaySettings final {
     int aimMaximumDistance = 16;
     int aimFovDegrees = 90;
     int longJumpSpeedPercent = 100;
+    int localMobReach = 4;
+    int localAttackDelayMs = 500;
+    int localVelocityPercent = 100;
 };
 
 // Minecraft 1.8.9-only JNI binding cache. Only jclass global references and
@@ -437,6 +446,9 @@ private:
     float m_originalMouseSensitivity = 0.5F;
     std::uint64_t m_bowDrawStartedAt = 0U;
     std::uint64_t m_lastBowTrajectoryAt = 0U;
+    std::uint64_t m_lastLocalAttackTick = 0U;
+    float m_lastLocalHealth = -1.0F;
+    jint m_lastLocalEntityId = -1;
 };
 
 } // namespace mcoverlay

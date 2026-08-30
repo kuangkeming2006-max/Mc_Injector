@@ -107,6 +107,19 @@ std::uint32_t packFeatures(const FeatureSettings& settings) noexcept
         (settings.allowHypixelMovement ? 0x80000000U : 0U));
 }
 
+std::uint32_t packExtraFeatures(const FeatureSettings& settings) noexcept
+{
+    return static_cast<std::uint32_t>(
+        (settings.aimNearestPriority ? 0x01U : 0U) |
+        (settings.textGuiVerticalLine ? 0x02U : 0U) |
+        (settings.knockbackPredictionEnabled ? 0x04U : 0U) |
+        (settings.bowPredictionEnabled ? 0x08U : 0U) |
+        (settings.localMobAuraEnabled ? 0x10U : 0U) |
+        (settings.localVelocityEnabled ? 0x20U : 0U) |
+        (settings.scaffoldSameLayerOnly ? 0x40U : 0U) |
+        (settings.fullscreenImeFixEnabled ? 0x80U : 0U));
+}
+
 std::uint64_t packFeatureHotkeys(const FeatureSettings& settings,
                                  const std::size_t first) noexcept
 {
@@ -168,7 +181,12 @@ FeatureSettings unpackFeatures(const std::uint32_t bits,
                                 const int aimFovDegrees = 90,
                                 const int clickGuiWidthPercent = 100,
                                 const int clickGuiHeightPercent = 100,
-                                const int clickGuiOpacity = 96) noexcept
+                                const int clickGuiOpacity = 96,
+                                const std::uint32_t extraBits = 0x43U,
+                                const int textGuiAlignment = 2,
+                                const int localMobReach = 4,
+                                const int localAttackDelayMs = 500,
+                                const int localVelocityPercent = 100) noexcept
 {
     FeatureSettings s;
     s.espEnabled = (bits & 0x01U) != 0U;
@@ -258,6 +276,18 @@ FeatureSettings unpackFeatures(const std::uint32_t bits,
     s.clickGuiWidthPercent = std::clamp(clickGuiWidthPercent, 80, 150);
     s.clickGuiHeightPercent = std::clamp(clickGuiHeightPercent, 80, 150);
     s.clickGuiOpacity = std::clamp(clickGuiOpacity, 35, 100);
+    s.aimNearestPriority = (extraBits & 0x01U) != 0U;
+    s.textGuiVerticalLine = (extraBits & 0x02U) != 0U;
+    s.knockbackPredictionEnabled = (extraBits & 0x04U) != 0U;
+    s.bowPredictionEnabled = (extraBits & 0x08U) != 0U;
+    s.localMobAuraEnabled = (extraBits & 0x10U) != 0U;
+    s.localVelocityEnabled = (extraBits & 0x20U) != 0U;
+    s.scaffoldSameLayerOnly = (extraBits & 0x40U) != 0U;
+    s.fullscreenImeFixEnabled = (extraBits & 0x80U) != 0U;
+    s.textGuiAlignment = std::clamp(textGuiAlignment, 0, 2);
+    s.localMobReach = std::clamp(localMobReach, 3, 10);
+    s.localAttackDelayMs = std::clamp(localAttackDelayMs, 100, 1500);
+    s.localVelocityPercent = std::clamp(localVelocityPercent, 0, 100);
     return s;
 }
 
@@ -762,7 +792,12 @@ void AgentRuntime::telemetryMain() noexcept
                 m_featureChangedAimFovDegrees.load(std::memory_order_acquire),
                 m_featureChangedClickGuiWidthPercent.load(std::memory_order_acquire),
                 m_featureChangedClickGuiHeightPercent.load(std::memory_order_acquire),
-                m_featureChangedClickGuiOpacity.load(std::memory_order_acquire));
+                m_featureChangedClickGuiOpacity.load(std::memory_order_acquire),
+                m_featureChangedExtraBits.load(std::memory_order_acquire),
+                m_featureChangedTextGuiAlignment.load(std::memory_order_acquire),
+                m_featureChangedLocalMobReach.load(std::memory_order_acquire),
+                m_featureChangedLocalAttackDelayMs.load(std::memory_order_acquire),
+                m_featureChangedLocalVelocityPercent.load(std::memory_order_acquire));
             FixedLine<960U> line;
             if (line.append("FEATURE_STATE_CHANGED ") &&
                 line.appendInteger(settings.espEnabled ? 1 : 0) && line.append(' ') &&
@@ -843,7 +878,12 @@ void AgentRuntime::telemetryMain() noexcept
                 line.appendInteger(settings.aimFovDegrees) && line.append(' ') &&
                 line.appendInteger(settings.clickGuiWidthPercent) && line.append(' ') &&
                 line.appendInteger(settings.clickGuiHeightPercent) && line.append(' ') &&
-                line.appendInteger(settings.clickGuiOpacity) &&
+                line.appendInteger(settings.clickGuiOpacity) && line.append(' ') &&
+                line.appendInteger(packExtraFeatures(settings)) && line.append(' ') &&
+                line.appendInteger(settings.textGuiAlignment) && line.append(' ') &&
+                line.appendInteger(settings.localMobReach) && line.append(' ') &&
+                line.appendInteger(settings.localAttackDelayMs) && line.append(' ') &&
+                line.appendInteger(settings.localVelocityPercent) &&
                 m_ipc->sendLine(line.view())) {
                 sentFeatureChangedRevision = featureRevision;
             }
@@ -1162,6 +1202,15 @@ void AgentRuntime::queueFeatureChanged(const FeatureSettings& settings) noexcept
                                   std::memory_order_release);
     m_clickGuiOpacity.store(std::clamp(settings.clickGuiOpacity, 35, 100),
                             std::memory_order_release);
+    m_featureExtraBits.store(packExtraFeatures(settings), std::memory_order_release);
+    m_textGuiAlignment.store(std::clamp(settings.textGuiAlignment, 0, 2),
+                             std::memory_order_release);
+    m_localMobReach.store(std::clamp(settings.localMobReach, 3, 10),
+                          std::memory_order_release);
+    m_localAttackDelayMs.store(std::clamp(settings.localAttackDelayMs, 100, 1500),
+                               std::memory_order_release);
+    m_localVelocityPercent.store(std::clamp(settings.localVelocityPercent, 0, 100),
+                                 std::memory_order_release);
     m_textGuiColor.store(settings.textGuiColor & 0xFFFFFFU,
                          std::memory_order_release);
     m_textGuiX.store(std::clamp(settings.textGuiX, -1, 1000),
@@ -1269,6 +1318,18 @@ void AgentRuntime::queueFeatureChanged(const FeatureSettings& settings) noexcept
         std::clamp(settings.clickGuiHeightPercent, 80, 150), std::memory_order_relaxed);
     m_featureChangedClickGuiOpacity.store(
         std::clamp(settings.clickGuiOpacity, 35, 100), std::memory_order_relaxed);
+    m_featureChangedExtraBits.store(packExtraFeatures(settings),
+                                    std::memory_order_relaxed);
+    m_featureChangedTextGuiAlignment.store(
+        std::clamp(settings.textGuiAlignment, 0, 2), std::memory_order_relaxed);
+    m_featureChangedLocalMobReach.store(
+        std::clamp(settings.localMobReach, 3, 10), std::memory_order_relaxed);
+    m_featureChangedLocalAttackDelayMs.store(
+        std::clamp(settings.localAttackDelayMs, 100, 1500),
+        std::memory_order_relaxed);
+    m_featureChangedLocalVelocityPercent.store(
+        std::clamp(settings.localVelocityPercent, 0, 100),
+        std::memory_order_relaxed);
     m_featureChangedTextGuiColor.store(settings.textGuiColor & 0xFFFFFFU,
                                        std::memory_order_relaxed);
     m_featureChangedTextGuiX.store(std::clamp(settings.textGuiX, -1, 1000),
@@ -1422,6 +1483,11 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
         int clickGuiWidthPercent = 0;
         int clickGuiHeightPercent = 0;
         int clickGuiOpacity = 0;
+        std::uint32_t extraBits = 0U;
+        int textGuiAlignment = 0;
+        int localMobReach = 0;
+        int localAttackDelayMs = 0;
+        int localVelocityPercent = 0;
         bool featureTokensRead = true;
         for (std::string& token : tokens) {
             if (!(stream >> token)) {
@@ -1447,7 +1513,9 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
                >> fireballEspColor >> aimMinimumDistance
                >> aimMaximumDistance >> aimFovDegrees
                >> clickGuiWidthPercent >> clickGuiHeightPercent
-               >> clickGuiOpacity) ||
+               >> clickGuiOpacity >> extraBits >> textGuiAlignment
+               >> localMobReach >> localAttackDelayMs
+               >> localVelocityPercent) ||
             (stream >> trailing)) {
             (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE expected-thirty-two-flags-and-layout");
             return true;
@@ -1495,7 +1563,11 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
             bhopAirSpeedPercent < 10 || bhopAirSpeedPercent > 300 ||
             hypixelFontIndex < 0 || hypixelFontIndex > 3 ||
             nametagRange < 4 || nametagRange > 128 ||
-            nametagSizeIndex < 0 || nametagSizeIndex > 3) {
+            nametagSizeIndex < 0 || nametagSizeIndex > 3 ||
+            extraBits > 0xFFU || textGuiAlignment < 0 || textGuiAlignment > 2 ||
+            localMobReach < 3 || localMobReach > 10 ||
+            localAttackDelayMs < 100 || localAttackDelayMs > 1500 ||
+            localVelocityPercent < 0 || localVelocityPercent > 100) {
             (void)m_ipc->sendLine("ERROR BAD_FEATURE_STATE invalid-radius-bind-opacity-or-color");
             return true;
         }
@@ -1600,6 +1672,18 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
         settings.clickGuiWidthPercent = clickGuiWidthPercent;
         settings.clickGuiHeightPercent = clickGuiHeightPercent;
         settings.clickGuiOpacity = clickGuiOpacity;
+        settings.aimNearestPriority = (extraBits & 0x01U) != 0U;
+        settings.textGuiVerticalLine = (extraBits & 0x02U) != 0U;
+        settings.knockbackPredictionEnabled = (extraBits & 0x04U) != 0U;
+        settings.bowPredictionEnabled = (extraBits & 0x08U) != 0U;
+        settings.localMobAuraEnabled = (extraBits & 0x10U) != 0U;
+        settings.localVelocityEnabled = (extraBits & 0x20U) != 0U;
+        settings.scaffoldSameLayerOnly = (extraBits & 0x40U) != 0U;
+        settings.fullscreenImeFixEnabled = (extraBits & 0x80U) != 0U;
+        settings.textGuiAlignment = textGuiAlignment;
+        settings.localMobReach = localMobReach;
+        settings.localAttackDelayMs = localAttackDelayMs;
+        settings.localVelocityPercent = localVelocityPercent;
         m_featureBits.store(packFeatures(settings), std::memory_order_release);
         m_bedDefenseRadius.store(defenseRadius, std::memory_order_release);
         m_bedThreatRadius.store(threatRadius, std::memory_order_release);
@@ -1656,6 +1740,11 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
         m_clickGuiWidthPercent.store(clickGuiWidthPercent, std::memory_order_release);
         m_clickGuiHeightPercent.store(clickGuiHeightPercent, std::memory_order_release);
         m_clickGuiOpacity.store(clickGuiOpacity, std::memory_order_release);
+        m_featureExtraBits.store(extraBits, std::memory_order_release);
+        m_textGuiAlignment.store(textGuiAlignment, std::memory_order_release);
+        m_localMobReach.store(localMobReach, std::memory_order_release);
+        m_localAttackDelayMs.store(localAttackDelayMs, std::memory_order_release);
+        m_localVelocityPercent.store(localVelocityPercent, std::memory_order_release);
         (void)m_ipc->sendLine("FEATURE_STATE_APPLIED");
         return true;
     }
@@ -2145,7 +2234,12 @@ void AgentRuntime::beforeSwapBuffers(HDC const deviceContext)
         m_aimFovDegrees.load(std::memory_order_acquire),
         m_clickGuiWidthPercent.load(std::memory_order_acquire),
         m_clickGuiHeightPercent.load(std::memory_order_acquire),
-        m_clickGuiOpacity.load(std::memory_order_acquire));
+        m_clickGuiOpacity.load(std::memory_order_acquire),
+        m_featureExtraBits.load(std::memory_order_acquire),
+        m_textGuiAlignment.load(std::memory_order_acquire),
+        m_localMobReach.load(std::memory_order_acquire),
+        m_localAttackDelayMs.load(std::memory_order_acquire),
+        m_localVelocityPercent.load(std::memory_order_acquire));
     const bool interactiveNow = m_interactive.load(std::memory_order_acquire);
     if (env != nullptr) {
         if (interactiveNow && !m_gameInputReleased) {
@@ -2202,18 +2296,23 @@ void AgentRuntime::beforeSwapBuffers(HDC const deviceContext)
     // New local diagnostics are fail-closed. A warning cannot be used as an
     // override: only an integrated single-player server may execute them.
     if (!snapshot.integratedSinglePlayer &&
-        (activeFeatures.longJumpEnabled || activeFeatures.fireballEspEnabled)) {
+        (activeFeatures.longJumpEnabled || activeFeatures.fireballEspEnabled ||
+         activeFeatures.localMobAuraEnabled ||
+         activeFeatures.localVelocityEnabled)) {
         activeFeatures.longJumpEnabled = false;
         activeFeatures.fireballEspEnabled = false;
+        activeFeatures.localMobAuraEnabled = false;
+        activeFeatures.localVelocityEnabled = false;
         queueFeatureChanged(activeFeatures);
         m_bindings->enqueueDebugChatLine(
-            "[Local Guard] LongJump/Fireball ESP require an integrated single-player world.");
+            "[Local Guard] Local diagnostics require an integrated single-player world.");
     }
 
     if (env != nullptr) {
         GameplaySettings gameplay{};
         gameplay.safewalk = activeFeatures.safewalkEnabled && !interactiveNow;
         gameplay.scaffold = activeFeatures.scaffoldEnabled && !interactiveNow;
+        gameplay.scaffoldSameLayerOnly = activeFeatures.scaffoldSameLayerOnly;
         gameplay.fly = activeFeatures.flyEnabled && !interactiveNow;
         gameplay.bhop = activeFeatures.bhopEnabled && !interactiveNow;
         gameplay.bhopAutoJump = activeFeatures.bhopAutoJump;
@@ -2221,6 +2320,11 @@ void AgentRuntime::beforeSwapBuffers(HDC const deviceContext)
         gameplay.longJump = activeFeatures.longJumpEnabled && !interactiveNow &&
                             snapshot.integratedSinglePlayer;
         gameplay.aimSlowdownMode = activeFeatures.aimSlowdownMode;
+        gameplay.aimNearestPriority = activeFeatures.aimNearestPriority;
+        gameplay.localMobAura = activeFeatures.localMobAuraEnabled &&
+            !interactiveNow && snapshot.integratedSinglePlayer;
+        gameplay.localVelocity = activeFeatures.localVelocityEnabled &&
+            !interactiveNow && snapshot.integratedSinglePlayer;
         gameplay.safewalkReleaseDelayMs = activeFeatures.safewalkReleaseDelayMs;
         gameplay.safewalkEdgeSensitivity = activeFeatures.safewalkEdgeSensitivity;
         gameplay.safewalkMinimumPitch = activeFeatures.safewalkMinimumPitch;
@@ -2232,6 +2336,9 @@ void AgentRuntime::beforeSwapBuffers(HDC const deviceContext)
         gameplay.aimMaximumDistance = activeFeatures.aimMaximumDistance;
         gameplay.aimFovDegrees = activeFeatures.aimFovDegrees;
         gameplay.longJumpSpeedPercent = activeFeatures.longJumpSpeedPercent;
+        gameplay.localMobReach = activeFeatures.localMobReach;
+        gameplay.localAttackDelayMs = activeFeatures.localAttackDelayMs;
+        gameplay.localVelocityPercent = activeFeatures.localVelocityPercent;
         (void)m_bindings->updateGameplay(env, gameplay, snapshot,
                                          tickMilliseconds);
     }

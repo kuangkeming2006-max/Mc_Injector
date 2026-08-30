@@ -26,6 +26,7 @@ struct GameBindings::BindingCache final {
     jclass minecraftClass = nullptr;
     jclass playerClass = nullptr;
     jclass livingClass = nullptr;
+    jclass hostileClass = nullptr;
     jclass entityClass = nullptr;
     jclass fireballClass = nullptr;
     jclass aabbClass = nullptr;
@@ -125,6 +126,7 @@ struct GameBindings::BindingCache final {
     jmethodID getIdFromBlock = nullptr;
     jmethodID getFacingByIndex = nullptr;
     jmethodID onPlayerRightClick = nullptr;
+    jmethodID attackEntity = nullptr;
     jmethodID vec3Constructor = nullptr;
     jfieldID minX = nullptr;
     jfieldID minY = nullptr;
@@ -630,6 +632,7 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
     jclass gameSettings = nullptr;
     jclass keyBinding = nullptr;
     jclass playerController = nullptr;
+    jclass hostile = nullptr;
     jclass serverData = nullptr;
     jclass itemBlock = nullptr;
     jclass enumFacing = nullptr;
@@ -682,6 +685,8 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
 
     const bool fireballClassLoaded = loadFeatureClass(
         fireball, profile.fireballName, "Fireball ESP", "EntityFireball");
+    const bool hostileClassLoaded = loadFeatureClass(
+        hostile, profile.hostileName, "Local combat", "IMob");
 
     const bool sidebarClassesLoaded =
         loadFeatureClass(scoreboard, profile.scoreboardName, "Sidebar", "Scoreboard") &&
@@ -1315,6 +1320,12 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
                 return env->GetMethodID(playerController,
                     profile.onPlayerRightClick.c_str(),
                     rightClickSignature.c_str());
+            }) &&
+            lookupRequired(env, candidate.attackEntity, [&] {
+                return env->GetMethodID(playerController,
+                    profile.attackEntity.c_str(),
+                    (std::string("(") + profile.entityPlayerSignature +
+                     profile.entitySignature + ")V").c_str());
             });
     }
     if (!movementCapability) {
@@ -1331,6 +1342,7 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
         candidate.getFacingByIndex = nullptr;
         candidate.vec3Constructor = nullptr;
         candidate.onPlayerRightClick = nullptr;
+        candidate.attackEntity = nullptr;
         log::info(std::string("Movement capability disabled for profile: ") +
                   profile.label + " (auxiliary mapping did not resolve).");
     }
@@ -1388,6 +1400,8 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
     }
     if (fireballClassLoaded && !makeGlobal(fireball, candidate.fireballClass))
         candidate.fireballClass = nullptr;
+    if (hostileClassLoaded && !makeGlobal(hostile, candidate.hostileClass))
+        candidate.hostileClass = nullptr;
 
     bool tabCapability = tabClassesLoaded &&
         !profile.getNetHandler.empty() && !profile.getPlayerInfoMap.empty() &&
@@ -1512,6 +1526,7 @@ bool GameBindings::resolveProfile(JNIEnv* const env,
             candidate.getFacingByIndex = nullptr;
             candidate.vec3Constructor = nullptr;
             candidate.onPlayerRightClick = nullptr;
+            candidate.attackEntity = nullptr;
         }
     }
 
@@ -1901,6 +1916,13 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
     BindingCache* const cache =
         m_resolutionPhase.load(std::memory_order_acquire) == ResolutionPhase::Resolved
         ? m_cache.get() : nullptr;
+    // These two diagnostics are intentionally impossible to activate on a
+    // remote server. The guard is duplicated here (below the UI/runtime
+    // guard) so a malformed IPC frame still cannot broaden their scope.
+    const bool localWorld = snapshot.integratedSinglePlayer &&
+        !snapshot.hypixelServer;
+    const bool localMobAuraRequested = requested.localMobAura && localWorld;
+    const bool localVelocityRequested = requested.localVelocity && localWorld;
     const bool aimCapability = cache != nullptr &&
         cache->minecraftClass != nullptr && cache->isMainThread != nullptr &&
         cache->playerField != nullptr && cache->gameSettingsField != nullptr &&
@@ -1942,12 +1964,15 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
         cache->mouseSensitivity != nullptr && cache->rotationYaw != nullptr &&
         cache->onGround != nullptr && cache->jump != nullptr;
     const bool movementRequested = requested.safewalk || requested.scaffold ||
-        requested.fly || requested.bhop || requested.longJump;
+        requested.fly || requested.bhop || requested.longJump ||
+        localMobAuraRequested || localVelocityRequested;
     const bool anyRequested = movementRequested || requested.aimAssist;
     if ((!anyRequested && !m_aimSensitivityModified) ||
         (!aimCapability && !movementCapability)) {
         (void)releaseForcedSneak();
         m_scaffoldPlatformYValid = false;
+        m_lastLocalHealth = -1.0F;
+        m_lastLocalEntityId = -1;
         return false;
     }
     if (env->PushLocalFrame(96) < 0) {
@@ -1983,6 +2008,27 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
     const jfloat yaw = env->GetFloatField(player, cache->rotationYaw);
     if (env->ExceptionCheck() == JNI_TRUE) return fail();
 
+    if (localVelocityRequested && movementCapability) {
+        const jfloat localHealth = env->CallFloatMethod(player, cache->getHealth);
+        if (env->ExceptionCheck() == JNI_TRUE) return fail();
+        if (m_lastLocalEntityId == snapshot.entityId &&
+            m_lastLocalHealth >= 0.0F &&
+            localHealth + 0.01F < m_lastLocalHealth) {
+            const double scale = static_cast<double>(std::clamp(
+                requested.localVelocityPercent, 0, 100)) / 100.0;
+            for (const jfieldID field : cache->motionFields) {
+                const jdouble motion = env->GetDoubleField(player, field);
+                env->SetDoubleField(player, field, motion * scale);
+            }
+            if (env->ExceptionCheck() == JNI_TRUE) return fail();
+        }
+        m_lastLocalHealth = localHealth;
+        m_lastLocalEntityId = snapshot.entityId;
+    } else {
+        m_lastLocalHealth = -1.0F;
+        m_lastLocalEntityId = snapshot.entityId;
+    }
+
     // Aim assistance needs only the player rotation and GameSettings
     // sensitivity mappings. It must not inherit Safewalk/Scaffold's block,
     // inventory or controller requirements: transformed clients commonly
@@ -2003,12 +2049,50 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
         double bestScore = std::numeric_limits<double>::max();
         float desiredYaw = yaw;
         float desiredPitch = pitch;
+        bool crosshairIntersectsTarget = false;
         const auto wrap = [](double value) noexcept {
             while (value > 180.0) value -= 360.0;
             while (value < -180.0) value += 360.0;
             return value;
         };
         constexpr double aimPi = 3.14159265358979323846;
+        const double partialTicks = std::clamp(
+            static_cast<double>(snapshot.camera.partialTicks), 0.0, 1.0);
+        // RenderManager's render position is already the current frame's
+        // interpolated camera origin. Falling back to the 20 TPS player sample
+        // keeps the capability usable when ActiveRenderInfo is unavailable.
+        const double eyeX = snapshot.camera.valid
+            ? snapshot.camera.renderX : snapshot.x;
+        const double eyeY = (snapshot.camera.valid
+            ? snapshot.camera.renderY : snapshot.y) + 1.62;
+        const double eyeZ = snapshot.camera.valid
+            ? snapshot.camera.renderZ : snapshot.z;
+        const double yawRadians = static_cast<double>(yaw) * aimPi / 180.0;
+        const double pitchRadians = static_cast<double>(pitch) * aimPi / 180.0;
+        const double rayX = -std::sin(yawRadians) * std::cos(pitchRadians);
+        const double rayY = -std::sin(pitchRadians);
+        const double rayZ = std::cos(yawRadians) * std::cos(pitchRadians);
+        const auto rayHitsBounds = [&](const AxisAlignedBox& bounds,
+                                       const double limit) noexcept {
+            double entry = 0.0;
+            double exit = limit;
+            const auto clip = [&](const double origin, const double direction,
+                                  const double minimum,
+                                  const double maximum) noexcept {
+                if (std::abs(direction) < 1.0e-9)
+                    return origin >= minimum && origin <= maximum;
+                double first = (minimum - origin) / direction;
+                double second = (maximum - origin) / direction;
+                if (first > second) std::swap(first, second);
+                entry = std::max(entry, first);
+                exit = std::min(exit, second);
+                return entry <= exit;
+            };
+            return clip(eyeX, rayX, bounds.minX, bounds.maxX) &&
+                   clip(eyeY, rayY, bounds.minY, bounds.maxY) &&
+                   clip(eyeZ, rayZ, bounds.minZ, bounds.maxZ) &&
+                   exit >= 0.0 && entry <= limit;
+        };
         if (requested.aimAssist) {
             for (std::uint32_t index = 0U;
                  index < snapshot.entityMarkerCount; ++index) {
@@ -2021,29 +2105,36 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
                 if (!validPlayer || entity.entityId == snapshot.entityId ||
                     (snapshot.ownTeam != 'u' &&
                      entity.teamColor == snapshot.ownTeam)) continue;
-                // A short extrapolation hides the visible 20 Hz entity-step
-                // cadence without inventing a server-side rotation. The local
-                // player's real view is still the only state modified.
-                const double targetX = entity.currentX +
-                    (entity.currentX - entity.previousX) * 0.18;
-                const double targetY = entity.currentY +
-                    (entity.currentY - entity.previousY) * 0.18;
-                const double targetZ = entity.currentZ +
-                    (entity.currentZ - entity.previousZ) * 0.18;
-                const double dx = targetX - snapshot.x;
-                const double dz = targetZ - snapshot.z;
-                // Aim at a stable torso point derived from the entity origin.
-                // AABB min/max can change abruptly at pose/collision edges and
-                // made the desired angle alternate on consecutive snapshots.
+                // Interpolate at the exact render partial tick, the same way
+                // the 240 Hz ESP path does. This removes the old 20 TPS stair
+                // step and keeps a 100% lock attached to one visual point.
+                const double targetX = entity.previousX +
+                    (entity.currentX - entity.previousX) * partialTicks;
+                const double targetY = entity.previousY +
+                    (entity.currentY - entity.previousY) * partialTicks;
+                const double targetZ = entity.previousZ +
+                    (entity.currentZ - entity.previousZ) * partialTicks;
+                const double shiftX = targetX - entity.currentX;
+                const double shiftY = targetY - entity.currentY;
+                const double shiftZ = targetZ - entity.currentZ;
+                const AxisAlignedBox renderBounds{
+                    entity.bounds.minX + shiftX, entity.bounds.minY + shiftY,
+                    entity.bounds.minZ + shiftZ, entity.bounds.maxX + shiftX,
+                    entity.bounds.maxY + shiftY, entity.bounds.maxZ + shiftZ};
+                const double dx = targetX - eyeX;
+                const double dz = targetZ - eyeZ;
                 const double entityHeight = std::clamp(
                     entity.bounds.maxY - entity.bounds.minY, 0.6, 2.4);
-                const double dy = targetY + entityHeight * 0.62 -
-                    (snapshot.y + 1.62);
+                // 0.90 * the standing 1.8-block player height is 1.62: target
+                // eye/head height exactly matches the local eye on level ground.
+                const double dy = targetY + entityHeight * 0.90 - eyeY;
                 const double horizontal = std::hypot(dx, dz);
                 if (horizontal < 0.1) continue;
                 const double distance = std::hypot(horizontal, dy);
                 if (distance < minimumDistance || distance > maximumDistance)
                     continue;
+                if (rayHitsBounds(renderBounds, maximumDistance))
+                    crosshairIntersectsTarget = true;
                 const float targetYaw = static_cast<float>(
                     std::atan2(dz, dx) * 180.0 / aimPi - 90.0);
                 const float targetPitch = static_cast<float>(
@@ -2052,11 +2143,13 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
                     wrap(targetYaw - yaw),
                     static_cast<double>(targetPitch - pitch));
                 if (angle <= maximumAngle) {
-                    // Retain a still-valid target with mild hysteresis so two
-                    // nearby entities cannot make the view alternate every
-                    // sample. Angle remains the dominant selection metric.
-                    double score = angle + distance * 0.025;
-                    if (entity.entityId == m_aimTargetEntityId) score *= 0.46;
+                    // Nearest mode makes distance the primary key. The normal
+                    // mode remains crosshair-first with restrained stickiness.
+                    double score = requested.aimNearestPriority
+                        ? distance + angle * 0.001
+                        : angle + distance * 0.025;
+                    if (!requested.aimNearestPriority &&
+                        entity.entityId == m_aimTargetEntityId) score *= 0.46;
                     if (score >= bestScore) continue;
                     bestScore = score;
                     target = &entity;
@@ -2067,12 +2160,15 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
         }
         m_aimTargetEntityId = target == nullptr ? -1 : target->entityId;
         if (requested.aimAssist && requested.aimSlowdownMode) {
-            if (target != nullptr && !m_aimSensitivityModified) {
+            // Slowdown is an actual ray/AABB gate, not merely "some target is
+            // inside the FOV". Mouse sensitivity changes only while the
+            // crosshair ray is physically inside an eligible hitbox.
+            if (crosshairIntersectsTarget && !m_aimSensitivityModified) {
                 m_originalMouseSensitivity = env->GetFloatField(
                     settings, cache->mouseSensitivity);
                 m_aimSensitivityModified = env->ExceptionCheck() != JNI_TRUE;
             }
-            if (target != nullptr && m_aimSensitivityModified) {
+            if (crosshairIntersectsTarget && m_aimSensitivityModified) {
                 env->SetFloatField(settings, cache->mouseSensitivity,
                     m_originalMouseSensitivity * static_cast<float>(std::clamp(
                         requested.aimSlowdownPercent, 5, 95)) / 100.0F);
@@ -2093,6 +2189,18 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
                         m_lastGameplayTick) / 1000.0, 0.001, 0.10);
                 const double speed = static_cast<double>(std::clamp(
                     requested.aimSpeedPercent, 1, 100)) / 100.0;
+                if (requested.aimSpeedPercent >= 100) {
+                    // True lock-on: no exponential lag, dead zone or per-tick
+                    // cap. updateGameplay() is called from every SwapBuffers
+                    // frame, so a 240 Hz presentation produces 240 Hz rotation.
+                    env->SetFloatField(player, cache->rotationYaw, desiredYaw);
+                    env->SetFloatField(player, cache->rotationPitch,
+                        std::clamp(desiredPitch, -90.0F, 90.0F));
+                    m_aimFilteredYaw = desiredYaw;
+                    m_aimFilteredPitch = desiredPitch;
+                    m_aimFilteredTargetEntityId = target->entityId;
+                    m_aimFilterInitialized = true;
+                } else {
                 // Squared response makes low settings genuinely gentle. A
                 // per-second turn cap prevents any frame from snapping even
                 // after a hitch, while the exponential term stays frame-rate
@@ -2125,7 +2233,7 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
                 // A small angular dead zone prevents quantized mouse/entity
                 // updates from bouncing between opposite corrections once the
                 // crosshair is already settled on the target.
-                constexpr double settleDeadZone = 0.22;
+                constexpr double settleDeadZone = 0.035;
                 const double yawStep = std::clamp(
                     std::abs(yawError) <= settleDeadZone ? 0.0 : yawError * alpha,
                     -maximumStep, maximumStep);
@@ -2137,6 +2245,7 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
                 env->SetFloatField(player, cache->rotationPitch,
                     std::clamp(pitch + static_cast<float>(pitchStep),
                                -90.0F, 90.0F));
+                }
             }
             if (!requested.aimAssist || target == nullptr) {
                 m_aimFilterInitialized = false;
@@ -2157,6 +2266,63 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
 
     jobject world = env->GetObjectField(minecraft, cache->worldField);
     if (env->ExceptionCheck() == JNI_TRUE || world == nullptr) return fail();
+
+    if (localMobAuraRequested && cache->hostileClass != nullptr &&
+        cache->attackEntity != nullptr &&
+        tickMilliseconds - m_lastLocalAttackTick >=
+            static_cast<std::uint64_t>(std::clamp(
+                requested.localAttackDelayMs, 100, 1500))) {
+        const EntityMarker* nearest = nullptr;
+        const double reach = static_cast<double>(std::clamp(
+            requested.localMobReach, 3, 10));
+        for (std::uint32_t index = 0U;
+             index < snapshot.entityMarkerCount; ++index) {
+            const EntityMarker& marker = snapshot.entityMarkers[index];
+            if (!marker.hostile || marker.player || marker.health <= 0.0F ||
+                marker.distance > reach) continue;
+            if (nearest == nullptr || marker.distance < nearest->distance)
+                nearest = &marker;
+        }
+        if (nearest != nullptr) {
+            jobject loaded = cache->loadedEntitiesField != nullptr
+                ? env->GetObjectField(world, cache->loadedEntitiesField)
+                : env->CallObjectMethod(world, cache->getLoadedEntities);
+            jobjectArray entities = loaded == nullptr ? nullptr :
+                static_cast<jobjectArray>(env->CallObjectMethod(
+                    loaded, cache->listToArray));
+            if (env->ExceptionCheck() == JNI_TRUE) return fail();
+            jobject targetObject = nullptr;
+            if (entities != nullptr) {
+                const jsize count = std::min<jsize>(
+                    env->GetArrayLength(entities), 512);
+                for (jsize index = 0; index < count; ++index) {
+                    jobject candidate = env->GetObjectArrayElement(entities, index);
+                    if (candidate == nullptr) continue;
+                    const bool hostile = env->IsInstanceOf(
+                        candidate, cache->hostileClass) == JNI_TRUE;
+                    const jint id = hostile ? env->CallIntMethod(
+                        candidate, cache->getEntityId) : -1;
+                    if (env->ExceptionCheck() == JNI_TRUE) return fail();
+                    if (hostile && id == nearest->entityId &&
+                        env->IsInstanceOf(candidate, cache->playerClass) != JNI_TRUE) {
+                        targetObject = candidate;
+                        break;
+                    }
+                    env->DeleteLocalRef(candidate);
+                }
+            }
+            if (targetObject != nullptr) {
+                jobject controller = env->GetObjectField(
+                    minecraft, cache->playerControllerField);
+                if (env->ExceptionCheck() == JNI_TRUE || controller == nullptr)
+                    return fail();
+                env->CallVoidMethod(controller, cache->attackEntity,
+                                    player, targetObject);
+                if (env->ExceptionCheck() == JNI_TRUE) return fail();
+                m_lastLocalAttackTick = tickMilliseconds;
+            }
+        }
+    }
     jobject sneakBinding = env->GetObjectField(settings, cache->keyBindSneakField);
     if (env->ExceptionCheck() == JNI_TRUE || sneakBinding == nullptr) return fail();
     const jint keyCode = env->CallIntMethod(sneakBinding, cache->getKeyCode);
@@ -2215,79 +2381,54 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
         player, cache->motionFields[2U]);
     if (env->ExceptionCheck() == JNI_TRUE) return fail();
 
-    const double sensitivity = static_cast<double>(std::clamp(
+    const double edgeTiming = static_cast<double>(std::clamp(
         requested.safewalkEdgeSensitivity, 0, 100)) / 100.0;
-    // Preview a fraction of Minecraft's already-computed motion. At the low
-    // end we still look far enough ahead to set sneak before the next physics
-    // tick; at the high end the probe spans over two ticks. Together with the
-    // configurable unsupported-corner threshold below this covers a much
-    // wider late/early range without ever waiting until the player is airborne.
-    const double previewFraction = 0.34 + sensitivity * sensitivity * 1.86;
-    const double fallbackStep = magnitude > 0.001
-        ? 0.012 + sensitivity * sensitivity * 0.10 : 0.0;
+    // Mirror vanilla's maybeBackOffFromEdge idea: test a horizontally inset
+    // version of the player's *whole* AABB one step below, rather than four
+    // independent corners. Any remaining overlap is valid support. A larger
+    // inset lets the player move closer to the real 0.6-block body edge before
+    // crouching, while never waiting until the live AABB is unsupported.
+    const double inset = 0.035 + edgeTiming * 0.245;
+    // Sample the movement Minecraft already calculated for the imminent tick.
+    // At the latest setting a slightly shorter preview avoids the old overly
+    // conservative feel; at the early setting one full tick is protected.
+    const double preview = 1.0 - edgeTiming * 0.35;
+    const double fallback = magnitude > 0.001 ? 0.018 : 0.0;
     const double projectedX = std::abs(actualMotionX) > 0.001
-        ? actualMotionX * previewFraction : directionX * fallbackStep;
+        ? actualMotionX * preview : directionX * fallback;
     const double projectedZ = std::abs(actualMotionZ) > 0.001
-        ? actualMotionZ * previewFraction : directionZ * fallbackStep;
-    constexpr double probeInset = 0.018;
-    const std::array<int, 2U> supportX{
-        static_cast<int>(std::floor(minX + projectedX + probeInset)),
-        static_cast<int>(std::floor(maxX + projectedX - probeInset))};
-    const std::array<int, 2U> supportZ{
-        static_cast<int>(std::floor(minZ + projectedZ + probeInset)),
-        static_cast<int>(std::floor(maxZ + projectedZ - probeInset))};
+        ? actualMotionZ * preview : directionZ * fallback;
+    const double probeMinX = minX + projectedX + inset;
+    const double probeMaxX = maxX + projectedX - inset;
+    const double probeMinZ = minZ + projectedZ + inset;
+    const double probeMaxZ = maxZ + projectedZ - inset;
     const int supportY = static_cast<int>(std::floor(minY - 0.06));
-    std::uint8_t immediateAirMask = 0U;
-    std::uint8_t deepVoidMask = 0U;
-    std::uint8_t bit = 1U;
-    for (const int x : supportX) {
-        for (const int z : supportZ) {
+    const int firstX = static_cast<int>(std::floor(probeMinX + 1.0e-6));
+    const int lastX = static_cast<int>(std::floor(probeMaxX - 1.0e-6));
+    const int firstZ = static_cast<int>(std::floor(probeMinZ + 1.0e-6));
+    const int lastZ = static_cast<int>(std::floor(probeMaxZ - 1.0e-6));
+    bool hasProjectedSupport = false;
+    for (int x = firstX; x <= lastX && !hasProjectedSupport; ++x) {
+        for (int z = firstZ; z <= lastZ; ++z) {
             jobject position = env->NewObject(cache->blockPosClass,
-                                              cache->blockPosConstructor,
-                                              static_cast<jint>(x),
-                                              static_cast<jint>(supportY),
-                                              static_cast<jint>(z));
+                cache->blockPosConstructor, static_cast<jint>(x),
+                static_cast<jint>(supportY), static_cast<jint>(z));
             if (env->ExceptionCheck() == JNI_TRUE || position == nullptr)
                 return fail();
-            const jboolean air = env->CallBooleanMethod(world, cache->isAirBlock,
-                                                        position);
+            const jboolean air = env->CallBooleanMethod(
+                world, cache->isAirBlock, position);
             if (env->ExceptionCheck() == JNI_TRUE) return fail();
-            if (air == JNI_TRUE) {
-                immediateAirMask = static_cast<std::uint8_t>(immediateAirMask | bit);
-                jobject deepPosition = env->NewObject(cache->blockPosClass,
-                    cache->blockPosConstructor, static_cast<jint>(x),
-                    static_cast<jint>(supportY - 1), static_cast<jint>(z));
-                if (env->ExceptionCheck() == JNI_TRUE || deepPosition == nullptr)
-                    return fail();
-                const jboolean deepAir = env->CallBooleanMethod(
-                    world, cache->isAirBlock, deepPosition);
-                if (env->ExceptionCheck() == JNI_TRUE) return fail();
-                if (deepAir == JNI_TRUE)
-                    deepVoidMask = static_cast<std::uint8_t>(deepVoidMask | bit);
+            if (air != JNI_TRUE) {
+                hasProjectedSupport = true;
+                break;
             }
-            bit = static_cast<std::uint8_t>(bit << 1U);
         }
     }
-
-    const auto countBits = [](std::uint8_t value) noexcept {
-        int result = 0;
-        for (; value != 0U; value = static_cast<std::uint8_t>(value >> 1U))
-            result += static_cast<int>(value & 1U);
-        return result;
-    };
-    const std::uint8_t unsafeMask = static_cast<std::uint8_t>(
-        immediateAirMask & deepVoidMask);
-    const int unsafeCorners = countBits(unsafeMask);
-    // 0% requires all four projected corners to be over a two-block void;
-    // 100% needs only one. Intermediate values cover the old conservative
-    // behaviour as well as a late, edge-hugging mode while remaining safe.
-    const int requiredUnsafeCorners = std::clamp(
-        4 - static_cast<int>(std::floor(sensitivity * 3.999)), 1, 4);
-    const bool supportRestored = unsafeCorners < requiredUnsafeCorners;
-    const bool atEdge = unsafeCorners >= requiredUnsafeCorners && onGround;
+    const bool supportRestored = hasProjectedSupport;
+    const bool atEdge = !hasProjectedSupport && onGround;
     const bool pitchAllowsSafewalk = pitch >= static_cast<float>(std::clamp(
         requested.safewalkMinimumPitch, -90, 90));
-    m_safewalkSupportMask = deepVoidMask;
+    m_safewalkSupportMask = hasProjectedSupport ? 0U : 0x0FU;
 
     if (m_safewalkSneakForced && supportRestored &&
         m_safewalkReleaseAt == 0U) {
@@ -2446,7 +2587,10 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
             // Safety layer one: repair the cells immediately beneath the live
             // collision footprint, even with no movement key held. This is the
             // path that catches residual sprint/jump inertia and vertical jumps.
-            addFootprintAt(centerX, supportLayer, centerZ);
+            if (!requested.scaffoldSameLayerOnly ||
+                supportLayer == m_scaffoldPlatformY) {
+                addFootprintAt(centerX, supportLayer, centerZ);
+            }
             if (supportLayer != m_scaffoldPlatformY)
                 addFootprintAt(centerX, m_scaffoldPlatformY, centerZ);
 
@@ -2531,7 +2675,8 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
 
     m_lastGameplayTick = tickMilliseconds;
     return finish(m_safewalkSneakForced || requested.scaffold || requested.fly ||
-                  requested.bhop || requested.aimAssist || requested.longJump);
+                  requested.bhop || requested.aimAssist || requested.longJump ||
+                  localMobAuraRequested || localVelocityRequested);
 }
 
 void GameBindings::enqueueDebugChatLine(const std::string_view line) noexcept
@@ -3583,6 +3728,8 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
             marker.motionY = env->GetDoubleField(entity, cache->motionFields[1U]);
             marker.motionZ = env->GetDoubleField(entity, cache->motionFields[2U]);
         }
+        if (cache->onGround != nullptr)
+            marker.onGround = env->GetBooleanField(entity, cache->onGround) == JNI_TRUE;
         const bool failed = env->ExceptionCheck() == JNI_TRUE;
         if (failed) env->ExceptionClear();
         env->DeleteLocalRef(entityBounds);
@@ -3752,6 +3899,12 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
     // fixed 128-marker cap and 20 Hz cadence are both deterministic; smooth
     // motion is reconstructed in OverlayRenderer from previous/current tick
     // coordinates and the per-frame Timer.renderPartialTicks value.
+    // Preserve the previous 20 TPS sample before replacing the marker array.
+    // Knockback prediction uses the transition (health loss + new airborne
+    // impulse), never a single velocity threshold, so ordinary jumping and
+    // whiffed attacks cannot create a trajectory.
+    const auto previousEntityMarkers = m_snapshot.entityMarkers;
+    const std::uint32_t previousEntityMarkerCount = m_snapshot.entityMarkerCount;
     if (singlePlayer == JNI_TRUE && loadedEntities != nullptr && loadedEntityCount > 0) {
         jobject playerList = env->GetObjectField(world, cache->playerEntities);
         jobjectArray playerObjects = playerList == nullptr ? nullptr :
@@ -3779,6 +3932,8 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
                 if (entity == nullptr) continue;
                 const bool isLocalPlayer = env->IsSameObject(entity, player) == JNI_TRUE;
                 const bool isLiving = env->IsInstanceOf(entity, cache->livingClass) == JNI_TRUE;
+                const bool isHostile = cache->hostileClass != nullptr &&
+                    env->IsInstanceOf(entity, cache->hostileClass) == JNI_TRUE;
                 const bool isFireball = cache->fireballClass != nullptr &&
                     env->IsInstanceOf(entity, cache->fireballClass) == JNI_TRUE;
                 if (env->ExceptionCheck() == JNI_TRUE) env->ExceptionClear();
@@ -3786,6 +3941,7 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
                     EntityMarker marker;
                     if (readEntityMarker(entity, marker, isLiving)) {
                         marker.fireball = isFireball;
+                        marker.hostile = isHostile;
                         if (playerObjects != nullptr) {
                             const jsize playerLimit = std::min<jsize>(
                                 env->GetArrayLength(playerObjects), 64);
@@ -3941,11 +4097,28 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
             const EntityMarker& marker = m_snapshot.entityMarkers[markerIndex];
             const double horizontalImpulse = std::hypot(marker.motionX,
                                                         marker.motionZ);
-            // Ordinary walking never has this upward impulse. Requiring both
-            // components prevents a trajectory from appearing for every
-            // moving entity and makes one prediction correspond to one hit.
-            if (!marker.player || marker.motionY < 0.075 ||
-                horizontalImpulse < 0.055) continue;
+            const EntityMarker* previous = nullptr;
+            for (std::uint32_t previousIndex = 0U;
+                 previousIndex < previousEntityMarkerCount; ++previousIndex) {
+                if (previousEntityMarkers[previousIndex].entityId == marker.entityId) {
+                    previous = &previousEntityMarkers[previousIndex];
+                    break;
+                }
+            }
+            if (!marker.player || previous == nullptr) continue;
+            const double previousHorizontal = std::hypot(previous->motionX,
+                                                          previous->motionZ);
+            const bool healthConfirmed = marker.health > 0.0F &&
+                previous->health > marker.health + 0.01F;
+            const bool airborneImpulse = !marker.onGround &&
+                marker.motionY >= 0.075 && horizontalImpulse >= 0.055 &&
+                (previous->onGround ||
+                 marker.motionY > previous->motionY + 0.045 ||
+                 horizontalImpulse > previousHorizontal + 0.045);
+            // Fail closed on uncertainty. In particular, a jump, an empty
+            // swing, horizontal walking, and a grounded zero-knockback damage
+            // event all lack one of these two independent confirmations.
+            if (!healthConfirmed || !airborneImpulse) continue;
             KnockbackTrajectory prediction;
             prediction.entityId = marker.entityId;
             prediction.startBounds = marker.bounds;
@@ -4023,9 +4196,7 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
         m_bowDrawStartedAt = 0U;
         m_snapshot.bowTrajectory = {};
     }
-    if (m_bowDrawStartedAt != 0U && trajectoryBlocksAvailable &&
-        (m_lastBowTrajectoryAt == 0U ||
-         tickMilliseconds - m_lastBowTrajectoryAt >= 75U)) {
+    if (m_bowDrawStartedAt != 0U && trajectoryBlocksAvailable) {
         m_lastBowTrajectoryAt = tickMilliseconds;
         BowTrajectory trajectory;
         const double useTicks = static_cast<double>(
@@ -4782,6 +4953,7 @@ void GameBindings::deleteGlobalRefs(JNIEnv* const env, BindingCache& cache) noex
     if (cache.minecraftClass != nullptr) env->DeleteGlobalRef(cache.minecraftClass);
     if (cache.playerClass != nullptr) env->DeleteGlobalRef(cache.playerClass);
     if (cache.livingClass != nullptr) env->DeleteGlobalRef(cache.livingClass);
+    if (cache.hostileClass != nullptr) env->DeleteGlobalRef(cache.hostileClass);
     if (cache.entityClass != nullptr) env->DeleteGlobalRef(cache.entityClass);
     if (cache.fireballClass != nullptr) env->DeleteGlobalRef(cache.fireballClass);
     if (cache.aabbClass != nullptr) env->DeleteGlobalRef(cache.aabbClass);
@@ -4846,6 +5018,7 @@ void GameBindings::deleteGlobalRefs(JNIEnv* const env, BindingCache& cache) noex
     cache.minecraftClass = nullptr;
     cache.playerClass = nullptr;
     cache.livingClass = nullptr;
+    cache.hostileClass = nullptr;
     cache.entityClass = nullptr;
     cache.fireballClass = nullptr;
     cache.aabbClass = nullptr;
