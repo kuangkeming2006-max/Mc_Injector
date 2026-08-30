@@ -2284,6 +2284,149 @@ bool OverlayRenderer::render(HDC const deviceContext,
                 }
             }
         }
+
+        // Knockback prediction is visual-only and is fed by the bounded 20 Hz
+        // snapshot. A detected impulse starts one animation; subsequent samples
+        // refine its path without restarting it, then the landing box lingers.
+        const double trajectoryNow = ImGui::GetTime();
+        if (snapshot.entitySampleGeneration != m_lastKnockbackGeneration) {
+            m_lastKnockbackGeneration = snapshot.entitySampleGeneration;
+            for (std::uint8_t predictionIndex = 0U;
+                 predictionIndex < snapshot.knockbackTrajectoryCount;
+                 ++predictionIndex) {
+                const KnockbackTrajectory& prediction =
+                    snapshot.knockbackTrajectories[predictionIndex];
+                KnockbackVisual* visual = nullptr;
+                KnockbackVisual* oldest = &m_knockbackVisuals.front();
+                for (KnockbackVisual& candidate : m_knockbackVisuals) {
+                    if (candidate.active &&
+                        candidate.trajectory.entityId == prediction.entityId) {
+                        visual = &candidate;
+                        break;
+                    }
+                    if (!candidate.active) oldest = &candidate;
+                    else if (candidate.updatedAt < oldest->updatedAt) oldest = &candidate;
+                }
+                if (visual == nullptr) {
+                    visual = oldest;
+                    *visual = {};
+                    visual->startedAt = trajectoryNow;
+                    visual->active = true;
+                    visual->trajectory = prediction;
+                } else if (trajectoryNow - visual->updatedAt > 0.42) {
+                    // A later impulse on the same entity is a new event.
+                    visual->startedAt = trajectoryNow;
+                    visual->trajectory = prediction;
+                }
+                // Keep the first trajectory immutable throughout one impulse.
+                // Re-basing it to the entity's newer mid-flight position while
+                // preserving animation time would make the box jump forward.
+                visual->updatedAt = trajectoryNow;
+            }
+        }
+        for (KnockbackVisual& visual : m_knockbackVisuals) {
+            if (!visual.active || visual.trajectory.pointCount < 2U) continue;
+            const KnockbackTrajectory& prediction = visual.trajectory;
+            const float duration = std::max(0.28F,
+                static_cast<float>(prediction.pointCount - 1U) * 0.045F);
+            const float age = static_cast<float>(trajectoryNow - visual.startedAt);
+            if (age > duration + 2.7F) {
+                visual.active = false;
+                continue;
+            }
+            const ImU32 trajectoryColor = IM_COL32(255, 184, 72, 220);
+            const std::size_t visiblePoint = std::min<std::size_t>(
+                prediction.pointCount - 1U,
+                static_cast<std::size_t>(std::floor(std::clamp(
+                    age / duration, 0.0F, 1.0F) *
+                    static_cast<float>(prediction.pointCount - 1U))));
+            for (std::size_t point = 1U; point <= visiblePoint; ++point) {
+                const ScreenPoint first = projectPoint(snapshot.camera, displaySize,
+                    prediction.points[point - 1U].x,
+                    prediction.points[point - 1U].y + 0.9,
+                    prediction.points[point - 1U].z);
+                const ScreenPoint second = projectPoint(snapshot.camera, displaySize,
+                    prediction.points[point].x,
+                    prediction.points[point].y + 0.9,
+                    prediction.points[point].z);
+                if (first.visible && second.visible)
+                    background->AddLine(ImVec2(first.x, first.y),
+                        ImVec2(second.x, second.y), trajectoryColor, 2.0F);
+            }
+            const auto translatedBox = [&](const WorldPoint& point) noexcept {
+                const WorldPoint& origin = prediction.points[0U];
+                const double offsetX = point.x - origin.x;
+                const double offsetY = point.y - origin.y;
+                const double offsetZ = point.z - origin.z;
+                return AxisAlignedBox{
+                    prediction.startBounds.minX + offsetX,
+                    prediction.startBounds.minY + offsetY,
+                    prediction.startBounds.minZ + offsetZ,
+                    prediction.startBounds.maxX + offsetX,
+                    prediction.startBounds.maxY + offsetY,
+                    prediction.startBounds.maxZ + offsetZ};
+            };
+            if (age < duration) {
+                const float exactIndex = std::clamp(age / duration, 0.0F, 1.0F) *
+                    static_cast<float>(prediction.pointCount - 1U);
+                const std::size_t lower = std::min<std::size_t>(
+                    static_cast<std::size_t>(std::floor(exactIndex)),
+                    prediction.pointCount - 1U);
+                const std::size_t upper = std::min<std::size_t>(
+                    lower + 1U, prediction.pointCount - 1U);
+                const double blend = static_cast<double>(exactIndex -
+                    static_cast<float>(lower));
+                const WorldPoint animated{
+                    prediction.points[lower].x +
+                        (prediction.points[upper].x - prediction.points[lower].x) * blend,
+                    prediction.points[lower].y +
+                        (prediction.points[upper].y - prediction.points[lower].y) * blend,
+                    prediction.points[lower].z +
+                        (prediction.points[upper].z - prediction.points[lower].z) * blend};
+                drawProjectedBox(background, snapshot.camera, displaySize,
+                    translatedBox(animated), trajectoryColor, "", true);
+            } else if (prediction.landed) {
+                const float fade = std::clamp(
+                    1.0F - (age - duration) / 2.7F, 0.0F, 1.0F);
+                drawProjectedBox(background, snapshot.camera, displaySize,
+                    translatedBox(prediction.points[
+                        prediction.pointCount - 1U]),
+                    IM_COL32(255, 184, 72,
+                        static_cast<int>(220.0F * fade)), "", true);
+            }
+        }
+
+        // The bow path is recomputed at a bounded cadence from the exact 1.8.9
+        // charge/drag/gravity constants. The terminal marker turns red only
+        // when the swept segment intersects a player AABB.
+        if (snapshot.bowTrajectory.active &&
+            snapshot.bowTrajectory.pointCount >= 2U) {
+            const BowTrajectory& bow = snapshot.bowTrajectory;
+            for (std::size_t point = 1U; point < bow.pointCount; ++point) {
+                const ScreenPoint first = projectPoint(snapshot.camera, displaySize,
+                    bow.points[point - 1U].x, bow.points[point - 1U].y,
+                    bow.points[point - 1U].z);
+                const ScreenPoint second = projectPoint(snapshot.camera, displaySize,
+                    bow.points[point].x, bow.points[point].y, bow.points[point].z);
+                if (first.visible && second.visible)
+                    background->AddLine(ImVec2(first.x, first.y),
+                        ImVec2(second.x, second.y), IM_COL32(92, 220, 255, 225),
+                        2.0F);
+            }
+            if (bow.hasImpact) {
+                constexpr double impactHalf = 0.16;
+                const AxisAlignedBox impactBox{
+                    bow.impact.x - impactHalf, bow.impact.y - impactHalf,
+                    bow.impact.z - impactHalf, bow.impact.x + impactHalf,
+                    bow.impact.y + impactHalf, bow.impact.z + impactHalf};
+                const ImU32 impactColor = bow.impactPlayer
+                    ? IM_COL32(255, 70, 86, 255)
+                    : IM_COL32(92, 220, 255, 255);
+                drawProjectedBox(background, snapshot.camera, displaySize,
+                    impactBox, impactColor,
+                    bow.impactPlayer ? "PLAYER IMPACT" : "IMPACT", true);
+            }
+        }
     }
 
     // Modern two-pane Click GUI. The left rail exposes stable feature pages;
@@ -2916,7 +3059,7 @@ bool OverlayRenderer::render(HDC const deviceContext,
                     "Crouch near an air edge while preserving Minecraft's physical sneak key state.");
                 ImGui::SetNextItemWidth(320.0F * uiScale);
                 changed |= ImGui::SliderInt("Safety look-ahead",
-                    &m_features.safewalkEdgeSensitivity, 0, 95, "%d%%",
+                    &m_features.safewalkEdgeSensitivity, 0, 100, "%d%%",
                     ImGuiSliderFlags_AlwaysClamp);
                 ImGui::SetNextItemWidth(320.0F * uiScale);
                 changed |= ImGui::SliderInt("Minimum look pitch",
@@ -3533,6 +3676,55 @@ bool OverlayRenderer::render(HDC const deviceContext,
             {"Blacklist", m_blacklist.panelEnabled},
             {"Fireball ESP", m_features.fireballEspEnabled},
             {"LongJump", m_features.longJumpEnabled}}};
+        ImFont* const textGuiFont = m_boldFonts[static_cast<std::size_t>(
+            std::clamp(m_guiScaleIndex, 0, 3))] != nullptr
+            ? m_boldFonts[static_cast<std::size_t>(
+                std::clamp(m_guiScaleIndex, 0, 3))] : ImGui::GetFont();
+        const float textGuiFontSize = ImGui::GetFontSize() * 1.20F;
+        const auto measureText = [&](const char* const value) noexcept {
+            return textGuiFont->CalcTextSizeA(textGuiFontSize, 100000.0F,
+                                              0.0F, value);
+        };
+        const std::uint64_t glyphClock = static_cast<std::uint64_t>(
+            ImGui::GetTime() * 1000.0);
+        if (!m_textGuiGlyphsInitialized ||
+            glyphClock >= m_textGuiNextShuffleTick) {
+            for (std::size_t moduleIndex = 0U;
+                 moduleIndex < modules.size(); ++moduleIndex) {
+                const std::size_t length = std::min<std::size_t>(
+                    std::strlen(modules[moduleIndex].name), 32U);
+                std::array<std::uint8_t, 32U> order{};
+                for (std::size_t character = 0U; character < length; ++character) {
+                    order[character] = static_cast<std::uint8_t>(character);
+                    m_textGuiGlyphTargets[moduleIndex][character] = 0.50F;
+                }
+                std::uint32_t randomState = static_cast<std::uint32_t>(
+                    glyphClock ^ (moduleIndex + 1U) * 0x9E3779B9U);
+                for (std::size_t remaining = length; remaining > 1U; --remaining) {
+                    randomState = randomState * 1664525U + 1013904223U;
+                    const std::size_t swapIndex = randomState % remaining;
+                    std::swap(order[remaining - 1U], order[swapIndex]);
+                }
+                for (std::size_t bright = 0U; bright < (length + 1U) / 2U;
+                     ++bright) {
+                    m_textGuiGlyphTargets[moduleIndex][order[bright]] = 1.0F;
+                }
+            }
+            if (!m_textGuiGlyphsInitialized) {
+                m_textGuiGlyphBrightness = m_textGuiGlyphTargets;
+                m_textGuiGlyphsInitialized = true;
+            }
+            // Recompose the half-bright mask at a calm cadence. Brightness is
+            // interpolated below, so individual glyphs never flash abruptly.
+            m_textGuiNextShuffleTick = glyphClock + 720U;
+        }
+        const float glyphBlend = 1.0F - std::exp(-6.2F * delta);
+        for (std::size_t moduleIndex = 0U; moduleIndex < modules.size(); ++moduleIndex)
+            for (std::size_t character = 0U; character < 32U; ++character)
+                m_textGuiGlyphBrightness[moduleIndex][character] +=
+                    (m_textGuiGlyphTargets[moduleIndex][character] -
+                     m_textGuiGlyphBrightness[moduleIndex][character]) * glyphBlend;
+
         float visibleRows = 0.0F;
         float maximumTextWidth = 0.0F;
         for (std::size_t index = 0U; index < modules.size(); ++index) {
@@ -3544,11 +3736,11 @@ bool OverlayRenderer::render(HDC const deviceContext,
             if (progress <= 0.004F) continue;
             visibleRows += progress;
             maximumTextWidth = std::max(maximumTextWidth,
-                                        ImGui::CalcTextSize(modules[index].name).x);
+                                        measureText(modules[index].name).x);
         }
         if (visibleRows > 0.004F) {
             const float width = maximumTextWidth + 20.0F * uiScale;
-            const float lineHeight = ImGui::GetTextLineHeight() + 3.0F * uiScale;
+            const float lineHeight = textGuiFontSize + 5.0F * uiScale;
             const float height = lineHeight * visibleRows +
                                  8.0F * uiScale;
             const float defaultX = std::max(5.0F, io.DisplaySize.x - width - 16.0F);
@@ -3596,45 +3788,32 @@ bool OverlayRenderer::render(HDC const deviceContext,
                         m_textGuiModuleProgress[moduleIndex], 0.0F, 1.0F);
                     if (progress <= 0.004F) continue;
                     const float eased = progress * progress * (3.0F - 2.0F * progress);
-                    const ImVec2 textSize = ImGui::CalcTextSize(module.name);
+                    const ImVec2 textSize = measureText(module.name);
                     float glyphX = textX + width - textSize.x - 4.0F * uiScale +
                                    (1.0F - eased) * 18.0F * uiScale;
                     const float glyphY = rowY + (1.0F - eased) * 4.0F * uiScale;
-                    // Stable premium text with one sparse diagonal specular
-                    // sweep. Unlike the old per-character sine wave, the base
-                    // label never cycles like karaoke lyrics; only a narrow,
-                    // coherent light band crosses the whole HUD every few
-                    // seconds.
-                    const float rowTone = 0.86F + 0.10F * std::sin(
-                        static_cast<float>(moduleIndex) * 0.63F + 0.4F);
-                    const ImVec4 stable(
-                        std::clamp(base.x * rowTone + 0.08F, 0.0F, 1.0F),
-                        std::clamp(base.y * rowTone + 0.08F, 0.0F, 1.0F),
-                        std::clamp(base.z * rowTone + 0.08F, 0.0F, 1.0F), eased);
-                    textDraw->AddText(ImVec2(glyphX + 1.0F, glyphY + 1.5F),
-                        IM_COL32(0, 0, 0, static_cast<int>(150.0F * eased)),
-                        module.name);
-                    textDraw->AddText(ImVec2(glyphX, glyphY),
-                        ImGui::ColorConvertFloat4ToU32(stable), module.name);
-
-                    const float sweepPhase = std::fmod(
-                        static_cast<float>(ImGui::GetTime()), 3.6F) / 3.6F;
-                    const float sweepPosition = -0.22F + sweepPhase * 1.44F;
+                    // Half of the glyphs are bright and half are 50% dimmed.
+                    // A continuously regenerated mask flows through a smooth
+                    // exponential transition, producing a restrained optical
+                    // shimmer rather than a scrolling-lyrics effect.
                     for (std::size_t characterIndex = 0U;
                          module.name[characterIndex] != '\0'; ++characterIndex) {
                         char glyph[2]{module.name[characterIndex], '\0'};
-                        const float glyphWidth = ImGui::CalcTextSize(glyph).x;
-                        const float normalizedX = (glyphX + glyphWidth * 0.5F - textX) /
-                            std::max(1.0F, width) +
-                            static_cast<float>(moduleIndex) * 0.018F;
-                        const float distance = (normalizedX - sweepPosition) / 0.075F;
-                        const float sheen = std::exp(-distance * distance) *
-                                            0.78F * eased;
-                        if (sheen > 0.008F) {
-                            textDraw->AddText(ImVec2(glyphX, glyphY),
-                                IM_COL32(255, 255, 255,
-                                    static_cast<int>(255.0F * sheen)), glyph);
-                        }
+                        const float glyphWidth = measureText(glyph).x;
+                        const float brightness = m_textGuiGlyphBrightness[
+                            moduleIndex][std::min<std::size_t>(characterIndex, 31U)];
+                        textDraw->AddText(textGuiFont, textGuiFontSize,
+                            ImVec2(glyphX + 1.0F, glyphY + 1.4F),
+                            IM_COL32(0, 0, 0,
+                                static_cast<int>(145.0F * eased * brightness)), glyph);
+                        const ImVec4 glyphColor(
+                            std::clamp(base.x * 0.58F + 0.42F, 0.0F, 1.0F),
+                            std::clamp(base.y * 0.58F + 0.42F, 0.0F, 1.0F),
+                            std::clamp(base.z * 0.58F + 0.42F, 0.0F, 1.0F),
+                            eased * brightness);
+                        textDraw->AddText(textGuiFont, textGuiFontSize,
+                            ImVec2(glyphX, glyphY),
+                            ImGui::ColorConvertFloat4ToU32(glyphColor), glyph);
                         glyphX += glyphWidth;
                     }
                     rowY += lineHeight * progress;

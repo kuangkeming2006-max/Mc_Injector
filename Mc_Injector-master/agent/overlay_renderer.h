@@ -347,6 +347,10 @@ private:
     std::array<bool, FeatureSettings::FeatureHotkeyCount> m_featureHotkeyWasDown{};
     std::array<float, 14U> m_textGuiModuleProgress{};
     std::array<float, 14U> m_textGuiModuleVelocity{};
+    std::array<std::array<float, 32U>, 14U> m_textGuiGlyphBrightness{};
+    std::array<std::array<float, 32U>, 14U> m_textGuiGlyphTargets{};
+    std::uint64_t m_textGuiNextShuffleTick = 0U;
+    bool m_textGuiGlyphsInitialized = false;
     bool m_scaffoldBlockedNoticeShown = false;
     bool m_textGuiDragging = false;
     float m_textGuiDragOffsetX = 0.0F;
@@ -391,6 +395,15 @@ private:
         std::uint64_t lastSeenTick = 0U;
     };
     std::array<NametagAnimation, GameSnapshot::MaxEntityMarkers> m_nametagAnimations{};
+    struct KnockbackVisual final {
+        KnockbackTrajectory trajectory{};
+        double startedAt = 0.0;
+        double updatedAt = 0.0;
+        bool active = false;
+    };
+    std::array<KnockbackVisual, GameSnapshot::MaxKnockbackTrajectories>
+        m_knockbackVisuals{};
+    std::uint64_t m_lastKnockbackGeneration = 0U;
     std::uint64_t m_lastEntitySampleGeneration = 0U;
     float m_lastEntityPartialTicks = 0.0F;
     unsigned m_missedEntityTicks = 0U;

@@ -2215,7 +2215,7 @@ void OverlayManager::loadFeatureSettings()
     m_safewalkReleaseDelayMs = std::clamp(settings.value(
         QStringLiteral("safewalkReleaseDelayMs"), 120).toInt(), 0, 750);
     m_safewalkEdgeSensitivity = std::clamp(settings.value(
-        QStringLiteral("safewalkEdgeSensitivity"), 55).toInt(), 0, 95);
+        QStringLiteral("safewalkEdgeSensitivity"), 55).toInt(), 0, 100);
     m_safewalkMinimumPitch = std::clamp(settings.value(
         QStringLiteral("safewalkMinimumPitch"), -5).toInt(), -90, 90);
     m_safewalkHotkey = std::clamp(settings.value(
@@ -2485,7 +2485,7 @@ void OverlayManager::sendFeatureSnapshot()
                       + QByteArray::number(QColor(m_hypixelRailColor).rgb() & 0xFFFFFFU) + ' '
                       + QByteArray::number(std::clamp(m_hypixelRailOpacity, 0, 100)) + ' '
                       + QByteArray::number(std::clamp(m_safewalkReleaseDelayMs, 0, 750)) + ' '
-                      + QByteArray::number(std::clamp(m_safewalkEdgeSensitivity, 0, 95)) + ' '
+                      + QByteArray::number(std::clamp(m_safewalkEdgeSensitivity, 0, 100)) + ' '
                       + QByteArray::number(std::clamp(m_safewalkMinimumPitch, -90, 90)) + ' '
                       + QByteArray::number(std::clamp(m_safewalkHotkey, 8, 254)) + ' '
                       + QByteArray::number(std::clamp(m_flySpeedPercent, 10, 500)) + ' '

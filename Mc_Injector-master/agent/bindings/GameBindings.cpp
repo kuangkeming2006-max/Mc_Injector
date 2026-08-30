@@ -1987,6 +1987,10 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
     // sensitivity mappings. It must not inherit Safewalk/Scaffold's block,
     // inventory or controller requirements: transformed clients commonly
     // expose the former while renaming one of the latter.
+    if (!requested.aimAssist) {
+        m_aimFilterInitialized = false;
+        m_aimFilteredTargetEntityId = -1;
+    }
     if (aimCapability && (requested.aimAssist || m_aimSensitivityModified)) {
         const EntityMarker* target = nullptr;
         const double minimumDistance = static_cast<double>(std::clamp(
@@ -2021,13 +2025,19 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
                 // cadence without inventing a server-side rotation. The local
                 // player's real view is still the only state modified.
                 const double targetX = entity.currentX +
-                    (entity.currentX - entity.previousX) * 0.35;
+                    (entity.currentX - entity.previousX) * 0.18;
+                const double targetY = entity.currentY +
+                    (entity.currentY - entity.previousY) * 0.18;
                 const double targetZ = entity.currentZ +
-                    (entity.currentZ - entity.previousZ) * 0.35;
+                    (entity.currentZ - entity.previousZ) * 0.18;
                 const double dx = targetX - snapshot.x;
                 const double dz = targetZ - snapshot.z;
-                const double dy =
-                    (entity.bounds.minY + entity.bounds.maxY) * 0.5 -
+                // Aim at a stable torso point derived from the entity origin.
+                // AABB min/max can change abruptly at pose/collision edges and
+                // made the desired angle alternate on consecutive snapshots.
+                const double entityHeight = std::clamp(
+                    entity.bounds.maxY - entity.bounds.minY, 0.6, 2.4);
+                const double dy = targetY + entityHeight * 0.62 -
                     (snapshot.y + 1.62);
                 const double horizontal = std::hypot(dx, dz);
                 if (horizontal < 0.1) continue;
@@ -2046,7 +2056,7 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
                     // nearby entities cannot make the view alternate every
                     // sample. Angle remains the dominant selection metric.
                     double score = angle + distance * 0.025;
-                    if (entity.entityId == m_aimTargetEntityId) score *= 0.72;
+                    if (entity.entityId == m_aimTargetEntityId) score *= 0.46;
                     if (score >= bestScore) continue;
                     bestScore = score;
                     target = &entity;
@@ -2087,19 +2097,50 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
                 // per-second turn cap prevents any frame from snapping even
                 // after a hitch, while the exponential term stays frame-rate
                 // independent.
-                const double response = 0.30 + 7.70 * speed * speed;
+                // Filter the target angle independently from the view angle.
+                // Entity updates arrive at 20 Hz while this method may be
+                // sampled at a different cadence; directly chasing every new
+                // sample produced the visible hitbox-edge oscillation.
+                if (!m_aimFilterInitialized ||
+                    m_aimFilteredTargetEntityId != target->entityId) {
+                    m_aimFilteredYaw = yaw;
+                    m_aimFilteredPitch = pitch;
+                    m_aimFilteredTargetEntityId = target->entityId;
+                    m_aimFilterInitialized = true;
+                }
+                const double targetFilter = 1.0 - std::exp(
+                    -(5.0 + 5.0 * speed) * dt);
+                m_aimFilteredYaw = static_cast<float>(yaw + wrap(
+                    static_cast<double>(m_aimFilteredYaw) - yaw));
+                m_aimFilteredYaw = static_cast<float>(m_aimFilteredYaw +
+                    wrap(desiredYaw - m_aimFilteredYaw) * targetFilter);
+                m_aimFilteredPitch = static_cast<float>(m_aimFilteredPitch +
+                    (desiredPitch - m_aimFilteredPitch) * targetFilter);
+
+                const double response = 0.28 + 5.20 * speed * speed;
                 const double alpha = 1.0 - std::exp(-response * dt);
-                const double maximumStep = (4.0 + 236.0 * speed * speed) * dt;
+                const double maximumStep = (3.0 + 150.0 * speed * speed) * dt;
+                const double yawError = wrap(m_aimFilteredYaw - yaw);
+                const double pitchError = static_cast<double>(m_aimFilteredPitch - pitch);
+                // A small angular dead zone prevents quantized mouse/entity
+                // updates from bouncing between opposite corrections once the
+                // crosshair is already settled on the target.
+                constexpr double settleDeadZone = 0.22;
                 const double yawStep = std::clamp(
-                    wrap(desiredYaw - yaw) * alpha, -maximumStep, maximumStep);
+                    std::abs(yawError) <= settleDeadZone ? 0.0 : yawError * alpha,
+                    -maximumStep, maximumStep);
                 const double pitchStep = std::clamp(
-                    static_cast<double>(desiredPitch - pitch) * alpha,
+                    std::abs(pitchError) <= settleDeadZone ? 0.0 : pitchError * alpha,
                     -maximumStep, maximumStep);
                 env->SetFloatField(player, cache->rotationYaw,
                     yaw + static_cast<float>(yawStep));
                 env->SetFloatField(player, cache->rotationPitch,
                     std::clamp(pitch + static_cast<float>(pitchStep),
                                -90.0F, 90.0F));
+            }
+            if (!requested.aimAssist || target == nullptr) {
+                m_aimFilterInitialized = false;
+                m_aimFilteredTargetEntityId = -1;
             }
         }
         if (env->ExceptionCheck() == JNI_TRUE) return fail();
@@ -2175,15 +2216,15 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
     if (env->ExceptionCheck() == JNI_TRUE) return fail();
 
     const double sensitivity = static_cast<double>(std::clamp(
-        requested.safewalkEdgeSensitivity, 0, 95)) / 100.0;
-    // Entity.moveEntity only clips sneak movement once the *whole translated
-    // AABB* has no collision one block below it.  Sensitivity therefore changes
-    // only how much of the already-computed motion is previewed; it must never
-    // turn a single unsupported corner into an edge.  Squaring the setting
-    // gives the low end useful fine control very close to the actual ledge.
-    const double previewFraction = 0.04 + sensitivity * sensitivity * 0.96;
+        requested.safewalkEdgeSensitivity, 0, 100)) / 100.0;
+    // Preview a fraction of Minecraft's already-computed motion. At the low
+    // end we still look far enough ahead to set sneak before the next physics
+    // tick; at the high end the probe spans over two ticks. Together with the
+    // configurable unsupported-corner threshold below this covers a much
+    // wider late/early range without ever waiting until the player is airborne.
+    const double previewFraction = 0.34 + sensitivity * sensitivity * 1.86;
     const double fallbackStep = magnitude > 0.001
-        ? 0.004 + sensitivity * sensitivity * 0.020 : 0.0;
+        ? 0.012 + sensitivity * sensitivity * 0.10 : 0.0;
     const double projectedX = std::abs(actualMotionX) > 0.001
         ? actualMotionX * previewFraction : directionX * fallbackStep;
     const double projectedZ = std::abs(actualMotionZ) > 0.001
@@ -2228,23 +2269,32 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
         }
     }
 
-    constexpr std::uint8_t allSupports = 0x0FU;
-    const bool anySolid = immediateAirMask != allSupports;
-    // A one-block descent is safe and must not force sneak. More importantly,
-    // match vanilla's collision test: one supported corner still supports the
-    // AABB, so crouch only when every footprint sample is air on both layers.
-    const bool atEdge = immediateAirMask == allSupports &&
-        deepVoidMask == allSupports &&
-        (!movementCapability || onGround);
+    const auto countBits = [](std::uint8_t value) noexcept {
+        int result = 0;
+        for (; value != 0U; value = static_cast<std::uint8_t>(value >> 1U))
+            result += static_cast<int>(value & 1U);
+        return result;
+    };
+    const std::uint8_t unsafeMask = static_cast<std::uint8_t>(
+        immediateAirMask & deepVoidMask);
+    const int unsafeCorners = countBits(unsafeMask);
+    // 0% requires all four projected corners to be over a two-block void;
+    // 100% needs only one. Intermediate values cover the old conservative
+    // behaviour as well as a late, edge-hugging mode while remaining safe.
+    const int requiredUnsafeCorners = std::clamp(
+        4 - static_cast<int>(std::floor(sensitivity * 3.999)), 1, 4);
+    const bool supportRestored = unsafeCorners < requiredUnsafeCorners;
+    const bool atEdge = unsafeCorners >= requiredUnsafeCorners && onGround;
     const bool pitchAllowsSafewalk = pitch >= static_cast<float>(std::clamp(
         requested.safewalkMinimumPitch, -90, 90));
-    const bool supportPlaced = m_safewalkSneakForced && !atEdge && anySolid;
     m_safewalkSupportMask = deepVoidMask;
 
-    if (supportPlaced && m_safewalkReleaseAt == 0U) {
+    if (m_safewalkSneakForced && supportRestored &&
+        m_safewalkReleaseAt == 0U) {
         m_safewalkReleaseAt = tickMilliseconds + static_cast<std::uint64_t>(
             std::clamp(requested.safewalkReleaseDelayMs, 0, 750));
     }
+    if (m_safewalkSneakForced && atEdge) m_safewalkReleaseAt = 0U;
     if (m_safewalkSneakForced && m_safewalkReleaseAt != 0U &&
         tickMilliseconds >= m_safewalkReleaseAt) {
         const bool released = releaseForcedSneak();
@@ -2260,8 +2310,7 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
             m_safewalkReleaseAt = 0U;
         } else return fail();
     }
-    if (m_safewalkSneakForced && (!pitchAllowsSafewalk || (!atEdge && anySolid)) &&
-        m_safewalkReleaseAt == 0U) {
+    if (m_safewalkSneakForced && !pitchAllowsSafewalk) {
         const bool released = releaseForcedSneak();
         if (!movementCapability) return finish(released);
     }
@@ -2310,8 +2359,8 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
         m_lastLongJumpTick = tickMilliseconds;
     }
 
-    if (requested.scaffold && magnitude > 0.001 &&
-        tickMilliseconds - m_lastScaffoldPlacementTick >= 45U) {
+    if (requested.scaffold &&
+        tickMilliseconds - m_lastScaffoldPlacementTick >= 35U) {
         const int supportLayer = static_cast<int>(std::floor(minY - 0.06));
         if (!m_scaffoldPlatformYValid || onGround) {
             m_scaffoldPlatformY = supportLayer;
@@ -2368,9 +2417,10 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
             const double centerZ = (minZ + maxZ) * 0.5;
             std::array<std::array<int, 3U>, 32U> targets{};
             std::size_t targetCount = 0U;
-            const auto addTarget = [&](const double x, const double z) noexcept {
+            const auto addTargetAt = [&](const double x, const int layer,
+                                         const double z) noexcept {
                 const std::array<int, 3U> candidate{
-                    static_cast<int>(std::floor(x)), m_scaffoldPlatformY,
+                    static_cast<int>(std::floor(x)), layer,
                     static_cast<int>(std::floor(z))};
                 for (std::size_t i = 0; i < targetCount; ++i)
                     if (targets[i] == candidate) return;
@@ -2385,15 +2435,20 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
                 (maxX - minX) * 0.5 - cornerInset);
             const double halfWidthZ = std::max(0.0,
                 (maxZ - minZ) * 0.5 - cornerInset);
-            const auto addFootprint = [&](const double x,
-                                          const double z) noexcept {
-                addTarget(x, z);
-                addTarget(x - halfWidthX, z - halfWidthZ);
-                addTarget(x - halfWidthX, z + halfWidthZ);
-                addTarget(x + halfWidthX, z - halfWidthZ);
-                addTarget(x + halfWidthX, z + halfWidthZ);
+            const auto addFootprintAt = [&](const double x, const int layer,
+                                            const double z) noexcept {
+                addTargetAt(x, layer, z);
+                addTargetAt(x - halfWidthX, layer, z - halfWidthZ);
+                addTargetAt(x - halfWidthX, layer, z + halfWidthZ);
+                addTargetAt(x + halfWidthX, layer, z - halfWidthZ);
+                addTargetAt(x + halfWidthX, layer, z + halfWidthZ);
             };
-            addFootprint(centerX, centerZ);
+            // Safety layer one: repair the cells immediately beneath the live
+            // collision footprint, even with no movement key held. This is the
+            // path that catches residual sprint/jump inertia and vertical jumps.
+            addFootprintAt(centerX, supportLayer, centerZ);
+            if (supportLayer != m_scaffoldPlatformY)
+                addFootprintAt(centerX, m_scaffoldPlatformY, centerZ);
 
             double simulatedX = centerX;
             double simulatedY = minY;
@@ -2410,7 +2465,9 @@ bool GameBindings::updateGameplay(JNIEnv* const env,
                 simulatedX += simulatedMotionX;
                 simulatedY += simulatedMotionY;
                 simulatedZ += simulatedMotionZ;
-                addFootprint(simulatedX, simulatedZ);
+                // Safety layer two: predict from actual motion, then add input
+                // acceleration only as a secondary correction.
+                addFootprintAt(simulatedX, m_scaffoldPlatformY, simulatedZ);
 
                 // 1.8.x EntityLivingBase air motion approximation. Input is a
                 // small acceleration/fallback; existing inertia remains the
@@ -3519,6 +3576,13 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
         marker.previousX = env->GetDoubleField(entity, cache->previousPosition[0U]);
         marker.previousY = env->GetDoubleField(entity, cache->previousPosition[1U]);
         marker.previousZ = env->GetDoubleField(entity, cache->previousPosition[2U]);
+        if (cache->motionFields[0U] != nullptr &&
+            cache->motionFields[1U] != nullptr &&
+            cache->motionFields[2U] != nullptr) {
+            marker.motionX = env->GetDoubleField(entity, cache->motionFields[0U]);
+            marker.motionY = env->GetDoubleField(entity, cache->motionFields[1U]);
+            marker.motionZ = env->GetDoubleField(entity, cache->motionFields[2U]);
+        }
         const bool failed = env->ExceptionCheck() == JNI_TRUE;
         if (failed) env->ExceptionClear();
         env->DeleteLocalRef(entityBounds);
@@ -3534,6 +3598,8 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
                std::isfinite(marker.currentX) && std::isfinite(marker.currentY) &&
                std::isfinite(marker.currentZ) && std::isfinite(marker.previousX) &&
                std::isfinite(marker.previousY) && std::isfinite(marker.previousZ) &&
+               std::isfinite(marker.motionX) && std::isfinite(marker.motionY) &&
+               std::isfinite(marker.motionZ) &&
                std::isfinite(marker.bounds.minX) && std::isfinite(marker.bounds.minY) &&
                std::isfinite(marker.bounds.minZ) && std::isfinite(marker.bounds.maxX) &&
                std::isfinite(marker.bounds.maxY) && std::isfinite(marker.bounds.maxZ);
@@ -3840,6 +3906,270 @@ const GameSnapshot& GameBindings::sample(JNIEnv* const env,
         if (playerList != nullptr) env->DeleteLocalRef(playerList);
     } else {
         m_snapshot.entityMarkerCount = 0U;
+    }
+
+    // Trajectory sampling deliberately stays on Minecraft's 20 TPS thread.
+    // Rendering consumes only immutable POD arrays and therefore performs no
+    // JNI work at monitor refresh rate.
+    m_snapshot.knockbackTrajectoryCount = 0U;
+    const bool trajectoryBlocksAvailable = cache->isAirBlock != nullptr &&
+        cache->blockPosClass != nullptr && cache->blockPosConstructor != nullptr;
+    const auto blockIsAir = [&](const double x, const double y,
+                                const double z, bool& air) noexcept {
+        if (!trajectoryBlocksAvailable) return false;
+        jobject position = env->NewObject(cache->blockPosClass,
+            cache->blockPosConstructor,
+            static_cast<jint>(std::floor(x)),
+            static_cast<jint>(std::floor(y)),
+            static_cast<jint>(std::floor(z)));
+        if (position == nullptr || env->ExceptionCheck() == JNI_TRUE) {
+            clearException(env);
+            return false;
+        }
+        air = env->CallBooleanMethod(world, cache->isAirBlock, position) == JNI_TRUE;
+        const bool valid = env->ExceptionCheck() != JNI_TRUE;
+        clearException(env);
+        env->DeleteLocalRef(position);
+        return valid;
+    };
+
+    if (trajectoryBlocksAvailable) {
+        for (std::uint32_t markerIndex = 0U;
+             markerIndex < m_snapshot.entityMarkerCount &&
+             m_snapshot.knockbackTrajectoryCount <
+                 GameSnapshot::MaxKnockbackTrajectories; ++markerIndex) {
+            const EntityMarker& marker = m_snapshot.entityMarkers[markerIndex];
+            const double horizontalImpulse = std::hypot(marker.motionX,
+                                                        marker.motionZ);
+            // Ordinary walking never has this upward impulse. Requiring both
+            // components prevents a trajectory from appearing for every
+            // moving entity and makes one prediction correspond to one hit.
+            if (!marker.player || marker.motionY < 0.075 ||
+                horizontalImpulse < 0.055) continue;
+            KnockbackTrajectory prediction;
+            prediction.entityId = marker.entityId;
+            prediction.startBounds = marker.bounds;
+            double simulatedX = marker.currentX;
+            double simulatedY = marker.bounds.minY;
+            double simulatedZ = marker.currentZ;
+            double velocityX = marker.motionX;
+            double velocityY = marker.motionY;
+            double velocityZ = marker.motionZ;
+            prediction.points[prediction.pointCount++] = {
+                simulatedX, simulatedY, simulatedZ};
+            for (std::size_t step = 1U;
+                 step < prediction.points.size(); ++step) {
+                simulatedX += velocityX;
+                simulatedY += velocityY;
+                simulatedZ += velocityZ;
+                prediction.points[prediction.pointCount++] = {
+                    simulatedX, simulatedY, simulatedZ};
+
+                if (velocityY <= 0.0) {
+                    bool airBelow = true;
+                    const double probeY = simulatedY - 0.06;
+                    if (blockIsAir(simulatedX, probeY, simulatedZ, airBelow) &&
+                        !airBelow) {
+                        const double blockTop = std::floor(probeY) + 1.0;
+                        if (simulatedY <= blockTop + 0.16) {
+                            prediction.points[prediction.pointCount - 1U].y = blockTop;
+                            prediction.landed = true;
+                            break;
+                        }
+                    }
+                }
+                // 1.8 living-entity airborne approximation. The visual is a
+                // client prediction; server corrections naturally replace it
+                // on the next immutable entity snapshot.
+                velocityX *= 0.91;
+                velocityZ *= 0.91;
+                velocityY = (velocityY - 0.08) * 0.98;
+            }
+            m_snapshot.knockbackTrajectories[
+                m_snapshot.knockbackTrajectoryCount++] = prediction;
+        }
+    }
+
+    // Bow draw strength follows ItemBow 1.8.9: t/20, transformed by
+    // (t^2 + 2t) / 3 and capped at one. We track the focused right-button hold
+    // because it avoids another fragile transformed-client method mapping.
+    int localHeldItemId = -1;
+    if (cache->getEquipmentInSlot != nullptr && cache->getItem != nullptr &&
+        cache->getIdFromItem != nullptr && cache->itemClass != nullptr) {
+        jobject heldStack = env->CallObjectMethod(player,
+            cache->getEquipmentInSlot, 0);
+        if (env->ExceptionCheck() != JNI_TRUE && heldStack != nullptr) {
+            jobject heldItem = env->CallObjectMethod(heldStack, cache->getItem);
+            if (env->ExceptionCheck() != JNI_TRUE && heldItem != nullptr) {
+                localHeldItemId = env->CallStaticIntMethod(cache->itemClass,
+                    cache->getIdFromItem, heldItem);
+            }
+            clearException(env);
+            if (heldItem != nullptr) env->DeleteLocalRef(heldItem);
+            env->DeleteLocalRef(heldStack);
+        } else {
+            clearException(env);
+        }
+    }
+    DWORD foregroundProcess = 0U;
+    const HWND foregroundWindow = ::GetForegroundWindow();
+    if (foregroundWindow != nullptr)
+        (void)::GetWindowThreadProcessId(foregroundWindow, &foregroundProcess);
+    const bool bowButtonDown = foregroundProcess == ::GetCurrentProcessId() &&
+        (::GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+    if (localHeldItemId == 261 && bowButtonDown) {
+        if (m_bowDrawStartedAt == 0U) m_bowDrawStartedAt = tickMilliseconds;
+    } else {
+        m_bowDrawStartedAt = 0U;
+        m_snapshot.bowTrajectory = {};
+    }
+    if (m_bowDrawStartedAt != 0U && trajectoryBlocksAvailable &&
+        (m_lastBowTrajectoryAt == 0U ||
+         tickMilliseconds - m_lastBowTrajectoryAt >= 75U)) {
+        m_lastBowTrajectoryAt = tickMilliseconds;
+        BowTrajectory trajectory;
+        const double useTicks = static_cast<double>(
+            tickMilliseconds - m_bowDrawStartedAt) / 50.0;
+        double draw = useTicks / 20.0;
+        draw = std::clamp((draw * draw + draw * 2.0) / 3.0, 0.0, 1.0);
+        if (draw >= 0.10) {
+            constexpr double trajectoryPi = 3.14159265358979323846;
+            const double playerYaw = static_cast<double>(
+                env->GetFloatField(player, cache->rotationYaw)) *
+                trajectoryPi / 180.0;
+            const double playerPitch = static_cast<double>(
+                env->GetFloatField(player, cache->rotationPitch)) *
+                trajectoryPi / 180.0;
+            if (env->ExceptionCheck() == JNI_TRUE) return failJni();
+            double arrowX = positionX - std::cos(playerYaw) * 0.16;
+            double arrowY = positionY + 1.52;
+            double arrowZ = positionZ - std::sin(playerYaw) * 0.16;
+            const double speed = draw * 3.0;
+            double velocityX = -std::sin(playerYaw) * std::cos(playerPitch) * speed;
+            double velocityY = -std::sin(playerPitch) * speed;
+            double velocityZ =  std::cos(playerYaw) * std::cos(playerPitch) * speed;
+            trajectory.active = true;
+            trajectory.points[trajectory.pointCount++] = {arrowX, arrowY, arrowZ};
+            for (std::size_t tick = 0U;
+                 tick + 1U < trajectory.points.size() && !trajectory.hasImpact; ++tick) {
+                const double nextX = arrowX + velocityX;
+                const double nextY = arrowY + velocityY;
+                const double nextZ = arrowZ + velocityZ;
+                // Exact segment-vs-expanded-AABB test avoids point-sampling
+                // misses when a fully charged arrow crosses several blocks in
+                // one tick.
+                double entityHitT = std::numeric_limits<double>::infinity();
+                jint entityHitId = -1;
+                for (std::uint32_t markerIndex = 0U;
+                     markerIndex < m_snapshot.entityMarkerCount; ++markerIndex) {
+                    const EntityMarker& marker =
+                        m_snapshot.entityMarkers[markerIndex];
+                    if (!marker.player) continue;
+                    constexpr double padding = 0.30;
+                    double entry = 0.0;
+                    double exit = 1.0;
+                    const auto clipAxis = [&](const double origin,
+                                              const double direction,
+                                              const double minimum,
+                                              const double maximum) noexcept {
+                        if (std::abs(direction) < 1.0e-9)
+                            return origin >= minimum && origin <= maximum;
+                        double first = (minimum - origin) / direction;
+                        double second = (maximum - origin) / direction;
+                        if (first > second) std::swap(first, second);
+                        entry = std::max(entry, first);
+                        exit = std::min(exit, second);
+                        return entry <= exit;
+                    };
+                    if (clipAxis(arrowX, velocityX,
+                                 marker.bounds.minX - padding,
+                                 marker.bounds.maxX + padding) &&
+                        clipAxis(arrowY, velocityY,
+                                 marker.bounds.minY - padding,
+                                 marker.bounds.maxY + padding) &&
+                        clipAxis(arrowZ, velocityZ,
+                                 marker.bounds.minZ - padding,
+                                 marker.bounds.maxZ + padding) &&
+                        entry >= 0.0 && entry <= 1.0 && entry < entityHitT) {
+                        entityHitT = entry;
+                        entityHitId = marker.entityId;
+                    }
+                }
+
+                // Traverse only the voxels actually crossed by this segment.
+                // This is both exact at block boundaries and an order of
+                // magnitude cheaper than issuing JNI isAirBlock calls every
+                // fraction of a block.
+                int voxelX = static_cast<int>(std::floor(arrowX));
+                int voxelY = static_cast<int>(std::floor(arrowY));
+                int voxelZ = static_cast<int>(std::floor(arrowZ));
+                const int endX = static_cast<int>(std::floor(nextX));
+                const int endY = static_cast<int>(std::floor(nextY));
+                const int endZ = static_cast<int>(std::floor(nextZ));
+                const int stepX = velocityX > 0.0 ? 1 : velocityX < 0.0 ? -1 : 0;
+                const int stepY = velocityY > 0.0 ? 1 : velocityY < 0.0 ? -1 : 0;
+                const int stepZ = velocityZ > 0.0 ? 1 : velocityZ < 0.0 ? -1 : 0;
+                const double infinity = std::numeric_limits<double>::infinity();
+                double maxTX = stepX > 0 ? (voxelX + 1.0 - arrowX) / velocityX
+                    : stepX < 0 ? (arrowX - voxelX) / -velocityX : infinity;
+                double maxTY = stepY > 0 ? (voxelY + 1.0 - arrowY) / velocityY
+                    : stepY < 0 ? (arrowY - voxelY) / -velocityY : infinity;
+                double maxTZ = stepZ > 0 ? (voxelZ + 1.0 - arrowZ) / velocityZ
+                    : stepZ < 0 ? (arrowZ - voxelZ) / -velocityZ : infinity;
+                const double deltaTX = stepX == 0 ? infinity : 1.0 / std::abs(velocityX);
+                const double deltaTY = stepY == 0 ? infinity : 1.0 / std::abs(velocityY);
+                const double deltaTZ = stepZ == 0 ? infinity : 1.0 / std::abs(velocityZ);
+                double blockHitT = infinity;
+                for (int crossing = 0; crossing < 32 &&
+                     (voxelX != endX || voxelY != endY || voxelZ != endZ);
+                     ++crossing) {
+                    double crossingT = 0.0;
+                    if (maxTX <= maxTY && maxTX <= maxTZ) {
+                        crossingT = maxTX;
+                        maxTX += deltaTX;
+                        voxelX += stepX;
+                    } else if (maxTY <= maxTZ) {
+                        crossingT = maxTY;
+                        maxTY += deltaTY;
+                        voxelY += stepY;
+                    } else {
+                        crossingT = maxTZ;
+                        maxTZ += deltaTZ;
+                        voxelZ += stepZ;
+                    }
+                    if (crossingT > 1.0) break;
+                    bool air = true;
+                    if (blockIsAir(voxelX + 0.5, voxelY + 0.5,
+                                   voxelZ + 0.5, air) && !air) {
+                        blockHitT = std::clamp(crossingT, 0.0, 1.0);
+                        break;
+                    }
+                }
+                const double hitT = std::min(entityHitT, blockHitT);
+                if (std::isfinite(hitT)) {
+                    trajectory.hasImpact = true;
+                    trajectory.impactPlayer = entityHitT <= blockHitT;
+                    trajectory.impactEntityId = trajectory.impactPlayer
+                        ? entityHitId : -1;
+                    trajectory.impact = {
+                        arrowX + velocityX * hitT,
+                        arrowY + velocityY * hitT,
+                        arrowZ + velocityZ * hitT};
+                }
+                if (trajectory.hasImpact) {
+                    trajectory.points[trajectory.pointCount++] = trajectory.impact;
+                    break;
+                }
+                arrowX = nextX;
+                arrowY = nextY;
+                arrowZ = nextZ;
+                trajectory.points[trajectory.pointCount++] = {arrowX, arrowY, arrowZ};
+                velocityX *= 0.99;
+                velocityY = velocityY * 0.99 - 0.05;
+                velocityZ *= 0.99;
+            }
+        }
+        m_snapshot.bowTrajectory = trajectory;
     }
     m_snapshot.entitySampleGeneration = ++m_entitySampleGeneration;
 

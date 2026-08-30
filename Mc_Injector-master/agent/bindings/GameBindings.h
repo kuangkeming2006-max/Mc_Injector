@@ -25,6 +25,12 @@ struct AxisAlignedBox final {
     double maxZ = 0.0;
 };
 
+struct WorldPoint final {
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+};
+
 struct EntityMarker final {
     AxisAlignedBox bounds{};
     double previousX = 0.0;
@@ -33,6 +39,9 @@ struct EntityMarker final {
     double currentX = 0.0;
     double currentY = 0.0;
     double currentZ = 0.0;
+    double motionX = 0.0;
+    double motionY = 0.0;
+    double motionZ = 0.0;
     jint entityId = -1;
     float health = 0.0F;
     float maxHealth = 0.0F;
@@ -56,6 +65,26 @@ struct EntityMarker final {
     // OpenGL texture name owned by Minecraft's TextureManager in the same
     // context used by the SwapBuffers hook.  The agent never deletes it.
     std::uint32_t skinTextureId = 0U;
+};
+
+struct KnockbackTrajectory final {
+    static constexpr std::size_t MaxPoints = 48U;
+    jint entityId = -1;
+    AxisAlignedBox startBounds{};
+    std::array<WorldPoint, MaxPoints> points{};
+    std::uint8_t pointCount = 0U;
+    bool landed = false;
+};
+
+struct BowTrajectory final {
+    static constexpr std::size_t MaxPoints = 96U;
+    std::array<WorldPoint, MaxPoints> points{};
+    std::uint8_t pointCount = 0U;
+    WorldPoint impact{};
+    jint impactEntityId = -1;
+    bool hasImpact = false;
+    bool impactPlayer = false;
+    bool active = false;
 };
 
 struct BedDefenseBlock final {
@@ -105,6 +134,7 @@ struct GameSnapshot final {
     static constexpr std::size_t MaxEntityMarkers = 128U;
     static constexpr std::size_t MaxBedMarkers = 128U;
     static constexpr std::size_t MaxDiscoveredPlayers = 64U;
+    static constexpr std::size_t MaxKnockbackTrajectories = 12U;
     enum class State : std::uint8_t {
         Resolving,
         Unsupported,
@@ -132,6 +162,10 @@ struct GameSnapshot final {
     // renderer combines this with renderPartialTicks to detect a game-tick
     // boundary that happened between two snapshots and briefly extrapolate it.
     std::uint64_t entitySampleGeneration = 0U;
+    std::array<KnockbackTrajectory, MaxKnockbackTrajectories>
+        knockbackTrajectories{};
+    std::uint8_t knockbackTrajectoryCount = 0U;
+    BowTrajectory bowTrajectory{};
     std::array<BedMarker, MaxBedMarkers> bedMarkers{};
     std::uint32_t bedMarkerCount = 0U;
     std::uint32_t bedCount = 0U;
@@ -387,6 +421,10 @@ private:
     std::uint8_t m_safewalkSupportMask = 0U;
     std::uint64_t m_safewalkReleaseAt = 0U;
     jint m_aimTargetEntityId = -1;
+    jint m_aimFilteredTargetEntityId = -1;
+    float m_aimFilteredYaw = 0.0F;
+    float m_aimFilteredPitch = 0.0F;
+    bool m_aimFilterInitialized = false;
     std::uint64_t m_lastScaffoldPlacementTick = 0U;
     // Scaffold keeps the last supported block layer while the player is in
     // the air. Recomputing this from minY during a jump raises the target one
@@ -397,6 +435,8 @@ private:
     std::uint64_t m_lastLongJumpTick = 0U;
     bool m_aimSensitivityModified = false;
     float m_originalMouseSensitivity = 0.5F;
+    std::uint64_t m_bowDrawStartedAt = 0U;
+    std::uint64_t m_lastBowTrajectoryAt = 0U;
 };
 
 } // namespace mcoverlay

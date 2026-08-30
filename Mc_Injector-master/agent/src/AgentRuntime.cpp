@@ -227,7 +227,7 @@ FeatureSettings unpackFeatures(const std::uint32_t bits,
     s.hypixelRailColor = hypixelRailColor & 0xFFFFFFU;
     s.hypixelRailOpacity = std::clamp(hypixelRailOpacity, 0, 100);
     s.safewalkReleaseDelayMs = std::clamp(safewalkReleaseDelayMs, 0, 750);
-    s.safewalkEdgeSensitivity = std::clamp(safewalkEdgeSensitivity, 0, 95);
+    s.safewalkEdgeSensitivity = std::clamp(safewalkEdgeSensitivity, 0, 100);
     s.safewalkMinimumPitch = std::clamp(safewalkMinimumPitch, -90, 90);
     s.safewalkHotkey = std::clamp(safewalkHotkey, 8, 254);
     s.flySpeedPercent = std::clamp(flySpeedPercent, 10, 500);
@@ -1123,7 +1123,7 @@ void AgentRuntime::queueFeatureChanged(const FeatureSettings& settings) noexcept
         std::clamp(settings.safewalkReleaseDelayMs, 0, 750),
         std::memory_order_release);
     m_safewalkEdgeSensitivity.store(
-        std::clamp(settings.safewalkEdgeSensitivity, 0, 95),
+        std::clamp(settings.safewalkEdgeSensitivity, 0, 100),
         std::memory_order_release);
     m_safewalkMinimumPitch.store(
         std::clamp(settings.safewalkMinimumPitch, -90, 90),
@@ -1221,7 +1221,7 @@ void AgentRuntime::queueFeatureChanged(const FeatureSettings& settings) noexcept
         std::clamp(settings.safewalkReleaseDelayMs, 0, 750),
         std::memory_order_relaxed);
     m_featureChangedSafewalkEdgeSensitivity.store(
-        std::clamp(settings.safewalkEdgeSensitivity, 0, 95),
+        std::clamp(settings.safewalkEdgeSensitivity, 0, 100),
         std::memory_order_relaxed);
     m_featureChangedSafewalkMinimumPitch.store(
         std::clamp(settings.safewalkMinimumPitch, -90, 90),
@@ -1477,7 +1477,7 @@ bool AgentRuntime::handleControlLine(const std::string_view line) noexcept
             hypixelRailColor > 0xFFFFFFU ||
             hypixelRailOpacity < 0 || hypixelRailOpacity > 100 ||
             safewalkReleaseDelayMs < 0 || safewalkReleaseDelayMs > 750 ||
-            safewalkEdgeSensitivity < 0 || safewalkEdgeSensitivity > 95 ||
+            safewalkEdgeSensitivity < 0 || safewalkEdgeSensitivity > 100 ||
             safewalkMinimumPitch < -90 || safewalkMinimumPitch > 90 ||
             safewalkHotkey < 8 || safewalkHotkey > 254 ||
             flySpeedPercent < 10 || flySpeedPercent > 500 ||
